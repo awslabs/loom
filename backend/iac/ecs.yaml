@@ -1,0 +1,514 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: ECS Fargate service for Loom backend (requires loom-ecs-cluster, loom-infra, and loom-rds stacks)
+
+Parameters:
+  pEcsClusterArn:
+    Type: String
+    Description: ECS cluster ARN (from loom-ecs-cluster stack output oEcsClusterArn)
+  pEcsClusterName:
+    Type: String
+    Description: ECS cluster name (from loom-ecs-cluster stack output oEcsClusterName)
+  pEcsSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group ID for ECS tasks (from infra stack output oEcsSecurityGroupId)
+  pTargetGroupArn:
+    Type: String
+    Description: ARN of the backend ALB target group (from infra stack output oBackendTargetGroupArn)
+  pPrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs for backend ECS tasks (with RDS access)
+  pImageUri:
+    Type: String
+    Description: ECR image URI for the backend container
+  pCpu:
+    Type: String
+    Description: CPU units for backend task (1024 = 1 vCPU)
+    Default: "1024"
+  pMemory:
+    Type: String
+    Description: Memory in MiB for backend task (2048 = 2 GB)
+    Default: "2048"
+  pDesiredCount:
+    Type: Number
+    Description: Desired number of backend tasks
+    Default: 1
+  pMaxCount:
+    Type: Number
+    Description: Maximum number of backend tasks for auto-scaling
+    Default: 4
+  pDatabaseSecretArn:
+    Type: String
+    Description: Secrets Manager ARN containing the DB URL (from RDS stack output oRdsSecretArn)
+  pArtifactBucket:
+    Type: String
+    Description: S3 bucket name for agent deployments
+  pCognitoUserPoolId:
+    Type: String
+    Description: Cognito User Pool ID
+    Default: ""
+  pCognitoRegion:
+    Type: String
+    Description: AWS region for Cognito User Pool (defaults to deployment region if left empty)
+    Default: ""
+  pAllowedOrigins:
+    Type: String
+    Description: Comma-separated CORS origins
+    Default: ""
+  pRegistryId:
+    Type: String
+    Description: Agent Registry ID (from bedrock-agentcore-control list-registries)
+    Default: ""
+  pEcrKmsKeyArn:
+    Type: String
+    Description: ARN of the KMS key used to encrypt ECR repositories (from infra stack output oEcrKmsKeyArn)
+  pSecretsKmsKeyArn:
+    Type: String
+    Description: ARN of the KMS key used to encrypt Secrets Manager secrets (from rds stack output oSecretsKmsKeyArn)
+  pTagApplication:
+    Type: String
+    Description: Value for the loom:application tag
+  pTagGroup:
+    Type: String
+    Description: Value for the loom:group tag
+  pTagOwner:
+    Type: String
+    Description: Value for the loom:owner tag
+
+Conditions:
+  CognitoRegionEmpty: !Equals [!Ref pCognitoRegion, ""]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # KMS — CloudWatch Logs encryption key
+  # ---------------------------------------------------------------------------
+  LogsKmsKey:
+    Type: AWS::KMS::Key
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - EA017
+    Properties:
+      Description: KMS key for backend CloudWatch Logs encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogsService
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: "*"
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Log Group
+  # ---------------------------------------------------------------------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${AWS::StackName}/backend"
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt LogsKmsKey.Arn
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  # ---------------------------------------------------------------------------
+  # IAM — ECS Task Execution Role
+  # ---------------------------------------------------------------------------
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - EA017
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-exec-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EcrPullPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: "*"
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt LogGroup.Arn
+                  - !Sub "${LogGroup.Arn}:*"
+        - PolicyName: SecretsManagerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref pDatabaseSecretArn
+        - PolicyName: EcrKmsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref pEcrKmsKeyArn
+        - PolicyName: SecretsKmsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !Ref pSecretsKmsKeyArn
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  # ---------------------------------------------------------------------------
+  # IAM — Backend Task Role
+  # ---------------------------------------------------------------------------
+  TaskRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - EA017
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-task-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BedrockPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:CountTokens
+                Resource:
+                  - arn:aws:bedrock:*:*:inference-profile/*
+                  - arn:aws:bedrock:*::foundation-model/*
+        - PolicyName: BedrockAgentCorePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:*
+                Resource: !Sub "arn:aws:bedrock-agentcore:*:${AWS::AccountId}:*"
+        - PolicyName: BedrockAgentCoreControlPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore-control:GetRegistry
+                  - bedrock-agentcore-control:CreateRegistryRecord
+                  - bedrock-agentcore-control:GetRegistryRecord
+                  - bedrock-agentcore-control:ListRegistryRecords
+                  - bedrock-agentcore-control:SubmitRegistryRecordForApproval
+                  - bedrock-agentcore-control:UpdateRegistryRecordStatus
+                  - bedrock-agentcore-control:UpdateRegistryRecord
+                  - bedrock-agentcore-control:DeleteRegistryRecord
+                Resource: !Sub "arn:aws:bedrock-agentcore-control:*:${AWS::AccountId}:registry/*"
+        - PolicyName: S3ArtifactPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${pArtifactBucket}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::${pArtifactBucket}"
+        - PolicyName: S3LoomBucketsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: "arn:aws:s3:::loom-*/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: "arn:aws:s3:::loom-*"
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/vendedlogs/bedrock-agentcore/*"
+        - PolicyName: IamPassRolePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                  - iam:GetRole
+                  - iam:ListRolePolicies
+                  - iam:GetRolePolicy
+                  - iam:ListRoleTags
+                  - iam:ListAttachedRolePolicies
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/loom-*"
+        - PolicyName: SecretsManagerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref pDatabaseSecretArn
+              # OAuth2 credential providers store secrets in Secrets Manager
+              # under the bedrock-agentcore-identity! prefix. The control plane
+              # API needs this access when creating/deleting credential providers.
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:PutSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:*:${AWS::AccountId}:secret:bedrock-agentcore-identity!*"
+              # Loom-managed secrets for MCP server API keys (admin and per-user).
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:PutSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:*:${AWS::AccountId}:secret:loom/*"
+        - PolicyName: SecretsKmsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref pSecretsKmsKeyArn
+        - PolicyName: CognitoPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:ListUserPools
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminListGroupsForUser
+                  - cognito-idp:ListUsers
+                  - cognito-idp:ListUsersInGroup
+                  - cognito-idp:ListGroups
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:DescribeUserPool
+                Resource: !Sub "arn:aws:cognito-idp:*:${AWS::AccountId}:userpool/*"
+        - PolicyName: CloudFormationPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:ListStacks
+                Resource: !Sub "arn:aws:cloudformation:*:${AWS::AccountId}:stack/loom-role-*"
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  # ---------------------------------------------------------------------------
+  # ECS Task Definition
+  # ---------------------------------------------------------------------------
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${AWS::StackName}-backend"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref pCpu
+      Memory: !Ref pMemory
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Ref pImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backend
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: LOOM_ARTIFACT_BUCKET
+              Value: !Ref pArtifactBucket
+            - Name: LOOM_COGNITO_USER_POOL_ID
+              Value: !Ref pCognitoUserPoolId
+            - Name: LOOM_COGNITO_REGION
+              Value: !If
+                - CognitoRegionEmpty
+                - !Ref AWS::Region
+                - !Ref pCognitoRegion
+            - Name: LOOM_ALLOWED_ORIGINS
+              Value: !Ref pAllowedOrigins
+            - Name: LOOM_REGISTRY_ID
+              Value: !Ref pRegistryId
+            - Name: LOG_LEVEL
+              Value: info
+          Secrets:
+            - Name: LOOM_DATABASE_URL
+              ValueFrom: !Sub "${pDatabaseSecretArn}:url::"
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  # ---------------------------------------------------------------------------
+  # ECS Service
+  # ---------------------------------------------------------------------------
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub "${AWS::StackName}-svc"
+      Cluster: !Ref pEcsClusterArn
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref pDesiredCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref pPrivateSubnetIds
+          SecurityGroups:
+            - !Ref pEcsSecurityGroupId
+      LoadBalancers:
+        - ContainerName: backend
+          ContainerPort: 8000
+          TargetGroupArn: !Ref pTargetGroupArn
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  # ---------------------------------------------------------------------------
+  # Backend Auto-Scaling
+  # ---------------------------------------------------------------------------
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !Ref pMaxCount
+      MinCapacity: 1
+      ResourceId: !Sub "service/${pEcsClusterName}/${Service.Name}"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-cpu-scaling"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+Outputs:
+  oServiceName:
+    Description: Backend ECS service name
+    Value: !GetAtt Service.Name

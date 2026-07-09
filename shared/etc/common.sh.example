@@ -1,0 +1,38 @@
+# AWS Configurations
+AWS_PROFILE=<your-aws-cli-profile>
+AWS_REGION=us-east-1
+
+export AWS_PROFILE
+
+PROFILE=${AWS_PROFILE}
+REGION=${AWS_REGION}
+ACCOUNTID=<your-aws-account-id>
+BUCKET=<your-sam-deployment-bucket>
+
+# Networking configurations
+VPC_ID=<your-vpc-id>
+PRIVATE_SUBNET_IDS=<comma-separated-list-of-private-subnet-ids>
+PUBLIC_SUBNET_IDS=<comma-separated-list-of-public-subnet-ids>
+PUBLIC_FQDN=<public-endpoint-fqdn>
+RDS_ALLOWED_CIDR=<cidr-block-allowed-to-connect-to-rds>
+
+# Security configurations
+COGNITO_POOL_NAME=<your-desired-cognito-pool-name>
+COGNITO_DOMAIN=<your-desired-cognito-domain>
+
+# Loom configurations
+LOOM_ARTIFACT_BUCKET=<your-loom-deployment-bucket>
+LOOM_LOGGING_BUCKET=<your-pre-existing-s3-access-logging-bucket>
+
+# Passwords
+RDS_PASSWORD=<unique-password-for-rds-admin>
+SUPER_ADMIN_PASSWORD=<unique-password-for-super-admin>
+DEMO_USER_1_PASSWORD=<unique-password-for-demo-1>
+DEMO_USER_2_PASSWORD=<unique-password-for-demo-2>
+DEMO_USER_3_PASSWORD=<unique-password-for-demo-3>
+DEMO_USER_4_PASSWORD=<unique-password-for-demo-4>
+DEMO_USER_5_PASSWORD=<unique-password-for-demo-5>
+DEMO_USER_6_PASSWORD=<unique-password-for-demo-6>
+DEMO_USER_7_PASSWORD=<unique-password-for-demo-7>
+DEMO_USER_8_PASSWORD=<unique-password-for-demo-8>
+DEMO_USER_9_PASSWORD=<unique-password-for-demo-9>

@@ -1,0 +1,98 @@
+# Copy this file to environment.sh and update all values marked with <...>
+# cp etc/environment.sh.example etc/environment.sh
+
+# Resource tagging
+P_TAG_APPLICATION=backend
+P_TAG_GROUP=loom
+P_TAG_OWNER=<your-owner-alias-or-email>
+
+# General configurations
+LOG_LEVEL=info
+
+# Loom configurations
+# SQLite for local development:
+LOOM_DATABASE_URL=sqlite:///./loom.db
+# PostgreSQL via RDS Proxy for cloud deployments (comment out SQLite line above and uncomment below):
+# LOOM_DATABASE_HOST=localhost
+# LOOM_DATABASE_HOST=$(O_RDS_PROXY_ENDPOINT)
+# LOOM_DATABASE_URL=postgresql+psycopg2://$(P_RDS_USERNAME):$(P_RDS_PASSWORD)@$(LOOM_DATABASE_HOST):$(O_RDS_PORT)/$(P_RDS_DB_NAME)
+LOOM_BACKEND_PORT=8000
+LOOM_FRONTEND_PORT=5173
+
+# Cognito user authentication (from Cognito stack outputs)
+LOOM_COGNITO_USER_POOL_ID=$(O_COGNITO_USER_POOL_ID)
+LOOM_COGNITO_USER_CLIENT_ID=$(O_COGNITO_USER_CLIENT_ID)
+LOOM_COGNITO_REGION=${AWS_REGION}
+
+# CORS allowed origins for deployed environments (comma-separated, e.g. https://loom.example.com)
+LOOM_ALLOWED_ORIGINS=
+
+# Agent Registry (from bedrock-agentcore-control list-registries output)
+LOOM_REGISTRY_ID=
+
+# Exports
+export AWS_PROFILE
+export AWS_REGION
+export LOOM_ARTIFACT_BUCKET
+export LOOM_DATABASE_URL
+export LOOM_BACKEND_PORT
+export LOOM_FRONTEND_PORT
+export LOOM_COGNITO_USER_POOL_ID
+export LOOM_COGNITO_USER_CLIENT_ID
+export LOOM_COGNITO_REGION
+export LOOM_ALLOWED_ORIGINS
+export LOOM_REGISTRY_ID
+
+# RDS stack configuration
+P_RDS_STACK=loom-rds
+P_RDS_TEMPLATE=iac/rds.yaml
+P_RDS_OUTPUT=iac/rds_output.yaml
+
+# RDS instance parameters
+P_RDS_DB_NAME=loom
+P_RDS_USERNAME=loom
+P_RDS_PASSWORD=$(RDS_PASSWORD)
+P_RDS_INSTANCE_CLASS=db.t3.small
+P_RDS_ALLOCATED_STORAGE=20
+P_RDS_MULTI_AZ=true
+P_RDS_ENABLE_PROXY=true
+
+# RDS networking (from your VPC)
+P_RDS_VPC_ID=$(VPC_ID)
+P_RDS_PRIVATE_SUBNET_IDS=$(PRIVATE_SUBNET_IDS)
+P_RDS_ALLOWED_CIDR=$(RDS_ALLOWED_CIDR)
+
+# EC2 stack configuration (SSM tunnel)
+P_EC2_STACK=loom-ec2
+P_EC2_TEMPLATE=iac/ec2.yaml
+P_EC2_OUTPUT=iac/ec2_output.yaml
+P_EC2_INSTANCE_TYPE=t3.micro
+P_EC2_PUBLIC_SUBNET_ID=$(shell echo "$(PUBLIC_SUBNET_IDS)" | cut -d, -f1)
+
+# ECS backend stack configuration
+P_ECS_BACKEND_STACK=loom-ecs-backend
+P_ECS_BACKEND_TEMPLATE=iac/ecs.yaml
+P_ECS_BACKEND_OUTPUT=iac/ecs_output.yaml
+
+# ECS backend parameters
+P_ECS_PRIVATE_SUBNET_IDS=$(PRIVATE_SUBNET_IDS)
+P_ECS_BACKEND_CPU=1024
+P_ECS_BACKEND_MEMORY=2048
+P_ECS_BACKEND_DESIRED_COUNT=3
+P_ECS_BACKEND_MAX_COUNT=4
+
+# Loom configurations (passed to ECS task environment)
+P_LOOM_COGNITO_REGION=$(REGION)
+P_LOOM_ALLOWED_ORIGINS=$(LOOM_ALLOWED_ORIGINS)
+P_LOOM_ARTIFACT_BUCKET=$(LOOM_ARTIFACT_BUCKET)
+
+# AgentCore memory queries (used by make agentcore.memory.* targets)
+P_MEMORY_ID=<your-memory-id>
+P_MEMORY_ACTOR_ID=<cognito-username-or-sub>
+P_MEMORY_NAMESPACE=<namespace-e.g.-/strategy/strat-id/actor/actor-id/>
+
+# Common configurations
+include ../shared/etc/common.sh
+
+# Stack outputs
+include ../shared/etc/outputs.sh

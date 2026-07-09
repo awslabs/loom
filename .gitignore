@@ -1,0 +1,22 @@
+# directories
+__pycache__
+.claude/worktrees
+.pytest_cache
+.venv
+node_modules
+dist
+build
+tmp
+
+# files
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+common*.sh
+environment*.sh
+outputs*.sh
+!outputs.sh.example
+loom.db
+notes.md
+*_output.yaml

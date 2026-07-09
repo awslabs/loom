@@ -1,0 +1,239 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Security group for Loom AgentCore Runtime agents deployed in VPC network mode.
+  Allows inbound traffic on ports agents typically receive (HTTPS 443, HTTP 80,
+  MCP 3000, A2A 8080), with configurable ingress from a CIDR range and/or a
+  peer security group per port family. All outbound traffic is permitted so
+  agents can reach VPC-internal resources (RDS, ElastiCache, internal APIs)
+  and AWS service endpoints. To allow multiple CIDRs for the same port, deploy
+  additional ingress rules against the exported security group ID.
+
+Parameters:
+  pStackName:
+    Type: String
+    Default: loom-agent-sg
+    Description: Logical name used for the security group Name tag and stack exports
+  pVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where the security group will be created
+
+  # ---------------------------------------------------------------------------
+  # Inbound CIDR — one CIDR string per port family (leave empty to omit)
+  # To allow multiple CIDRs for the same port, add additional rules via the
+  # AWS console or CLI using the exported oSecurityGroupId.
+  # ---------------------------------------------------------------------------
+  pAllowHttpsCidr:
+    Type: String
+    Default: ""
+    Description: >
+      CIDR range allowed to reach agents on port 443 (HTTPS / AgentCore Runtime
+      TLS endpoint). Example: 10.0.0.0/8. Leave empty to omit.
+  pAllowHttpCidr:
+    Type: String
+    Default: ""
+    Description: >
+      CIDR range allowed to reach agents on port 80 (HTTP health-check probes,
+      e.g. from an NLB). Leave empty to omit.
+  pAllowMcpCidr:
+    Type: String
+    Default: ""
+    Description: >
+      CIDR range allowed to reach agents on port 3000 (MCP Streamable HTTP /
+      SSE transport). Leave empty to omit.
+  pAllowA2aCidr:
+    Type: String
+    Default: ""
+    Description: >
+      CIDR range allowed to reach agents on port 8080 (A2A JSON-RPC over HTTP).
+      Leave empty to omit.
+
+  # ---------------------------------------------------------------------------
+  # Inbound peer security groups — one source SG per port family
+  # ---------------------------------------------------------------------------
+  pAllowHttpsFromSg:
+    Type: String
+    Default: ""
+    Description: >
+      Security group ID whose members may reach agents on port 443.
+      Typical sources: NLB ENIs, bastion hosts, peered service SGs.
+      Leave empty to omit.
+  pAllowHttpFromSg:
+    Type: String
+    Default: ""
+    Description: >
+      Security group ID whose members may reach agents on port 80 (health checks).
+      Leave empty to omit.
+  pAllowMcpFromSg:
+    Type: String
+    Default: ""
+    Description: >
+      Security group ID whose members may reach agents on port 3000 (MCP).
+      Leave empty to omit.
+  pAllowA2aFromSg:
+    Type: String
+    Default: ""
+    Description: >
+      Security group ID whose members may reach agents on port 8080 (A2A).
+      Leave empty to omit.
+
+  # ---------------------------------------------------------------------------
+  # Tags
+  # ---------------------------------------------------------------------------
+  pTagApplication:
+    Type: String
+    Description: Value for the loom:application tag
+
+  pTagGroup:
+    Type: String
+    Description: Value for the loom:group tag
+
+  pTagOwner:
+    Type: String
+    Description: Value for the loom:owner tag
+
+Conditions:
+  HasHttpsCidr:   !Not [!Equals [!Ref pAllowHttpsCidr, ""]]
+  HasHttpCidr:    !Not [!Equals [!Ref pAllowHttpCidr, ""]]
+  HasMcpCidr:     !Not [!Equals [!Ref pAllowMcpCidr, ""]]
+  HasA2aCidr:     !Not [!Equals [!Ref pAllowA2aCidr, ""]]
+  HasHttpsSg:     !Not [!Equals [!Ref pAllowHttpsFromSg, ""]]
+  HasHttpSg:      !Not [!Equals [!Ref pAllowHttpFromSg, ""]]
+  HasMcpSg:       !Not [!Equals [!Ref pAllowMcpFromSg, ""]]
+  HasA2aSg:       !Not [!Equals [!Ref pAllowA2aFromSg, ""]]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Security group — no inline ingress rules; each is a separate conditional
+  # resource so only enabled rules are created.
+  # ---------------------------------------------------------------------------
+  AgentSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${pStackName}"
+      GroupDescription: "Loom AgentCore Runtime agents - inbound HTTPS 443, HTTP 80, MCP 3000, A2A 8080"
+      VpcId: !Ref pVpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+          Description: Allow all outbound (agents reach VPC resources and AWS endpoints)
+      Tags:
+        - Key: Name
+          Value: !Sub "${pStackName}"
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  # ---------------------------------------------------------------------------
+  # HTTPS (443) — AgentCore Runtime TLS / HTTP invocation endpoint
+  # ---------------------------------------------------------------------------
+  IngressHttpsCidr:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasHttpsCidr
+    Properties:
+      GroupId: !Ref AgentSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: !Ref pAllowHttpsCidr
+      Description: !Sub "HTTPS ingress from ${pAllowHttpsCidr}"
+  IngressHttpsSg:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasHttpsSg
+    Properties:
+      GroupId: !Ref AgentSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref pAllowHttpsFromSg
+      Description: !Sub "HTTPS ingress from security group ${pAllowHttpsFromSg}"
+
+  # ---------------------------------------------------------------------------
+  # HTTP (80) — health-check probes (e.g. NLB target health, ALB /health)
+  # ---------------------------------------------------------------------------
+  IngressHttpCidr:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasHttpCidr
+    Properties:
+      GroupId: !Ref AgentSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: !Ref pAllowHttpCidr
+      Description: !Sub "HTTP ingress from ${pAllowHttpCidr} (health checks)"
+  IngressHttpSg:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasHttpSg
+    Properties:
+      GroupId: !Ref AgentSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref pAllowHttpFromSg
+      Description: !Sub "HTTP ingress from security group ${pAllowHttpFromSg}"
+
+  # ---------------------------------------------------------------------------
+  # MCP (3000) — Model Context Protocol Streamable HTTP / SSE transport
+  # ---------------------------------------------------------------------------
+  IngressMcpCidr:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasMcpCidr
+    Properties:
+      GroupId: !Ref AgentSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      CidrIp: !Ref pAllowMcpCidr
+      Description: !Sub "MCP (port 3000) ingress from ${pAllowMcpCidr}"
+
+  IngressMcpSg:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasMcpSg
+    Properties:
+      GroupId: !Ref AgentSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      SourceSecurityGroupId: !Ref pAllowMcpFromSg
+      Description: !Sub "MCP ingress from security group ${pAllowMcpFromSg}"
+
+  # ---------------------------------------------------------------------------
+  # A2A (8080) — Agent-to-Agent JSON-RPC over HTTP
+  # ---------------------------------------------------------------------------
+  IngressA2aCidr:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasA2aCidr
+    Properties:
+      GroupId: !Ref AgentSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      CidrIp: !Ref pAllowA2aCidr
+      Description: !Sub "A2A (port 8080) ingress from ${pAllowA2aCidr}"
+  IngressA2aSg:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasA2aSg
+    Properties:
+      GroupId: !Ref AgentSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref pAllowA2aFromSg
+      Description: !Sub "A2A ingress from security group ${pAllowA2aFromSg}"
+
+Outputs:
+  oSecurityGroupId:
+    Description: >
+      Security group ID — use this value when creating a VPC configuration in
+      Loom Settings → Networking. Also use it as a source SG for other stacks
+      that need to accept traffic from these agents.
+    Value: !Ref AgentSecurityGroup
+    Export:
+      Name: !Sub "${pStackName}-sg-id"
+  oVpcId:
+    Description: VPC ID the security group belongs to
+    Value: !Ref pVpcId
+    Export:
+      Name: !Sub "${pStackName}-vpc-id"

@@ -1,0 +1,7 @@
+strands-agents[a2a]>=0.1.0
+strands-agents-tools>=0.1.0
+bedrock-agentcore>=0.1.0
+boto3>=1.43.2
+mcp>=1.0.0
+opentelemetry-api>=1.25.0
+aws-opentelemetry-distro>=0.1.0

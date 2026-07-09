@@ -1,0 +1,354 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: RDS PostgreSQL database with optional RDS Proxy for Loom backend
+
+Parameters:
+  pDbName:
+    Type: String
+    Description: Name of the PostgreSQL database
+    Default: loom
+  pDbUsername:
+    Type: String
+    Description: Admin username for the RDS instance
+    Default: loom
+  pDbPassword:
+    Type: String
+    Description: Admin password for the RDS instance
+    NoEcho: true
+  pDbInstanceClass:
+    Type: String
+    Description: RDS instance class
+    Default: db.t3.small
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+      - db.t3.large
+      - db.r6g.large
+      - db.r6g.xlarge
+  pDbAllocatedStorage:
+    Type: Number
+    Description: Allocated storage in GB
+    Default: 20
+    MinValue: 20
+    MaxValue: 1000
+  pDbMultiAZ:
+    Type: String
+    Description: Enable Multi-AZ deployment for high availability
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  pEnableProxy:
+    Type: String
+    Description: Enable RDS Proxy for connection pooling
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  pVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for the RDS security group
+  pSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet IDs for the DB subnet group (at least two, in different AZs)
+  pAllowedCidr:
+    Type: String
+    Description: CIDR block allowed to connect to the RDS instance on port 5432
+    Default: 10.0.0.0/8
+  pTagApplication:
+    Type: String
+    Description: Value for the loom:application tag
+  pTagGroup:
+    Type: String
+    Description: Value for the loom:group tag
+  pTagOwner:
+    Type: String
+    Description: Value for the loom:owner tag
+
+Conditions:
+  ProxyEnabled: !Equals [!Ref pEnableProxy, "true"]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Networking
+  # ---------------------------------------------------------------------------
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow PostgreSQL access to the Loom RDS instance
+      VpcId: !Ref pVpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref pAllowedCidr
+          Description: Allow PostgreSQL access from ECS tasks within the VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-rds-sg"
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  RdsSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for Loom RDS instance
+      SubnetIds: !Ref pSubnetIds
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  # ---------------------------------------------------------------------------
+  # KMS — Secrets Manager encryption key
+  # ---------------------------------------------------------------------------
+  SecretsKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for Secrets Manager secrets in the RDS stack
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*" # cfn-lint disable=EA017 - AWS-recommended root admin statement to prevent unrecoverable key lockout
+            Resource: "*"
+          - Sid: AllowSecretsManagerService
+            Effect: Allow
+            Principal:
+              Service: secretsmanager.amazonaws.com
+            Action:
+              - kms:GenerateDataKey
+              - kms:Decrypt
+            Resource: "*"
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  SecretsKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${AWS::StackName}-secrets"
+      TargetKeyId: !Ref SecretsKmsKey
+
+  # ---------------------------------------------------------------------------
+  # Secrets Manager — credentials (required by RDS Proxy) and connection URL
+  # ---------------------------------------------------------------------------
+  RdsCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${AWS::StackName}/credentials"
+      Description: RDS master credentials used by RDS Proxy for authentication
+      KmsKeyId: !Ref SecretsKmsKey
+      SecretString: !Sub '{"username":"${pDbUsername}","password":"${pDbPassword}"}'
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  # ---------------------------------------------------------------------------
+  # RDS Instance
+  # ---------------------------------------------------------------------------
+  RdsMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-monitoring-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  RdsInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBName: !Ref pDbName
+      DBInstanceClass: !Ref pDbInstanceClass
+      Engine: postgres
+      EngineVersion: "15"
+      MasterUsername: !Ref pDbUsername
+      MasterUserPassword: !Ref pDbPassword
+      AllocatedStorage: !Ref pDbAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      EnableIAMDatabaseAuthentication: true
+      MultiAZ: !Ref pDbMultiAZ
+      DBSubnetGroupName: !Ref RdsSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt RdsSecurityGroup.GroupId
+      BackupRetentionPeriod: 7
+      DeletionProtection: false
+      PubliclyAccessible: false
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RdsMonitoringRole.Arn
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  # ---------------------------------------------------------------------------
+  # RDS Proxy (conditional)
+  # ---------------------------------------------------------------------------
+  RdsProxyIamRole:
+    Type: AWS::IAM::Role
+    Condition: ProxyEnabled
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-proxy-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Ref RdsCredentialsSecret
+        - PolicyName: SecretsKmsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt SecretsKmsKey.Arn
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  RdsProxy:
+    Type: AWS::RDS::DBProxy
+    Condition: ProxyEnabled
+    DependsOn: RdsInstance
+    Properties:
+      DBProxyName: !Sub "${AWS::StackName}-proxy"
+      EngineFamily: POSTGRESQL
+      RoleArn: !GetAtt RdsProxyIamRole.Arn
+      Auth:
+        - AuthScheme: SECRETS
+          SecretArn: !Ref RdsCredentialsSecret
+          IAMAuth: DISABLED
+      VpcSubnetIds: !Ref pSubnetIds
+      VpcSecurityGroupIds:
+        - !GetAtt RdsSecurityGroup.GroupId
+      RequireTLS: false
+      IdleClientTimeout: 1800
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  RdsProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Condition: ProxyEnabled
+    Properties:
+      DBProxyName: !Ref RdsProxy
+      TargetGroupName: default
+      DBInstanceIdentifiers:
+        - !Ref RdsInstance
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 90
+        MaxIdleConnectionsPercent: 50
+        ConnectionBorrowTimeout: 120
+
+  # ---------------------------------------------------------------------------
+  # Connection URL secret (points to proxy when enabled, RDS directly otherwise)
+  # ---------------------------------------------------------------------------
+  RdsConnectionSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${AWS::StackName}/database-url"
+      Description: SQLAlchemy connection URL for the Loom backend (proxy endpoint when proxy is enabled)
+      KmsKeyId: !Ref SecretsKmsKey
+      SecretString: !Sub
+        - '{"url":"postgresql+psycopg2://${pDbUsername}:${pDbPassword}@${ConnectEndpoint}:5432/${pDbName}"}'
+        - ConnectEndpoint: !If
+            - ProxyEnabled
+            - !GetAtt RdsProxy.Endpoint
+            - !GetAtt RdsInstance.Endpoint.Address
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+Outputs:
+  oRdsEndpoint:
+    Description: RDS instance endpoint (direct connection, for admin use)
+    Value: !GetAtt RdsInstance.Endpoint.Address
+  oRdsPort:
+    Description: RDS instance port
+    Value: !GetAtt RdsInstance.Endpoint.Port
+  oRdsDbName:
+    Description: Database name
+    Value: !Ref pDbName
+  oProxyEndpoint:
+    Description: RDS Proxy endpoint (used by the application when proxy is enabled)
+    Condition: ProxyEnabled
+    Value: !GetAtt RdsProxy.Endpoint
+  oConnectEndpoint:
+    Description: Endpoint the application should connect to (proxy if enabled, RDS otherwise)
+    Value: !If
+      - ProxyEnabled
+      - !GetAtt RdsProxy.Endpoint
+      - !GetAtt RdsInstance.Endpoint.Address
+  oSecretsKmsKeyArn:
+    Description: ARN of the KMS key used to encrypt Secrets Manager secrets in this stack
+    Value: !GetAtt SecretsKmsKey.Arn
+  oRdsSecretArn:
+    Description: Secrets Manager ARN containing the full SQLAlchemy database URL
+    Value: !Ref RdsConnectionSecret
+  oRdsCredentialsSecretArn:
+    Description: Secrets Manager ARN containing the RDS credentials (used by RDS Proxy)
+    Value: !Ref RdsCredentialsSecret

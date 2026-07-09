@@ -1,0 +1,2 @@
+skip-check:
+  - CKV_AWS_260  # ALB security group requires open HTTPS ingress for public access; CidrIp is injected via parameter, not hardcoded

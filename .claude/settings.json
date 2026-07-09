@@ -1,0 +1,49 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_USE_BEDROCK": "1"
+  },
+  "defaultMode": "plan",
+  "permissions":{
+    "allow": [
+      "Bash(tmux capture-pane:*)",
+      "Bash(tmux list-panes:*)",
+      "Bash(tmux send-keys:*)",
+      "Bash(tmux kill-pane:*)",
+      "Bash(do tmux:*)",
+      "Bash(uv:*)",
+      "Bash(source:*)",
+      "Bash(make:*)",
+      "Bash(sqlite3:*)",
+      "Bash(npm create:*)",
+      "Bash(npm install:*)"
+    ],
+    "deny": []
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": " [ -n \"$TMUX_PANE\" ] && tty_path=$(tmux display-message -p -t \"$TMUX_PANE\" '#{pane_tty}') && printf '\\a' > \"$tty_path\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": " [ -n \"$TMUX_PANE\" ] && tty_path=$(tmux display-message -p -t \"$TMUX_PANE\" '#{pane_tty}') && printf '\\a' > \"$tty_path\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "teammateMode": "auto"
+}

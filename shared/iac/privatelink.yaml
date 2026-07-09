@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  PrivateLink ingress for Loom AgentCore Runtime agents.
+  Creates a Network Load Balancer (NLB) and VPC Endpoint Service so that
+  resources inside a VPC can invoke agents privately without traversing the
+  public internet. Managed separately by the networking team; Loom agents
+  assume the endpoint service already exists.
+
+Parameters:
+  pVpcId:
+    Type: String
+    Description: VPC ID where the NLB will be deployed
+  pPrivateSubnetIds:
+    Type: CommaDelimitedList
+    Description: Comma-separated list of private subnet IDs for the NLB
+  pAgentRuntimePort:
+    Type: Number
+    Default: 443
+    Description: Port that AgentCore Runtime listens on (forwarded by the NLB)
+  pStackName:
+    Type: String
+    Default: loom-privatelink
+    Description: Logical name used for resource naming
+  pTagApplication:
+    Type: String
+    Description: Value for the loom:application tag
+  pTagGroup:
+    Type: String
+    Description: Value for the loom:group tag
+  pTagOwner:
+    Type: String
+    Description: Value for the loom:owner tag
+  pLoggingBucketName:
+    Type: String
+    Description: Pre-existing S3 bucket for NLB access logs (created outside this stack)
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Network Load Balancer
+  # ---------------------------------------------------------------------------
+  NetworkLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${pStackName}-nlb"
+      Type: network
+      Scheme: internal
+      Subnets: !Ref pPrivateSubnetIds
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: "true"
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Ref pLoggingBucketName
+        - Key: access_logs.s3.prefix
+          Value: !Sub "nlb/${pStackName}"
+      Tags:
+        - Key: Name
+          Value: !Sub "${pStackName}-nlb"
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  NlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${pStackName}-tg"
+      VpcId: !Ref pVpcId
+      Protocol: TCP
+      Port: !Ref pAgentRuntimePort
+      TargetType: ip
+      HealthCheckProtocol: TCP
+      HealthCheckPort: !Sub "${pAgentRuntimePort}"
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  NlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref NetworkLoadBalancer
+      Protocol: TCP
+      Port: !Ref pAgentRuntimePort
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref NlbTargetGroup
+
+  # ---------------------------------------------------------------------------
+  # VPC Endpoint Service
+  # ---------------------------------------------------------------------------
+  VpcEndpointService:
+    Type: AWS::EC2::VPCEndpointService
+    Properties:
+      NetworkLoadBalancerArns:
+        - !Ref NetworkLoadBalancer
+      AcceptanceRequired: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${pStackName}-endpoint-service"
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+Outputs:
+  oNlbArn:
+    Description: ARN of the Network Load Balancer
+    Value: !Ref NetworkLoadBalancer
+  oNlbDnsName:
+    Description: DNS name of the Network Load Balancer
+    Value: !GetAtt NetworkLoadBalancer.DNSName
+  oVpcEndpointServiceId:
+    Description: ID of the VPC Endpoint Service
+    Value: !Ref VpcEndpointService
+  oVpcEndpointServiceName:
+    Description: Service name for consumers to use when creating a VPC endpoint (com.amazonaws.vpce.region.vpce-svc-xxx)
+    Value: !Sub "com.amazonaws.vpce.${AWS::Region}.${VpcEndpointService}"
+  oTargetGroupArn:
+    Description: ARN of the NLB target group (register AgentCore Runtime IPs here)
+    Value: !Ref NlbTargetGroup

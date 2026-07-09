@@ -1,0 +1,11 @@
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+sqlalchemy>=2.0.25
+psycopg2-binary>=2.9.0
+boto3>=1.43.2
+PyJWT[crypto]>=2.8.0
+pydantic>=2.6.0
+python-multipart>=0.0.9
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+httpx>=0.26.0

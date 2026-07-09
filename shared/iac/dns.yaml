@@ -1,0 +1,39 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Route 53 hosted zone for subdomain delegation
+
+Parameters:
+  pDomainName:
+    Type: String
+    Description: Subdomain name for the application (e.g. loom.example.com)
+  pTagApplication:
+    Type: String
+    Description: Value for the loom:application tag
+  pTagGroup:
+    Type: String
+    Description: Value for the loom:group tag
+  pTagOwner:
+    Type: String
+    Description: Value for the loom:owner tag
+
+Resources:
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref pDomainName
+      HostedZoneConfig:
+        Comment: !Sub "Loom subdomain hosted zone for ${pDomainName}"
+      HostedZoneTags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+Outputs:
+  oHostedZoneId:
+    Description: Route 53 hosted zone ID for the subdomain
+    Value: !Ref HostedZone
+  oNameServers:
+    Description: NS records for the subdomain hosted zone (add these as NS delegation in the parent zone)
+    Value: !Join [",", !GetAtt HostedZone.NameServers]

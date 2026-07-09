@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: IAM execution role for Bedrock AgentCore Code Interpreter sandboxes
+
+Parameters:
+  pRoleSuffix:
+    Type: String
+    Description: Sanitized agent name (underscores replaced with hyphens) for role naming
+  pCodeInterpreterRegions:
+    Type: String
+    Description: Region pattern for Code Interpreter resources (e.g. us-east-1 or *)
+    Default: "*"
+  pTagApplication:
+    Type: String
+    Description: Value for the loom:application tag
+  pTagGroup:
+    Type: String
+    Description: Value for the loom:group tag
+  pTagOwner:
+    Type: String
+    Description: Value for the loom:owner tag
+
+Resources:
+  CodeInterpreterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "loom-ci-role-${pRoleSuffix}"
+      Tags:
+        - Key: "loom:application"
+          Value: !Ref pTagApplication
+        - Key: "loom:group"
+          Value: !Ref pTagGroup
+        - Key: "loom:owner"
+          Value: !Ref pTagOwner
+        - Key: "loom:role_type"
+          Value: "code_interpreter"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Path: "/"
+      Policies:
+        - PolicyName: code-interpreter-sandbox
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::bedrock-agentcore-${AWS::AccountId}-${pCodeInterpreterRegions}-code-interpreter/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${pCodeInterpreterRegions}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/code-interpreter*"
+
+Outputs:
+  oCodeInterpreterRole:
+    Description: Code Interpreter IAM role name
+    Value: !Ref CodeInterpreterRole
+  oCodeInterpreterRoleArn:
+    Description: Code Interpreter IAM role ARN
+    Value: !GetAtt CodeInterpreterRole.Arn

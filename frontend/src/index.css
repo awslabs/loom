@@ -1,0 +1,422 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:is(:where(.dark, .dracula, .ayudark, .nord, .tokyonight) *));
+
+@theme inline {
+    --radius-sm: calc(var(--radius) - 4px);
+    --radius-md: calc(var(--radius) - 2px);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) + 4px);
+    --radius-2xl: calc(var(--radius) + 8px);
+    --radius-3xl: calc(var(--radius) + 12px);
+    --radius-4xl: calc(var(--radius) + 16px);
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    --color-card: var(--card);
+    --color-card-foreground: var(--card-foreground);
+    --color-popover: var(--popover);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-primary: var(--primary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-secondary: var(--secondary);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-muted: var(--muted);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-accent: var(--accent);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-destructive: var(--destructive);
+    --color-border: var(--border);
+    --color-input: var(--input);
+    --color-input-bg: var(--input-bg);
+    --color-ring: var(--ring);
+    --color-chart-1: var(--chart-1);
+    --color-chart-2: var(--chart-2);
+    --color-chart-3: var(--chart-3);
+    --color-chart-4: var(--chart-4);
+    --color-chart-5: var(--chart-5);
+    --color-sidebar: var(--sidebar);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-ring: var(--sidebar-ring);
+}
+
+/* Ayu Light (white + blue) */
+.ayu {
+    --background: #ffffff;
+    --foreground: #2b3040;
+    --card: #dce6f5;
+    --card-foreground: #2b3040;
+    --popover: #dce6f5;
+    --popover-foreground: #2b3040;
+    --primary: #3b82f6;
+    --primary-foreground: #ffffff;
+    --secondary: #dce6f5;
+    --secondary-foreground: #2b3040;
+    --muted: #dce6f5;
+    --muted-foreground: #5a6378;
+    --accent: #e8eefc;
+    --accent-foreground: #2b3040;
+    --destructive: #ef4444;
+    --border: #93a3c0;
+    --input: #93a3c0;
+    --input-bg: #ffffff;
+    --ring: #3b82f6;
+    --chart-1: #3b82f6;
+    --chart-2: #22c55e;
+    --chart-3: #f59e0b;
+    --chart-4: #8b5cf6;
+    --chart-5: #06b6d4;
+    --sidebar: #dce6f5;
+    --sidebar-foreground: #2b3040;
+    --sidebar-primary: #3b82f6;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #cdd8ed;
+    --sidebar-accent-foreground: #2b3040;
+    --sidebar-border: #93a3c0;
+    --sidebar-ring: #3b82f6;
+}
+
+/* Shared defaults */
+:root {
+    --radius: 0.5rem;
+}
+
+/* Catppuccin Latte (light) */
+:root:not(.ayu, .dark, .dracula, .everforest, .ayudark, .nord, .rosepine, .solarized, .tokyonight) {
+    --background: #eff1f5;
+    --foreground: #3c3f56;
+    --card: #ccd0da;
+    --card-foreground: #3c3f56;
+    --popover: #ccd0da;
+    --popover-foreground: #3c3f56;
+    --primary: #1e66f5;
+    --primary-foreground: #dce0e8;
+    --secondary: #ccd0da;
+    --secondary-foreground: #3c3f56;
+    --muted: #ccd0da;
+    --muted-foreground: #5c5f77;
+    --accent: #ccd0da;
+    --accent-foreground: #3c3f56;
+    --destructive: #d20f39;
+    --border: #7c7f93;
+    --input: #7c7f93;
+    --input-bg: #ffffff;
+    --ring: #7287fd;
+    --chart-1: #1e66f5;
+    --chart-2: #40a02b;
+    --chart-3: #fe640b;
+    --chart-4: #8839ef;
+    --chart-5: #df8e1d;
+    --sidebar: #ccd0da;
+    --sidebar-foreground: #3c3f56;
+    --sidebar-primary: #1e66f5;
+    --sidebar-primary-foreground: #dce0e8;
+    --sidebar-accent: #bcc0cc;
+    --sidebar-accent-foreground: #3c3f56;
+    --sidebar-border: #7c7f93;
+    --sidebar-ring: #7287fd;
+}
+
+/* Catppuccin Mocha (dark) */
+.dark {
+    --background: #1e1e2e;
+    --foreground: #dde1f8;
+    --card: #45475a;
+    --card-foreground: #dde1f8;
+    --popover: #45475a;
+    --popover-foreground: #dde1f8;
+    --primary: #89b4fa;
+    --primary-foreground: #1e1e2e;
+    --secondary: #45475a;
+    --secondary-foreground: #dde1f8;
+    --muted: #45475a;
+    --muted-foreground: #bac0d8;
+    --accent: #45475a;
+    --accent-foreground: #dde1f8;
+    --destructive: #f38ba8;
+    --border: #7f83a0;
+    --input: #7f83a0;
+    --input-bg: #313244;
+    --ring: #b4befe;
+    --chart-1: #89b4fa;
+    --chart-2: #a6e3a1;
+    --chart-3: #fab387;
+    --chart-4: #cba6f7;
+    --chart-5: #f9e2af;
+    --sidebar: #181825;
+    --sidebar-foreground: #dde1f8;
+    --sidebar-primary: #89b4fa;
+    --sidebar-primary-foreground: #1e1e2e;
+    --sidebar-accent: #313244;
+    --sidebar-accent-foreground: #dde1f8;
+    --sidebar-border: #45475a;
+    --sidebar-ring: #b4befe;
+}
+
+/* Rosé Pine Dawn (light) */
+.rosepine {
+    --background: #faf4ed;
+    --foreground: #433f60;
+    --card: #ead8d4;
+    --card-foreground: #433f60;
+    --popover: #ead8d4;
+    --popover-foreground: #433f60;
+    --primary: #d7827e;
+    --primary-foreground: #fffaf3;
+    --secondary: #ead8d4;
+    --secondary-foreground: #433f60;
+    --muted: #ead8d4;
+    --muted-foreground: #5f5a75;
+    --accent: #f2e9e1;
+    --accent-foreground: #433f60;
+    --destructive: #b4637a;
+    --border: #8f8a9a;
+    --input: #8f8a9a;
+    --input-bg: #fffaf3;
+    --ring: #907aa9;
+    --chart-1: #d7827e;
+    --chart-2: #286983;
+    --chart-3: #ea9d34;
+    --chart-4: #907aa9;
+    --chart-5: #56949f;
+    --sidebar: #e0ccc8;
+    --sidebar-foreground: #433f60;
+    --sidebar-primary: #d7827e;
+    --sidebar-primary-foreground: #fffaf3;
+    --sidebar-accent: #d8c0bc;
+    --sidebar-accent-foreground: #433f60;
+    --sidebar-border: #8f8a9a;
+    --sidebar-ring: #907aa9;
+}
+
+/* Nord (arctic blue) */
+.nord {
+    --background: #2e3440;
+    --foreground: #e5e9f0;
+    --card: #3b4252;
+    --card-foreground: #e5e9f0;
+    --popover: #3b4252;
+    --popover-foreground: #e5e9f0;
+    --primary: #88c0d0;
+    --primary-foreground: #2e3440;
+    --secondary: #3b4252;
+    --secondary-foreground: #e5e9f0;
+    --muted: #3b4252;
+    --muted-foreground: #a8b2cc;
+    --accent: #434c5e;
+    --accent-foreground: #e5e9f0;
+    --destructive: #bf616a;
+    --border: #7a8499;
+    --input: #7a8499;
+    --input-bg: #353b49;
+    --ring: #81a1c1;
+    --chart-1: #88c0d0;
+    --chart-2: #a3be8c;
+    --chart-3: #ebcb8b;
+    --chart-4: #b48ead;
+    --chart-5: #d08770;
+    --sidebar: #272c36;
+    --sidebar-foreground: #e5e9f0;
+    --sidebar-primary: #88c0d0;
+    --sidebar-primary-foreground: #2e3440;
+    --sidebar-accent: #353b49;
+    --sidebar-accent-foreground: #e5e9f0;
+    --sidebar-border: #3b4252;
+    --sidebar-ring: #81a1c1;
+}
+
+/* Dracula (purple) */
+.dracula {
+    --background: #282a36;
+    --foreground: #f8f8f2;
+    --card: #44475a;
+    --card-foreground: #f8f8f2;
+    --popover: #44475a;
+    --popover-foreground: #f8f8f2;
+    --primary: #bd93f9;
+    --primary-foreground: #282a36;
+    --secondary: #44475a;
+    --secondary-foreground: #f8f8f2;
+    --muted: #44475a;
+    --muted-foreground: #a8b2d0;
+    --accent: #44475a;
+    --accent-foreground: #f8f8f2;
+    --destructive: #ff5555;
+    --border: #8c96bc;
+    --input: #8c96bc;
+    --input-bg: #363949;
+    --ring: #ff79c6;
+    --chart-1: #bd93f9;
+    --chart-2: #50fa7b;
+    --chart-3: #ffb86c;
+    --chart-4: #ff79c6;
+    --chart-5: #8be9fd;
+    --sidebar: #21222c;
+    --sidebar-foreground: #f8f8f2;
+    --sidebar-primary: #bd93f9;
+    --sidebar-primary-foreground: #282a36;
+    --sidebar-accent: #363949;
+    --sidebar-accent-foreground: #f8f8f2;
+    --sidebar-border: #44475a;
+    --sidebar-ring: #ff79c6;
+}
+
+/* Everforest Light (green) */
+.everforest {
+    --background: #fdf6e3;
+    --foreground: #465258;
+    --card: #e4d8bc;
+    --card-foreground: #465258;
+    --popover: #e4d8bc;
+    --popover-foreground: #465258;
+    --primary: #8da101;
+    --primary-foreground: #fdf6e3;
+    --secondary: #e4d8bc;
+    --secondary-foreground: #465258;
+    --muted: #e4d8bc;
+    --muted-foreground: #5a6360;
+    --accent: #f3ead3;
+    --accent-foreground: #465258;
+    --destructive: #f85552;
+    --border: #7a8070;
+    --input: #7a8070;
+    --input-bg: #fffbef;
+    --ring: #35a77c;
+    --chart-1: #8da101;
+    --chart-2: #35a77c;
+    --chart-3: #dfa000;
+    --chart-4: #df69ba;
+    --chart-5: #3a94c5;
+    --sidebar: #e4d8bc;
+    --sidebar-foreground: #465258;
+    --sidebar-primary: #8da101;
+    --sidebar-primary-foreground: #fdf6e3;
+    --sidebar-accent: #ddd0b0;
+    --sidebar-accent-foreground: #465258;
+    --sidebar-border: #7a8070;
+    --sidebar-ring: #35a77c;
+}
+
+/* Ayu Dark (dark blue — inverse of Ayu Light) */
+.ayudark {
+    --background: #0f1218;
+    --foreground: #d0d8e8;
+    --card: #1e2a3e;
+    --card-foreground: #d0d8e8;
+    --popover: #1e2a3e;
+    --popover-foreground: #d0d8e8;
+    --primary: #5b9cf6;
+    --primary-foreground: #0f1218;
+    --secondary: #1e2a3e;
+    --secondary-foreground: #d0d8e8;
+    --muted: #1e2a3e;
+    --muted-foreground: #8a9ab8;
+    --accent: #253550;
+    --accent-foreground: #d0d8e8;
+    --destructive: #f87171;
+    --border: #3d5070;
+    --input: #3d5070;
+    --input-bg: #151c28;
+    --ring: #5b9cf6;
+    --chart-1: #5b9cf6;
+    --chart-2: #4ade80;
+    --chart-3: #fbbf24;
+    --chart-4: #a78bfa;
+    --chart-5: #22d3ee;
+    --sidebar: #0a0e14;
+    --sidebar-foreground: #d0d8e8;
+    --sidebar-primary: #5b9cf6;
+    --sidebar-primary-foreground: #0f1218;
+    --sidebar-accent: #1a2535;
+    --sidebar-accent-foreground: #d0d8e8;
+    --sidebar-border: #1e2a3e;
+    --sidebar-ring: #5b9cf6;
+}
+
+/* Solarized Light (warm yellow-blue) */
+.solarized {
+    --background: #fdf6e3;
+    --foreground: #425862;
+    --card: #e0dbc8;
+    --card-foreground: #425862;
+    --popover: #e0dbc8;
+    --popover-foreground: #425862;
+    --primary: #268bd2;
+    --primary-foreground: #fdf6e3;
+    --secondary: #e0dbc8;
+    --secondary-foreground: #425862;
+    --muted: #e0dbc8;
+    --muted-foreground: #536870;
+    --accent: #eee8d5;
+    --accent-foreground: #425862;
+    --destructive: #dc322f;
+    --border: #7a7060;
+    --input: #7a7060;
+    --input-bg: #fefbf2;
+    --ring: #6c71c4;
+    --chart-1: #268bd2;
+    --chart-2: #859900;
+    --chart-3: #b58900;
+    --chart-4: #6c71c4;
+    --chart-5: #2aa198;
+    --sidebar: #e0dbc8;
+    --sidebar-foreground: #425862;
+    --sidebar-primary: #268bd2;
+    --sidebar-primary-foreground: #fdf6e3;
+    --sidebar-accent: #d6d0bc;
+    --sidebar-accent-foreground: #425862;
+    --sidebar-border: #7a7060;
+    --sidebar-ring: #6c71c4;
+}
+
+/* Tokyo Night (indigo blue) */
+.tokyonight {
+    --background: #222436;
+    --foreground: #d0d8f8;
+    --card: #2f3452;
+    --card-foreground: #d0d8f8;
+    --popover: #2f3452;
+    --popover-foreground: #d0d8f8;
+    --primary: #7aa2f7;
+    --primary-foreground: #222436;
+    --secondary: #2f3452;
+    --secondary-foreground: #d0d8f8;
+    --muted: #2f3452;
+    --muted-foreground: #8f98c0;
+    --accent: #343a5c;
+    --accent-foreground: #d0d8f8;
+    --destructive: #f7768e;
+    --border: #686e92;
+    --input: #686e92;
+    --input-bg: #292d44;
+    --ring: #7dcfff;
+    --chart-1: #7aa2f7;
+    --chart-2: #9ece6a;
+    --chart-3: #e0af68;
+    --chart-4: #bb9af7;
+    --chart-5: #ff9e64;
+    --sidebar: #1e2030;
+    --sidebar-foreground: #d0d8f8;
+    --sidebar-primary: #7aa2f7;
+    --sidebar-primary-foreground: #222436;
+    --sidebar-accent: #292d44;
+    --sidebar-accent-foreground: #d0d8f8;
+    --sidebar-border: #2f3452;
+    --sidebar-ring: #7dcfff;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+}

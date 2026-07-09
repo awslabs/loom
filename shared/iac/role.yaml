@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: IAM role for Bedrock AgentCore agents managed by Loom
+
+Parameters:
+  pAgentName:
+    Type: String
+    Description: Agent name used as prefix for scoping logs
+  pRoleSuffix:
+    Type: String
+    Description: Sanitized agent name (underscores replaced with hyphens) for role naming
+  pBedrockModelArns:
+    Type: CommaDelimitedList
+    Description: Comma-separated list of Bedrock model ARNs (inference profiles and foundation models)
+    Default: "arn:aws:bedrock:*:546275881527:inference-profile/*,arn:aws:bedrock:*::foundation-model/*"
+  pAgentCoreRegions:
+    Type: String
+    Description: Region pattern for AgentCore resources (e.g. us-east-1 or *)
+    Default: "*"
+  pLogsRegion:
+    Type: String
+    Description: Region for CloudWatch Logs resources
+    Default: us-east-1
+  pMemoryArn:
+    Type: String
+    Description: ARN of an AgentCore Memory resource to grant access to (leave empty to skip memory policy)
+    Default: ""
+  pEnableCodeInterpreter:
+    Type: String
+    Description: Set to "true" to include Code Interpreter sandbox permissions
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  pTagApplication:
+    Type: String
+    Description: Value for the loom:application tag
+  pTagGroup:
+    Type: String
+    Description: Value for the loom:group tag
+  pTagOwner:
+    Type: String
+    Description: Value for the loom:owner tag
+
+Conditions:
+  IncludeMemoryPolicy: !Not [!Equals [!Ref pMemoryArn, ""]]
+  IncludeCodeInterpreterPolicy: !Equals [!Ref pEnableCodeInterpreter, "true"]
+
+Resources:
+  AgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "loom-role-${pRoleSuffix}"
+      Tags:
+        - Key: "loom:application"
+          Value: !Ref pTagApplication
+        - Key: "loom:group"
+          Value: !Ref pTagGroup
+        - Key: "loom:owner"
+          Value: !Ref pTagOwner
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Path: "/"
+      Policies:
+        - PolicyName: bedrock
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: !Ref pBedrockModelArns
+        - PolicyName: bedrock-agentcore
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateWorkloadIdentity
+                  - bedrock-agentcore:GetApiKeyCredential
+                  - bedrock-agentcore:GetResourceApiKey
+                  - bedrock-agentcore:GetResourceOauth2Token
+                  - bedrock-agentcore:GetWorkloadAccessToken
+                  - bedrock-agentcore:GetWorkloadAccessTokenForJWT
+                  - bedrock-agentcore:GetWorkloadAccessTokenForUserId
+                Resource:
+                  - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:apikeycredentialprovider/*"
+                  - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:token-vault/*"
+                  - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:workload-identity-directory/*"
+        - PolicyName: secretsmanager
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${pAgentCoreRegions}:${AWS::AccountId}:secret:bedrock-agentcore-identity!*"
+        - PolicyName: observability
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - xray:PutTelemetryRecords
+                  - xray:PutTraceSegments
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${pLogsRegion}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/${pAgentName}*"
+                  - !Sub "arn:aws:logs:${pLogsRegion}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/harness_${pAgentName}*"
+        - !If
+          - IncludeMemoryPolicy
+          - PolicyName: memory
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - bedrock-agentcore:CreateEvent
+                    - bedrock-agentcore:GetMemory
+                    - bedrock-agentcore:GetMemoryRecord
+                    - bedrock-agentcore:ListActors
+                    - bedrock-agentcore:ListEvents
+                    - bedrock-agentcore:ListMemoryRecords
+                    - bedrock-agentcore:ListSessions
+                    - bedrock-agentcore:RetrieveMemoryRecords
+                  Resource: !Ref pMemoryArn
+          - !Ref AWS::NoValue
+        - !If
+          - IncludeCodeInterpreterPolicy
+          - PolicyName: code-interpreter
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - bedrock-agentcore:CreateCodeInterpreter
+                    - bedrock-agentcore:DeleteCodeInterpreter
+                    - bedrock-agentcore:GetCodeInterpreter
+                    - bedrock-agentcore:ListCodeInterpreters
+                    - bedrock-agentcore:StartCodeInterpreterSession
+                    - bedrock-agentcore:StopCodeInterpreterSession
+                    - bedrock-agentcore:InvokeCodeInterpreter
+                    - bedrock-agentcore:GetCodeInterpreterSession
+                    - bedrock-agentcore:ListCodeInterpreterSessions
+                  Resource:
+                    - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:aws:code-interpreter/*"
+                    - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:code-interpreter/*"
+                    - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:code-interpreter-custom/*"
+          - !Ref AWS::NoValue
+
+Outputs:
+  oAgentRole:
+    Description: IAM role name
+    Value: !Ref AgentRole
+  oAgentRoleArn:
+    Description: IAM role ARN
+    Value: !GetAtt AgentRole.Arn

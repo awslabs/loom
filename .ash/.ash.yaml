@@ -1,0 +1,273 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/awslabs/automated-security-helper/refs/heads/main/automated_security_helper/schemas/AshConfig.json
+project_name: loom
+global_settings:
+  severity_threshold: MEDIUM
+  ignore_paths:
+    - path: tmp/**
+      reason: Gitignored scratch/build-output directory; not part of the shipped codebase.
+    - path: backend/tmp/**
+      reason: Gitignored scratch/build-output directory; not part of the shipped codebase.
+    - path: node_modules/**
+      reason: Third-party dependency tree; vulnerabilities tracked via npm-audit, not other scanners.
+  suppressions:
+    - path: DEPLOYMENT.md
+      rule_id: SECRET-BASIC-AUTH-CREDENTIALS
+      reason: Example connection string in documentation (user:pass placeholder), not a real credential.
+    - path: backend/SPECIFICATIONS.md
+      rule_id: SECRET-BASIC-AUTH-CREDENTIALS
+      reason: Example connection string in documentation (user:pass placeholder), not a real credential.
+    - path: backend/SPECIFICATIONS.md
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Documentation prose describing secrets management, contains no actual secret value.
+    - path: backend/scripts/migrate_sqlite_to_postgres.py
+      rule_id: SECRET-BASIC-AUTH-CREDENTIALS
+      reason: Example connection string in a CLI usage docstring (user:pass placeholder), not a real credential.
+    - path: backend/tests/test_rds.py
+      rule_id: SECRET-BASIC-AUTH-CREDENTIALS
+      reason: Example connection string used to exercise URL-parsing logic in a unit test, not a real credential.
+    - path: agents/strands_agent/README.md
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Example Secrets Manager ARN in documentation, not a real secret value.
+    - path: agents/strands_agent/etc/config.json
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Example Secrets Manager ARN in sample config, not a real secret value.
+    - path: agents/strands_agent/tests/test_a2a_client.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture referencing a fake credentials ARN/keyword to exercise auth-config parsing.
+    - path: agents/strands_agent/tests/test_config.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder secret-like strings to exercise config validation logic.
+    - path: agents/strands_agent/tests/test_mcp_client.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder secret-like strings to exercise MCP client auth logic.
+    - path: backend/app/models/mcp.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Boolean flag field name (has_oauth2_secret/has_admin_api_key), not a secret value.
+    - path: backend/app/routers/mcp.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Secrets Manager path prefix string ("loom/mcp/.../admin-api-key") used to store a secret, not the secret value itself.
+    - path: backend/iac/rds.yaml
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: IAM policy referencing secretsmanager:GetSecretValue/DescribeSecret actions, not a secret value.
+    - path: backend/iac/ecs.yaml
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: IAM policy referencing secretsmanager:* actions and secret ARNs, not secret values.
+    - path: shared/iac/role.yaml
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: IAM policy referencing secretsmanager:GetSecretValue action, not a secret value.
+    - path: shared/iac/cognito.yaml
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Cognito GenerateSecret boolean property, not a secret value.
+    - path: frontend/src/components/PolicyViewer.tsx
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Human-readable descriptions of IAM action names shown in the UI, not secret values.
+    - path: backend/tests/test_a2a.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder secret-like strings to exercise A2A auth logic.
+    - path: backend/tests/test_authorizer_linking.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder tokens/URLs to exercise authorizer-linking logic.
+    - path: backend/tests/test_credentials.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder credential-like strings to exercise credential-handling logic.
+    - path: backend/tests/test_deployment.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder secret-like strings to exercise deployment config validation.
+    - path: backend/tests/test_deployment.py
+      rule_id: SECRET-AWS-ACCESS-KEY
+      reason: Well-known AWS documentation example access key (AKIAIOSFODNN7EXAMPLE) used to test secret-pattern detection.
+    - path: backend/tests/test_deployment.py
+      rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+      reason: Fake high-entropy string used to test secret-pattern detection logic, not a real secret.
+    - path: backend/tests/test_deployment.py
+      rule_id: SECRET-GITHUB-TOKEN
+      reason: Fake GitHub token pattern used to test secret-pattern detection logic, not a real token.
+    - path: backend/tests/test_agents_deploy.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder secret-like strings to exercise agent deployment logic.
+    - path: backend/tests/test_identity_providers.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder tokens/URLs to exercise identity provider configuration logic.
+    - path: backend/tests/test_mcp.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder secret-like strings to exercise MCP server config logic.
+    - path: backend/tests/test_security.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder secret-like strings to exercise security-related logic.
+fail_on_findings: true
+ash_plugin_modules: []
+external_reports_to_include: []
+converters:
+  archive:
+    enabled: true
+    options: {}
+  jupyter:
+    enabled: true
+    options:
+      tool_version: '>=7.16.0,<8.0.0'
+      install_timeout: 300
+scanners:
+  bandit:
+    enabled: true
+    options:
+      severity_threshold: null
+      config_file: null
+      confidence_level: all
+      ignore_nosec: false
+      excluded_paths: []
+      additional_formats: []
+      tool_version: '>=1.7.0,<2.0.0'
+      install_timeout: 300
+  cdk-nag:
+    enabled: true
+    options:
+      severity_threshold: null
+      nag_packs:
+        AwsSolutionsChecks: true
+        HIPAASecurityChecks: false
+        NIST80053R4Checks: false
+        NIST80053R5Checks: false
+        PCIDSS321Checks: false
+      include_compliant_checks: false
+  cfn-nag:
+    enabled: true
+    options:
+      severity_threshold: null
+  checkov:
+    enabled: true
+    options:
+      severity_threshold: null
+      config_file: null
+      skip_path: []
+      additional_formats:
+      - cyclonedx_json
+      offline: false
+      frameworks:
+      - all
+      skip_frameworks: []
+      tool_version: null
+      install_timeout: 300
+  detect-secrets:
+    enabled: true
+    options:
+      severity_threshold: null
+      baseline_file: null
+      scan_settings:
+        version: null
+        generated_at: null
+        plugins_used: []
+        filters_used: []
+        results: {}
+      scan_timeout: 300
+  grype:
+    enabled: true
+    options:
+      severity_threshold: null
+      config_file: null
+      offline: false
+  npm-audit:
+    enabled: true
+    options:
+      severity_threshold: null
+      offline: false
+  opengrep:
+    enabled: true
+    options:
+      severity_threshold: null
+      config: p/ci
+      exclude:
+      - '*-converted.py'
+      - '*_report_result.txt'
+      exclude_rule: []
+      severity: []
+      metrics: auto
+      offline: false
+      patterns: []
+      version: v1.15.1
+  semgrep:
+    enabled: true
+    options:
+      severity_threshold: null
+      config: p/ci
+      exclude:
+      - '*-converted.py'
+      - '*_report_result.txt'
+      exclude_rule: []
+      severity: []
+      metrics: auto
+      offline: false
+      tool_version: null
+      install_timeout: 300
+  syft:
+    enabled: true
+    options:
+      severity_threshold: null
+      config_file: null
+      exclude: []
+      additional_outputs:
+      - syft-table
+reporters:
+  csv:
+    enabled: true
+    options: {}
+  cyclonedx:
+    enabled: true
+    options: {}
+  gitlab-cyclonedx:
+    enabled: true
+    options:
+      category: production
+      package_manager_override: null
+      language_override: null
+      input_file_path_override: null
+  html:
+    enabled: true
+    options: {}
+  flat-json:
+    enabled: true
+    options:
+      include_scanner_metrics: true
+      include_summary_metrics: true
+      include_metadata: true
+  gitlab-sast:
+    enabled: true
+    options:
+      exclude_suppressed: false
+  github-ghas:
+    enabled: true
+    options:
+      exclude_suppressed: true
+  junitxml:
+    enabled: true
+    options:
+      respect_severity_threshold: true
+  markdown:
+    enabled: true
+    options:
+      include_summary: true
+      include_findings_table: false
+      include_detailed_findings: true
+      max_detailed_findings: 20
+      top_hotspots_limit: 10
+      use_collapsible_details: true
+      compact: false
+  ocsf:
+    enabled: true
+    options: {}
+  sarif:
+    enabled: true
+    options: {}
+  spdx:
+    enabled: false
+    options: {}
+  text:
+    enabled: true
+    options:
+      include_summary: true
+      include_findings_table: false
+      include_detailed_findings: false
+      max_detailed_findings: 20
+      top_hotspots_limit: 20
+  yaml:
+    enabled: false
+    options: {}

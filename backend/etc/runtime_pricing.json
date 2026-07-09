@@ -1,0 +1,8 @@
+{
+  "cpu_per_vcpu_hour": 0.0895,
+  "memory_per_gb_hour": 0.00945,
+  "default_vcpu": 1,
+  "default_memory_gb": 0.5,
+  "default_idle_timeout_seconds": 900,
+  "pricing_as_of": "2025-06-01"
+}

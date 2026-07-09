@@ -1,0 +1,27 @@
+# Copy this file to environment.sh and update all values marked with <...>
+# cp etc/environment.sh.example etc/environment.sh
+
+# Resource tagging
+P_TAG_APPLICATION=frontend
+P_TAG_GROUP=loom
+P_TAG_OWNER=<your-owner-alias-or-email>
+
+# Frontend port (for local development)
+LOOM_FRONTEND_PORT=5173
+
+# ECS frontend stack configuration
+P_ECS_FRONTEND_STACK=loom-ecs-frontend
+P_ECS_FRONTEND_TEMPLATE=iac/ecs.yaml
+P_ECS_FRONTEND_OUTPUT=iac/ecs_output.yaml
+
+# ECS frontend parameters
+P_ECS_PUBLIC_SUBNET_IDS=$(PUBLIC_SUBNET_IDS)
+P_ECS_FRONTEND_CPU=256
+P_ECS_FRONTEND_MEMORY=512
+P_ECS_FRONTEND_DESIRED_COUNT=2
+
+# Common configurations
+include ../shared/etc/common.sh
+
+# Stack outputs
+include ../shared/etc/outputs.sh

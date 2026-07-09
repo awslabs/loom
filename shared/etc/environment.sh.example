@@ -1,0 +1,99 @@
+# Copy this file to environment.sh and update all values marked with <...>
+# cp etc/environment.sh.example etc/environment.sh
+
+# Resource tagging (platform:required tags applied to all IaC resources)
+P_TAG_APPLICATION=security
+P_TAG_GROUP=loom
+P_TAG_OWNER=<your-owner-alias-or-email>
+
+# Role configuration
+P_AGENT_NAME=<your-agent-name>
+P_MEMORY_ARN=arn:aws:bedrock-agentcore:$(REGION):$(ACCOUNTID):memory/$(P_AGENT_NAME)*
+P_BEDROCK_MODEL_ARNS="arn:aws:bedrock:*:$(ACCOUNTID):inference-profile/*,arn:aws:bedrock:*::foundation-model/*"
+P_AGENTCORE_REGIONS=*
+P_LOGS_REGION=$(REGION)
+
+# Derived configuration
+P_AGENT_NAME_SANITIZED=$(subst _,-,$(P_AGENT_NAME))
+
+# Role stack configuration
+P_ROLE_STACK=loom-role-$(P_AGENT_NAME_SANITIZED)
+P_ROLE_TEMPLATE=iac/role.yaml
+P_ROLE_OUTPUT=iac/role_output.yaml
+
+# Cognito configuration
+P_COGNITO_POOL_NAME=$(COGNITO_POOL_NAME)
+P_COGNITO_DOMAIN=$(COGNITO_DOMAIN)
+P_COGNITO_RESOURCE_SERVER=loom
+P_COGNITO_SCOPES=invoke
+P_COGNITO_CALLBACK_URLS=https://localhost
+
+# Cognito stack configuration
+P_COGNITO_STACK=loom-cognito
+P_COGNITO_TEMPLATE=iac/cognito.yaml
+P_COGNITO_OUTPUT=iac/cognito_output.yaml
+
+# Cognito user management
+P_COGNITO_PERMANENT_PASSWORD=$(SUPER_ADMIN_PASSWORD)
+# demo-user-N and demo-admin-N share the same password (set per pair 1-9)
+P_COGNITO_DEMO_USER_1_PASSWORD=$(DEMO_USER_1_PASSWORD)
+P_COGNITO_DEMO_USER_2_PASSWORD=$(DEMO_USER_2_PASSWORD)
+P_COGNITO_DEMO_USER_3_PASSWORD=$(DEMO_USER_3_PASSWORD)
+P_COGNITO_DEMO_USER_4_PASSWORD=$(DEMO_USER_4_PASSWORD)
+P_COGNITO_DEMO_USER_5_PASSWORD=$(DEMO_USER_5_PASSWORD)
+P_COGNITO_DEMO_USER_6_PASSWORD=$(DEMO_USER_6_PASSWORD)
+P_COGNITO_DEMO_USER_7_PASSWORD=$(DEMO_USER_7_PASSWORD)
+P_COGNITO_DEMO_USER_8_PASSWORD=$(DEMO_USER_8_PASSWORD)
+P_COGNITO_DEMO_USER_9_PASSWORD=$(DEMO_USER_9_PASSWORD)
+
+# DNS stack configuration (Route 53 hosted zone for subdomain delegation)
+P_DNS_STACK=loom-dns
+P_DNS_TEMPLATE=iac/dns.yaml
+P_DNS_OUTPUT=iac/dns_output.yaml
+
+# Infrastructure stack configuration (S3, ECR, ACM, ALB)
+P_INFRA_STACK=loom-infra
+P_INFRA_TEMPLATE=iac/infra.yaml
+P_INFRA_OUTPUT=iac/infra_output.yaml
+
+# Infrastructure parameters
+P_INFRA_VPC_ID=$(VPC_ID)
+P_INFRA_PUBLIC_SUBNET_IDS=$(PUBLIC_SUBNET_IDS)
+P_INFRA_DOMAIN_NAME=$(PUBLIC_FQDN)
+
+# ECR repository names
+P_ECR_FRONTEND_REPO=loom-frontend
+P_ECR_BACKEND_REPO=loom-backend
+
+# ECS cluster stack configuration
+P_ECS_STACK=loom-ecs-cluster
+P_ECS_TEMPLATE=iac/ecs.yaml
+P_ECS_OUTPUT=iac/ecs_output.yaml
+
+# Agent security group stack configuration
+# Deploys a security group for VPC-mode AgentCore Runtime agents.
+# Use the output oSecurityGroupId when creating a VPC configuration in Loom Settings → Networking.
+# Leave ingress parameters empty to omit those rules (only set what you need).
+P_AGENT_SG_STACK=loom-agent-sg
+P_AGENT_SG_TEMPLATE=iac/security_group.yaml
+P_AGENT_SG_OUTPUT=iac/security_group_output.yaml
+# CIDR ingress — one CIDR per port (e.g. 10.0.0.0/8); leave empty to omit
+P_AGENT_SG_HTTPS_CIDR=
+P_AGENT_SG_HTTP_CIDR=
+P_AGENT_SG_MCP_CIDR=
+P_AGENT_SG_A2A_CIDR=
+# Security group ingress — one source SG ID per port; leave empty to omit
+P_AGENT_SG_HTTPS_SOURCE_SG=
+P_AGENT_SG_HTTP_SOURCE_SG=
+P_AGENT_SG_MCP_SOURCE_SG=
+P_AGENT_SG_A2A_SOURCE_SG=
+
+# Loom configurations
+P_LOOM_ARTIFACT_BUCKET=$(LOOM_ARTIFACT_BUCKET)
+
+# Common configurations
+include etc/common.sh
+
+# Stack outputs — single file shared across all directories
+# Copy outputs.sh.example to outputs_<account>.sh, then run: cd shared && make outputs
+include etc/outputs.sh

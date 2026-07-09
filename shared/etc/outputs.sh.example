@@ -1,0 +1,26 @@
+# Stack outputs — single source of truth for all O_* variables
+# Copy to outputs_<account>.sh and populate via: cd shared && make outputs
+# All directories (shared, frontend, backend) include this file.
+
+# loom-ecs-cluster: oEcsClusterArn, oEcsClusterName
+O_ECS_CLUSTER_ARN=<oEcsClusterArn>
+O_ECS_CLUSTER_NAME=<oEcsClusterName>
+# loom-dns: oHostedZoneId
+O_INFRA_HOSTED_ZONE_ID=<oHostedZoneId>
+# loom-infra: oEcsSecurityGroupId, oFrontendTargetGroupArn, oBackendTargetGroupArn, oFrontendRepositoryUri, oBackendRepositoryUri, oEcrKmsKeyArn
+O_INFRA_ECS_SG_ID=<oEcsSecurityGroupId>
+O_INFRA_FRONTEND_TG_ARN=<oFrontendTargetGroupArn>
+O_INFRA_BACKEND_TG_ARN=<oBackendTargetGroupArn>
+O_ECR_FRONTEND_URI=<oFrontendRepositoryUri>
+O_ECR_BACKEND_URI=<oBackendRepositoryUri>
+O_INFRA_ECR_KMS_KEY_ARN=<oEcrKmsKeyArn>
+# loom-cognito: oCognitoUserPoolId, oUserClientId
+O_COGNITO_USER_POOL_ID=<oCognitoUserPoolId>
+O_COGNITO_USER_CLIENT_ID=<oUserClientId>
+# loom-rds: oRdsSecretArn, oConnectEndpoint, oSecretsKmsKeyArn
+O_RDS_SECRET_ARN=<oRdsSecretArn>
+O_RDS_SECRETS_KMS_KEY_ARN=<oSecretsKmsKeyArn>
+O_RDS_PROXY_ENDPOINT=<oConnectEndpoint>
+O_RDS_PORT=5432
+# loom-ec2: oInstanceId
+O_EC2_INSTANCE_ID=<oInstanceId>

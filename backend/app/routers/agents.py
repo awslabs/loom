@@ -49,16 +49,33 @@ from app.services.iam import (
     list_agentcore_roles,
     list_cognito_pools,
 )
-from app.services.credential import create_oauth2_credential_provider, delete_credential_provider
+from app.services.credential import (
+    create_api_key_credential_provider,
+    create_oauth2_credential_provider,
+    delete_api_key_credential_provider,
+    delete_credential_provider,
+)
+from app.services.model_catalog import get_bedrock_models, get_litellm_models_live, get_merged_models
 from app.services.harness import (
     create_harness as create_harness_api,
     update_harness as update_harness_api,
     get_harness as get_harness_api,
     delete_harness as delete_harness_api,
 )
-from app.services.secrets import store_secret, delete_secret
+from app.services.secrets import store_secret, get_secret, delete_secret
 
 logger = logging.getLogger(__name__)
+
+def _sync_role_policy_for_provider_update(agent: Agent, db: Session) -> None:
+    """Refresh the agent's execution role policy after a provider/api_key change."""
+    from app.routers.integrations import _sync_role_policy
+
+    try:
+        _sync_role_policy(agent, db)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("Failed to refresh IAM role policy for agent %s after provider update", agent.id, exc_info=True)
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -79,6 +96,15 @@ def _load_runtime_pricing() -> dict[str, Any]:
         return json.load(f)
 
 AGENTCORE_RUNTIME_PRICING: dict[str, Any] = _load_runtime_pricing()
+
+_PROVIDERS_JSON_PATH = _MODELS_JSON_PATH.parent / "providers.json"
+
+def _load_providers() -> list[dict[str, Any]]:
+    with open(_PROVIDERS_JSON_PATH) as f:
+        return json.load(f)
+
+SUPPORTED_PROVIDERS: list[dict[str, Any]] = _load_providers()
+SUPPORTED_PROVIDER_IDS: set[str] = {p["id"] for p in SUPPORTED_PROVIDERS}
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +157,11 @@ class AgentCreateRequest(BaseModel):
     agent_description: str = Field(default="", description="What the agent does")
     behavioral_guidelines: str = Field(default="", description="How it should behave")
     output_expectations: str = Field(default="", description="Output format/style")
-    model_id: str | None = Field(None, description="Bedrock model ID (required for deploy/harness)")
+    model_id: str | None = Field(None, description="Model ID (required for deploy/harness)")
     allowed_model_ids: list[str] | None = Field(None, description="Subset of models the user may select at invoke time")
+    provider: str = Field(default="bedrock", description="LLM provider: 'bedrock' or 'litellm'. Non-bedrock providers are only supported for source='deploy'.")
+    base_url: str | None = Field(None, description="Custom/private endpoint base URL (used by 'litellm' and OpenAI-compatible endpoints)")
+    api_key: str | None = Field(None, description="Provider API key, write-only — stored in Secrets Manager and never returned")
     role_arn: str | None = Field(None, description="Existing IAM role ARN or null to create new")
     protocol: str = Field(default="HTTP", description="HTTP, MCP, or A2A")
     network_mode: str = Field(default="PUBLIC", description="PUBLIC or VPC")
@@ -188,6 +217,8 @@ class AgentResponse(BaseModel):
     authorizer_config: dict | None = None
     model_id: str | None = None
     allowed_model_ids: list[str] = []
+    provider: str = "bedrock"
+    base_url: str | None = None
     deployed_at: str | None = None
     harness_id: str | None = None
     registry_record_id: str | None = None
@@ -226,6 +257,9 @@ class AgentUpdateRequest(BaseModel):
     description: str | None = None
     model_id: str | None = None
     allowed_model_ids: list[str] | None = None
+    provider: str | None = None
+    base_url: str | None = None
+    api_key: str | None = Field(None, description="Provider API key, write-only — stored in Secrets Manager and never returned")
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +282,25 @@ def parse_arn(arn: str) -> tuple[str, str, str]:
 def derive_log_group(runtime_id: str, qualifier: str) -> str:
     """Derive CloudWatch log group name for a runtime and qualifier."""
     return f"/aws/bedrock-agentcore/runtimes/{runtime_id}-{qualifier}"
+
+
+def _store_provider_api_key(agent_id: int, agent_name: str, provider: str, api_key: str, region: str) -> str:
+    """Store a non-Bedrock provider's API key in Secrets Manager and return its ARN.
+
+    The secret name is prefixed with the agent's name (not just its numeric
+    id) so it falls under the IAM role's `loom/agents/{agent_name}*`
+    wildcard (see app.services.iam.build_base_policy) — this lets a shared
+    managed role (e.g. "loom-role-demo") read the secrets of any agent whose
+    name starts with that same prefix. The trailing agent_id keeps the name
+    unique across agents that share a prefix.
+    """
+    secret_name = f"loom/agents/{agent_name}-{agent_id}/llm-provider-api-key"
+    return store_secret(
+        name=secret_name,
+        secret_value=api_key,
+        region=region,
+        description=f"LLM provider ({provider}) API key for Loom agent {agent_id}",
+    )
 
 
 def compute_active_session_count(agent_id: int, db: Session) -> int:
@@ -283,6 +336,8 @@ def compute_active_session_count(agent_id: int, db: Session) -> int:
 def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     """Build an AgentResponse from an Agent ORM object."""
     model_id = None
+    provider = "bedrock"
+    base_url = None
     memory_names: list[str] = []
     mcp_names: list[str] = []
     a2a_names: list[str] = []
@@ -292,6 +347,8 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
             try:
                 config = json.loads(entry.value)
                 model_id = config.get("model_id")
+                provider = config.get("provider") or "bedrock"
+                base_url = config.get("base_url") or None
 
                 # Extract integration names from config
                 integrations = config.get("integrations", {})
@@ -377,6 +434,8 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
         **agent_dict,
         model_id=model_id,
         allowed_model_ids=allowed_models,
+        provider=provider,
+        base_url=base_url,
         active_session_count=compute_active_session_count(agent.id, db),
         memory_names=memory_names,
         mcp_names=mcp_names,
@@ -445,6 +504,16 @@ def _build_system_prompt(request: AgentCreateRequest) -> str:
         parts.append(request.behavioral_guidelines)
     if request.output_expectations:
         parts.append(request.output_expectations)
+    if getattr(request, "code_interpreter_enabled", False):
+        # AWS's native agentcore_code_interpreter harness tool exposes itself
+        # to the model as `shell` and `file_operations`, not a literal
+        # `code_interpreter` tool — the "name" we send to CreateHarness is
+        # only a bookkeeping label, not the model-facing tool name.
+        parts.append(
+            "You have a sandboxed code interpreter available. Run code via "
+            "the `shell` tool (e.g. write a script and run `python3 script.py`) "
+            "and read/write files via the `file_operations` tool."
+        )
     return "\n\n".join(parts) if parts else "You are a helpful assistant."
 
 
@@ -470,21 +539,71 @@ def get_models(
     user: UserInfo = Depends(require_scopes("agent:read")),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    """Return list of admin-enabled model IDs. If none configured, returns all."""
+    """Return list of admin-enabled Bedrock model IDs. If none configured, returns all.
+
+    Bedrock-only — never touches the LiteLLM proxy. Used for the picker's
+    eager page-load fetch. LiteLLM models are fetched separately, on
+    demand, via GET /models/litellm when that provider is selected.
+    """
     from app.routers.settings import get_enabled_model_ids
+    models = get_bedrock_models(DEFAULT_REGION)
     enabled = get_enabled_model_ids(db)
     if not enabled:
-        return SUPPORTED_MODELS
+        return models
     enabled_set = set(enabled)
-    return [m for m in SUPPORTED_MODELS if m["model_id"] in enabled_set]
+    return [m for m in models if m["model_id"] in enabled_set]
+
+
+@router.get("/models/litellm")
+def get_litellm_models(
+    user: UserInfo = Depends(require_scopes("agent:read")),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Return only the models actually configured on the deployed LiteLLM
+    proxy (empty list if the proxy isn't configured/reachable). Called
+    on-demand by the frontend when the LiteLLM provider is selected, not
+    on page load.
+    """
+    from app.routers.settings import get_enabled_model_ids
+    models = get_litellm_models_live()
+    enabled = get_enabled_model_ids(db)
+    if not enabled:
+        return models
+    enabled_set = set(enabled)
+    return [m for m in models if m["model_id"] in enabled_set]
 
 
 @router.get("/models/pricing")
 def get_model_pricing(
     user: UserInfo = Depends(require_scopes("agent:read")),
 ) -> list[dict]:
-    """Return models with pricing data."""
-    return SUPPORTED_MODELS
+    """Return models with pricing data, enriched with live availability and pricing when available."""
+    return get_merged_models(DEFAULT_REGION)
+
+
+@router.get("/providers")
+def get_providers(
+    user: UserInfo = Depends(require_scopes("agent:read")),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Return the registry of supported LLM providers.
+
+    Each entry includes `available: bool` — whether the provider can
+    actually be selected right now. Bedrock is always available; LiteLLM
+    is only available once its connection is toggled on in
+    Settings -> Models (base_url/api_key are resolved from there, never
+    entered per-agent).
+
+    Note: only 'bedrock' is supported for harness-sourced agents — the
+    AgentCore Harness control-plane API only accepts Bedrock model configs.
+    """
+    from app.services.litellm import is_enabled
+
+    litellm_available = is_enabled(db)
+    return [
+        {**p, "available": litellm_available if p["id"] == "litellm" else True}
+        for p in SUPPORTED_PROVIDERS
+    ]
 
 
 @router.get("/defaults")
@@ -637,7 +756,16 @@ def _register_agent(request: AgentCreateRequest, db: Session) -> AgentResponse:
 
     # Store model_id as config entry if provided
     if request.model_id:
-        config_json = json.dumps({"model_id": request.model_id})
+        register_provider = (request.provider or "bedrock").lower()
+        register_base_url = request.base_url or ""
+        if register_provider == "litellm" and not register_base_url:
+            from app.services.litellm import get_agent_base_url
+            register_base_url = get_agent_base_url(db)
+        config_json = json.dumps({
+            "model_id": request.model_id,
+            "provider": register_provider,
+            "base_url": register_base_url,
+        })
         entry = ConfigEntry(
             agent_id=agent.id,
             key="AGENT_CONFIG_JSON",
@@ -675,6 +803,24 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Field 'model_id' is required when source is 'deploy'"
+        )
+    provider = (request.provider or "bedrock").lower()
+    if provider not in SUPPORTED_PROVIDER_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported provider '{provider}'. Must be one of: {sorted(SUPPORTED_PROVIDER_IDS)}"
+        )
+    if provider == "litellm":
+        from app.services.litellm import get_agent_base_url
+        if not get_agent_base_url(db) and not os.getenv("LOOM_LITELLM_PROXY_BASE_URL"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="LiteLLM is not configured — set it up in Settings → Models first"
+            )
+    elif provider != "bedrock" and not request.api_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Field 'api_key' is required for provider '{provider}'"
         )
 
     # AgentCore runtime names must match [a-zA-Z][a-zA-Z0-9_]{0,47}
@@ -1100,6 +1246,7 @@ def _deploy_agent_background(
                     tag_policies=tag_policy_dicts,
                     extra_tags=resolved_tags,
                     code_interpreter=request.code_interpreter_enabled,
+                    agent_id=agent.id,
                 )
                 created_role = True
                 agent.execution_role_arn = execution_role_arn
@@ -1194,10 +1341,53 @@ def _deploy_agent_background(
         agent.deployment_status = "building_artifact"
         db.commit()
 
+        provider = (request.provider or "bedrock").lower()
+        agent_base_url = request.base_url or ""
+        api_key_secret_arn = ""
+        if provider == "litellm":
+            # Never accept a user-supplied base_url/api_key for LiteLLM —
+            # both are resolved from the global Settings-managed connection.
+            # A scoped virtual key is vended instead of handing out the
+            # master key.
+            from app.services.litellm import get_agent_base_url, vend_virtual_key
+            agent_base_url = get_agent_base_url(db) or agent_base_url
+            allowed_ids = request.allowed_model_ids or [request.model_id]
+            virtual_key = vend_virtual_key(agent.id, request.name, allowed_ids, db)
+            if virtual_key:
+                api_key_secret_arn = _store_provider_api_key(agent.id, agent.name, provider, virtual_key, region)
+                db.add(ConfigEntry(
+                    agent_id=agent.id,
+                    key="LLM_PROVIDER_API_KEY_SECRET_ARN",
+                    value=api_key_secret_arn,
+                    is_secret=True,
+                    source="secrets_manager",
+                ))
+                db.add(ConfigEntry(
+                    agent_id=agent.id,
+                    key="LITELLM_VIRTUAL_KEY_ALIAS",
+                    value=f"loom-agent-{agent.id}",
+                    is_secret=False,
+                    source="litellm",
+                ))
+                db.commit()
+        elif provider != "bedrock" and request.api_key:
+            api_key_secret_arn = _store_provider_api_key(agent.id, agent.name, provider, request.api_key, region)
+            db.add(ConfigEntry(
+                agent_id=agent.id,
+                key="LLM_PROVIDER_API_KEY_SECRET_ARN",
+                value=api_key_secret_arn,
+                is_secret=True,
+                source="secrets_manager",
+            ))
+            db.commit()
+
         config_json = json.dumps({
             "system_prompt": system_prompt,
             "model_id": request.model_id,
             "max_tokens": model_max_tokens,
+            "provider": provider,
+            "base_url": agent_base_url,
+            "api_key_secret_arn": api_key_secret_arn,
             "integrations": integrations_config,
         })
         env_vars = {
@@ -1709,6 +1899,24 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Field 'role_arn' is required when source is 'harness'"
         )
+    harness_provider = (request.provider or "bedrock").lower()
+    if harness_provider not in SUPPORTED_PROVIDER_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported provider '{harness_provider}'. Must be one of: {sorted(SUPPORTED_PROVIDER_IDS)}"
+        )
+    if harness_provider == "litellm":
+        from app.services.litellm import get_agent_base_url
+        if not get_agent_base_url(db) and not os.getenv("LOOM_LITELLM_PROXY_BASE_URL"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="LiteLLM is not configured — set it up in Settings → Models first"
+            )
+    elif harness_provider != "bedrock" and not request.api_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Field 'api_key' is required for provider '{harness_provider}'"
+        )
 
     runtime_name_pattern = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,47}$")
     if not runtime_name_pattern.match(request.name):
@@ -1890,6 +2098,8 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
         region=region,
         account_id=account_id,
         ci_config=harness_ci_config,
+        provider=harness_provider,
+        base_url=request.base_url,
     )
 
     return response_data
@@ -1925,6 +2135,8 @@ def _deploy_harness_background(
     vpc_subnet_ids: list[str] | None = None,
     vpc_security_group_ids: list[str] | None = None,
     ci_config: dict[str, Any] | None = None,
+    provider: str = "bedrock",
+    base_url: str | None = None,
 ) -> None:
     """Background task that creates credential providers and the harness in AWS."""
     db = SessionLocal()
@@ -1933,6 +2145,57 @@ def _deploy_harness_background(
         if not agent:
             logger.error("Background harness deploy: agent %s not found", agent_id)
             return
+
+        # --- Step 0: Resolve base_url + vend a scoped virtual key for LiteLLM ---
+        litellm_cp_name: str | None = None
+        litellm_cp_arn: str | None = None
+        if provider == "litellm":
+            from app.services.litellm import get_agent_base_url, vend_virtual_key
+            base_url = get_agent_base_url(db) or base_url
+
+            agent.deployment_status = "creating_credentials"
+            db.commit()
+            # Never hand the master key to the harness — mint a scoped
+            # virtual key (same mechanism as the "deploy" custom-agent
+            # path) and wrap that in the AgentCore API key credential
+            # provider the harness reads at invocation time.
+            virtual_key = vend_virtual_key(agent_id, name, [model_id], db)
+            if virtual_key:
+                # apiKeyArn's harness-side regex only allows [a-zA-Z0-9-.] in
+                # the provider-name segment, so underscores in the agent name
+                # must become hyphens or CreateHarness rejects the ARN AWS
+                # itself just handed back from create_api_key_credential_provider.
+                sanitized_name = re.sub(r"[^a-zA-Z0-9-.]", "-", name)
+                litellm_cp_name = f"loom-{sanitized_name}-litellm-key"
+                try:
+                    cp_response = create_api_key_credential_provider(
+                        name=litellm_cp_name,
+                        api_key=virtual_key,
+                        region=region,
+                    )
+                    litellm_cp_arn = cp_response.get("credentialProviderArn")
+                    logger.info(
+                        "Created API key credential provider '%s' for harness agent '%s' (arn=%s)",
+                        litellm_cp_name, name, litellm_cp_arn,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to create API key credential provider for harness agent '%s': %s",
+                        name, e,
+                    )
+                    agent.status = "FAILED"
+                    agent.deployment_status = "credential_creation_failed"
+                    db.commit()
+                    return
+            else:
+                logger.error(
+                    "Failed to vend a LiteLLM virtual key for harness agent '%s' — is LiteLLM configured in Settings?",
+                    name,
+                )
+                agent.status = "FAILED"
+                agent.deployment_status = "credential_creation_failed"
+                db.commit()
+                return
 
         # --- Step 1: Create credential providers for OAuth2 MCP servers ---
         has_oauth2 = any(s["auth_type"] == "oauth2" for s in mcp_snapshots)
@@ -2102,6 +2365,10 @@ def _deploy_harness_background(
             "system_prompt": system_prompt,
             "model_id": model_id,
             "max_tokens": max_tokens,
+            "provider": provider,
+            "base_url": base_url or "",
+            "litellm_api_key_credential_provider_name": litellm_cp_name or "",
+            "litellm_api_key_credential_provider_arn": litellm_cp_arn or "",
             "harness_config": {
                 "tools": all_mcp_tools,
                 "deploy_tools": harness_tools,
@@ -2156,6 +2423,9 @@ def _deploy_harness_background(
             memory_retrieval_config=primary_memory_retrieval_config,
             tags=resolved_tags if resolved_tags else None,
             region=region,
+            provider=provider,
+            litellm_api_key_arn=litellm_cp_arn,
+            litellm_api_base=base_url,
         )
 
         harness_id = response.get("harnessId", "")
@@ -2773,6 +3043,7 @@ def delete_agent(
     # Extract credential provider names from agent config for cleanup
     config_map = {e.key: e.value for e in agent.config_entries}
     cp_names: list[str] = []
+    litellm_cp_name: str | None = None
     config_json_str = config_map.get("AGENT_CONFIG_JSON")
     if config_json_str:
         try:
@@ -2786,8 +3057,16 @@ def delete_agent(
                 cp_name = (a2a.get("auth") or {}).get("credential_provider_name")
                 if cp_name:
                     cp_names.append(cp_name)
+            litellm_cp_name = agent_config.get("litellm_api_key_credential_provider_name") or None
         except (json.JSONDecodeError, TypeError):
             pass
+
+    # Virtual key lives in the external LiteLLM proxy, not AWS — revoke it
+    # regardless of cleanup_aws.
+    litellm_virtual_key_alias = config_map.get("LITELLM_VIRTUAL_KEY_ALIAS")
+    if litellm_virtual_key_alias:
+        from app.services.litellm import revoke_virtual_key
+        revoke_virtual_key(litellm_virtual_key_alias, db)
 
     # For local-only deletion (no AWS cleanup or no runtime)
     if not cleanup_aws or not agent.runtime_id:
@@ -2892,6 +3171,12 @@ def delete_agent(
             logger.info("Deleted credential provider '%s'", cp_name)
         except Exception as e:
             logger.warning("Failed to delete credential provider '%s': %s", cp_name, e)
+    if litellm_cp_name:
+        try:
+            delete_api_key_credential_provider(litellm_cp_name, _region)
+            logger.info("Deleted API key credential provider '%s'", litellm_cp_name)
+        except Exception as e:
+            logger.warning("Failed to delete API key credential provider '%s': %s", litellm_cp_name, e)
 
     # Clean up Cognito client secret from Secrets Manager
     if _secret_arn:
@@ -3541,6 +3826,15 @@ def export_agent(agent_id: int, user: UserInfo = Depends(require_scopes("admin:w
     allowed = agent.get_allowed_model_ids()
     if allowed:
         data["allowed_models"] = allowed
+    data["provider"] = agent_config.get("provider") or "bedrock"
+    if agent_config.get("base_url"):
+        data["base_url"] = agent_config["base_url"]
+    api_key_secret_arn = agent_config.get("api_key_secret_arn")
+    if api_key_secret_arn:
+        try:
+            data["api_key"] = get_secret(api_key_secret_arn, agent.region)
+        except Exception:
+            logger.warning("Failed to retrieve provider API key secret for agent %s", agent_id, exc_info=True)
 
     if agent.network_mode and agent.network_mode != "PUBLIC":
         vpc_block: dict[str, Any] = {"mode": agent.network_mode}
@@ -3657,7 +3951,7 @@ def patch_agent(
             except Exception:
                 logger.warning("Failed to propagate description to AgentCore for agent %s", agent_id, exc_info=True)
     if "model_id" in request.model_fields_set and request.model_id is not None:
-        valid_ids = {m["model_id"] for m in SUPPORTED_MODELS}
+        valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
         if request.model_id not in valid_ids:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -3673,7 +3967,7 @@ def patch_agent(
                     pass
                 break
     if "allowed_model_ids" in request.model_fields_set and request.allowed_model_ids is not None:
-        valid_ids = {m["model_id"] for m in SUPPORTED_MODELS}
+        valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
         invalid = [m for m in request.allowed_model_ids if m not in valid_ids]
         if invalid:
             raise HTTPException(
@@ -3681,8 +3975,64 @@ def patch_agent(
                 detail=f"Invalid model IDs: {invalid}",
             )
         agent.set_allowed_model_ids(request.allowed_model_ids)
+    provider_fields_set = {"provider", "base_url", "api_key"} & request.model_fields_set
+    if provider_fields_set:
+        if request.provider is not None:
+            provider = request.provider.lower()
+            if provider not in SUPPORTED_PROVIDER_IDS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported provider '{provider}'. Must be one of: {sorted(SUPPORTED_PROVIDER_IDS)}"
+                )
+            if provider != "bedrock" and agent.source == "harness":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Harness-sourced agents only support the 'bedrock' provider (AgentCore Harness API limitation)"
+                )
+        patched_provider = (request.provider or "bedrock").lower() if request.provider is not None else None
+        patched_base_url: str | None = request.base_url
+        api_key_secret_arn = None
+        if patched_provider == "litellm":
+            # Same as create-time: never accept a client-supplied api_key or
+            # base_url for LiteLLM — resolve from the global connection and
+            # mint a fresh scoped virtual key.
+            from app.services.litellm import get_agent_base_url, vend_virtual_key
+            patched_base_url = get_agent_base_url(db) or ""
+            virtual_key = vend_virtual_key(agent.id, agent.name, agent.get_allowed_model_ids(), db)
+            if virtual_key:
+                api_key_secret_arn = _store_provider_api_key(agent.id, agent.name, "litellm", virtual_key, agent.region)
+        elif request.api_key:
+            api_key_secret_arn = _store_provider_api_key(agent.id, agent.name, request.provider or "custom", request.api_key, agent.region)
+        if api_key_secret_arn:
+            entry = next((e for e in agent.config_entries if e.key == "LLM_PROVIDER_API_KEY_SECRET_ARN"), None)
+            if entry:
+                entry.value = api_key_secret_arn
+            else:
+                db.add(ConfigEntry(
+                    agent_id=agent.id,
+                    key="LLM_PROVIDER_API_KEY_SECRET_ARN",
+                    value=api_key_secret_arn,
+                    is_secret=True,
+                    source="secrets_manager",
+                ))
+        for entry in agent.config_entries:
+            if entry.key == "AGENT_CONFIG_JSON":
+                try:
+                    config = json.loads(entry.value)
+                    if patched_provider is not None:
+                        config["provider"] = patched_provider
+                    if patched_base_url is not None:
+                        config["base_url"] = patched_base_url
+                    if api_key_secret_arn:
+                        config["api_key_secret_arn"] = api_key_secret_arn
+                    entry.value = json.dumps(config)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                break
     db.commit()
     db.refresh(agent)
+    if provider_fields_set:
+        _sync_role_policy_for_provider_update(agent, db)
     return _agent_response(agent, db)
 
 

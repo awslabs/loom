@@ -234,7 +234,7 @@ Full deployment form with sections:
 - **JSON Import/Export**: Collapsible section (ChevronDown/ChevronRight toggle) via the shared `JsonConfigSection` component. Import maps `name`, `description`, `persona` (→ agent description), `instructions` (→ behavioral guidelines), `behavior` (→ output expectations), `model`, `role`, `network_mode`, `authorizer`, `tags` (tag profile name). Export serializes the current form state to JSON using human-readable identifiers (model ID, role name, authorizer name, tag profile name); empty/default fields are omitted. Apply/Export/Cancel buttons. Invalid JSON shows inline error without clearing existing fields.
 - **Agent Identity**: name (1/3 width) and description (2/3 width)
 - **System Prompt**: agent description, behavioral guidelines, output expectations — each with placeholder examples
-- **Default Model / Protocol / Network / IAM Role**: single flex row with explicit widths (20% / 10% / 10% / flex-1). Default Model uses `SearchableSelect` with grouped options, no default selection. Protocol offers HTTP as selectable; MCP and A2A shown as disabled (custom only). Network offers PUBLIC; VPC shown as disabled. IAM Role uses a `SearchableSelect` with searchable dropdown. Both model and IAM role are required — deploy button is disabled until both are selected.
+- **Provider / Default Model / Protocol / Network / IAM Role**: Provider selector (Bedrock default, or LiteLLM when a proxy connection is configured — see [17. Alternate LLM Providers](#17-alternate-llm-providers-litellm-proxy)) precedes Default Model, which uses `SearchableSelect` with grouped options and no default selection; switching provider resets the model selection. Protocol offers HTTP as selectable; MCP and A2A shown as disabled (custom only). Network offers PUBLIC; VPC shown as disabled. IAM Role uses a `SearchableSelect` with searchable dropdown. Model, provider, and IAM role are required — deploy button is disabled until all are selected.
 - **Allowed Models (runtime selection)**: shown after a default model is selected. Per-vendor grouped checkboxes via `groupModels()`. The default model is always checked and disabled. Additional models can be checked to allow runtime selection at invoke time. If no additional models are selected, only the default model is allowed. JSON import/export supports `allowed_models` array field.
 - **Model Parameters** (managed only): max tokens, temperature, top_p — numeric inputs for controlling harness model behavior.
 - **Built-in Tools** (managed only): toggle switches for Code Interpreter and Browser tools. When enabled, the corresponding `agentcore_code_interpreter` or `agentcore_browser` tool is added to the harness configuration.
@@ -498,7 +498,7 @@ Create/edit form with:
 **Content:**
 - Page header: "Settings" with description "Manage display preferences."
 - **Preferences** section: Theme selector (grouped by Light/Dark using SelectGroup/SelectLabel, always drops down via `position="popper"`) and Timezone selector (local/UTC)
-- **Enabled Models** section (requires `settings:read`/`settings:write`): Per-vendor grouped checkboxes for selecting which models are available platform-wide. When none are selected, all models are available. Save button with confirmation indicator. Status text shows count (e.g., "8 of 22 models enabled"). Uses `groupModels()` utility for alphabetical vendor grouping. Configuration is saved via `PUT /api/settings/models`.
+- **Enabled Models** section (requires `settings:read`/`settings:write`): Split into a Bedrock block and an optional LiteLLM block (connection toggle, base URLs, write-only master key, Refresh button) — see [17. Alternate LLM Providers](#17-alternate-llm-providers-litellm-proxy). Per-vendor grouped checkboxes within each provider block for selecting which models are available platform-wide, plus a text filter. When none are selected for a provider, all of that provider's models are available. Save button with confirmation indicator. Status text shows count (e.g., "8 of 22 models enabled"). Uses `groupModels()` utility for alphabetical vendor grouping. Configuration is saved via `PUT /api/settings/models`.
 - Always visible in the sidebar (no scope guard for visibility)
 
 ---
@@ -1008,7 +1008,45 @@ The agent registration form shows M2M/OBO badges next to each OAuth2 MCP server 
 
 ---
 
-## 17. Future Work
+## 17. Alternate LLM Providers (LiteLLM Proxy)
+
+Backend design (provider registry, virtual key vending, dynamic model catalog, IAM/IaC) is documented in [`backend/SPECIFICATIONS.md` § 16](../backend/SPECIFICATIONS.md#16-alternate-llm-providers-litellm-proxy); this section covers only the frontend surface.
+
+### 17.1 Provider-Aware Deploy Form
+
+`AgentRegistrationForm` adds a provider selector (fetched via `fetchProviders()` → `GET /api/agents/providers`), positioned alongside the Default Model field. Switching providers resets the model selection and any provider-specific credential fields.
+
+- **Bedrock** (default): unchanged — model list from `fetchModels()`, no additional fields.
+- **LiteLLM**: selecting it triggers a lazy, on-demand fetch of `fetchLitellmModels()` (`GET /api/agents/models/litellm`) rather than loading it eagerly alongside Bedrock's list on page mount, since the LiteLLM catalog reflects exactly what's deployed on the connected proxy and may not be configured at all. The same lazy fetch is triggered when importing/editing a manifest whose `provider` is `litellm`, so the model dropdown has options to match against.
+- A provider whose registry entry has `harness_supported: false` forces the Deployment Type radio back to "Custom Agent" if "Managed Agent" was selected — failing fast in the UI rather than letting the backend reject an unsupported combination after deploy.
+- **JSON import/export**: accepts both a flat `provider` string (legacy manifests / backend `GET /api/agents/{id}/integration`-style export) and a nested `{id, base_url, api_key}` object, since the manifest format evolved during this feature. Exported manifests always use the flat string form going forward.
+
+### 17.2 Provider-Aware Model Pickers (Invoke, Chat)
+
+Because `GET /api/agents/models` only ever returns Bedrock models, any surface that resolves an agent's `allowed_model_ids` to display names must also merge in `fetchLitellmModels()` — otherwise a LiteLLM agent's allowed models fail to match and the picker either hides or falls back to showing raw IDs:
+
+- **`InvokePanel`**: merges `fetchModels()` and `fetchLitellmModels()` (both fetched in parallel, each tolerant of failure) into a single `ModelOption[]` before filtering to the agent's `allowedModelIds`.
+- **`ChatPage`**: same merge for the model picker in the input area footer. `availableModels` additionally synthesizes a fallback `{model_id, display_name: model_id}` entry for any `allowed_model_ids` value missing from the merged catalog — the invoke endpoint only ever validates against the agent's own `allowed_model_ids` (not the admin's global enabled-models allowlist), so a model that's invocable but temporarily absent from the catalog is still shown rather than silently hidden.
+- **`groupModelsByProvider()`** (`lib/models.ts`): groups a `ModelOption[]` by `provider` field (Bedrock first, then LiteLLM, then alphabetically for any others), then applies the existing `groupModels()` vendor grouping within each provider group.
+
+### 17.3 Settings Page LiteLLM Panel
+
+The Settings page's "Enabled Models" section (§ 9) is split into a Bedrock block (always available, no connection toggle) and a LiteLLM block:
+
+- **Enabled toggle**: mirrors the backend's `litellm_enabled` setting. Fields below are only shown when checked.
+- **Agent Base URL** and **Discovery Base URL** inputs, each with inline helper text explaining the distinction (agent/harness runtime reachability vs. backend-only model discovery) — mirroring the backend's two-base-URL design.
+- **Master key**: password-style input, write-only — never pre-filled from the server. A `has_master_key` boolean from `GET /api/settings/litellm-proxy` is used to show whether a key is already stored, without ever displaying it.
+- **Model list**: the merged catalog (`allModels`) is split by `provider` into a Bedrock section and a LiteLLM section, each with its own per-vendor grouped checkboxes, an "All"/"None" quick-toggle per section, and a shared text filter (matches display name or model ID) that narrows both sections simultaneously.
+- **Refresh button**: calls `POST /api/settings/litellm-proxy/refresh` and replaces `allModels`/`enabledModelIds` with the response — used to recover from a stale/empty LiteLLM catalog (e.g. fetched while the proxy was briefly unreachable) without waiting out the cache TTL.
+- Saving the connection (`updateLitellmProxyConfig`) re-triggers the enabled-models fetch so the model list reflects the new connection immediately.
+
+### 17.4 Types
+
+`Provider` (`id`, `display_name`, `requires_api_key`, `requires_base_url`, `harness_supported`, `available`) added to `api/types.ts`. `ModelOption` gains an optional `provider` field. `AgentDeployRequest` and `AgentHarnessDeployRequest` gain optional `provider`, `base_url`, and `api_key` fields. `patchAgent()` accepts the same three fields for editing an existing agent's provider configuration.
+
+---
+
+## 18. Future Work
 
 - **VPC network mode** support
 - **Operate Tab** — aggregate dashboard with summary cards, per-agent latency charts

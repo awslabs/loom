@@ -57,6 +57,9 @@ export interface AgentHarnessDeployRequest {
   output_expectations: string;
   model_id: string;
   allowed_model_ids?: string[];
+  provider?: string;
+  base_url?: string;
+  api_key?: string;
   role_arn: string;
   network_mode: string;
   vpc_config_id: number | null;
@@ -97,6 +100,9 @@ export interface AgentDeployRequest {
   output_expectations: string;
   model_id: string;
   allowed_model_ids?: string[];
+  provider?: string;
+  base_url?: string;
+  api_key?: string;
   role_arn: string | null;
   protocol: string;
   network_mode: string;
@@ -146,6 +152,16 @@ export interface ModelOption {
   model_id: string;
   display_name: string;
   group?: string;
+  provider?: string;
+}
+
+export interface Provider {
+  id: string;
+  display_name: string;
+  requires_api_key: boolean;
+  requires_base_url: boolean;
+  harness_supported: boolean;
+  available: boolean;
 }
 
 // Config types

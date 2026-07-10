@@ -104,6 +104,41 @@ export function updateEnabledModels(model_ids: string[]): Promise<EnabledModelsC
   });
 }
 
+export function refreshLitellmModels(): Promise<EnabledModelsConfig> {
+  return apiFetch<EnabledModelsConfig>("/api/settings/litellm-proxy/refresh", {
+    method: "POST",
+  });
+}
+
+// LiteLLM Proxy Configuration API
+export interface LitellmProxyConfig {
+  enabled: boolean;
+  base_url: string;
+  discovery_base_url: string;
+  has_master_key: boolean;
+}
+
+export function getLitellmProxyConfig(): Promise<LitellmProxyConfig> {
+  return apiFetch<LitellmProxyConfig>("/api/settings/litellm-proxy");
+}
+
+export function updateLitellmProxyConfig(
+  enabled: boolean,
+  base_url: string,
+  discovery_base_url: string,
+  master_key?: string,
+): Promise<LitellmProxyConfig> {
+  return apiFetch<LitellmProxyConfig>("/api/settings/litellm-proxy", {
+    method: "PUT",
+    body: JSON.stringify({
+      enabled,
+      base_url,
+      discovery_base_url,
+      ...(master_key ? { master_key } : {}),
+    }),
+  });
+}
+
 // VPC Configuration API
 export function listVpcConfigs(): Promise<VpcConfig[]> {
   return apiFetch<VpcConfig[]>("/api/settings/vpc-configs");

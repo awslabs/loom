@@ -192,7 +192,7 @@ class TestBuildBasePolicy(unittest.TestCase):
         policy = build_base_policy("us-east-1", "123456789012", "my-agent")
 
         self.assertEqual(policy["Version"], "2012-10-17")
-        self.assertEqual(len(policy["Statement"]), 2)
+        self.assertEqual(len(policy["Statement"]), 5)
         # Workload identity statement
         stmt = policy["Statement"][0]
         self.assertEqual(stmt["Effect"], "Allow")
@@ -208,6 +208,28 @@ class TestBuildBasePolicy(unittest.TestCase):
         self.assertEqual(oauth2_stmt["Effect"], "Allow")
         self.assertIn("bedrock-agentcore:GetResourceOauth2Token", oauth2_stmt["Action"])
         self.assertTrue(any("token-vault" in r for r in oauth2_stmt["Resource"]))
+        # API key credential provider statement (used by liteLlmModelConfig.apiKeyArn)
+        apikey_stmt = policy["Statement"][2]
+        self.assertEqual(apikey_stmt["Effect"], "Allow")
+        self.assertIn("bedrock-agentcore:GetResourceApiKey", apikey_stmt["Action"])
+        self.assertTrue(any("apikeycredentialprovider" in r for r in apikey_stmt["Resource"]))
+        # Secrets Manager statement — scoped by agent_name prefix (not
+        # agent_id), so a shared managed role covers every agent whose name
+        # starts with that prefix, e.g. "loom-role-demo" covering "demo_foo".
+        secrets_stmt = policy["Statement"][4]
+        self.assertEqual(secrets_stmt["Effect"], "Allow")
+        self.assertIn("secretsmanager:GetSecretValue", secrets_stmt["Action"])
+        self.assertTrue(any("loom/agents/my-agent*" in r for r in secrets_stmt["Resource"]))
+
+    def test_build_base_policy_secrets_scoped_by_name_not_id(self) -> None:
+        """A shared role built with a prefix as agent_name (e.g. "demo") must
+        scope Secrets Manager access by that same prefix, independent of any
+        agent_id — agent_id isn't known when a shared role is created."""
+        policy = build_base_policy("us-east-1", "123456789012", "demo")
+
+        secrets_stmt = policy["Statement"][4]
+        self.assertTrue(any("loom/agents/demo*" in r for r in secrets_stmt["Resource"]))
+        self.assertFalse(any("agents/None" in r for r in secrets_stmt["Resource"]))
 
 
 class TestBuildIntegrationPolicyStatements(unittest.TestCase):
@@ -357,8 +379,9 @@ class TestUpdateRolePolicy(unittest.TestCase):
         call_kwargs = mock_client.put_role_policy.call_args[1]
         self.assertEqual(call_kwargs["RoleName"], "loom-agent-rt-123")
         policy = json.loads(call_kwargs["PolicyDocument"])
-        # Base policy statements (workload identity + OAuth2 credential provider) + S3 integration
-        self.assertEqual(len(policy["Statement"]), 3)
+        # Base policy statements (workload identity + OAuth2 credential provider +
+        # API key credential provider + logs + secrets manager) + S3 integration
+        self.assertEqual(len(policy["Statement"]), 6)
 
 
 class TestDeleteExecutionRole(unittest.TestCase):

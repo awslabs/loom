@@ -523,6 +523,242 @@ class TestHarnessService(unittest.TestCase):
         delete_harness("h-1")
         mock_client.delete_harness.assert_called_once_with(harnessId="h-1")
 
+    @patch("boto3.client")
+    def test_create_harness_litellm_provider(self, mock_boto3_client):
+        from app.services.harness import create_harness
+
+        mock_client = MagicMock()
+        mock_boto3_client.return_value = mock_client
+        mock_client.create_harness.return_value = {"harnessId": "h-litellm", "status": "CREATING"}
+
+        create_harness(
+            name="litellm_test",
+            execution_role_arn="arn:role",
+            model_id="claude-sonnet-5",
+            system_prompt="prompt",
+            provider="litellm",
+            litellm_api_key_arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:token-vault/default/apikeycredentialprovider/loom-litellm_test-litellm-key",
+            litellm_api_base="https://my-proxy.example.com",
+            max_tokens=2048,
+        )
+
+        call_kwargs = mock_client.create_harness.call_args[1]
+        model_cfg = call_kwargs["model"]["liteLlmModelConfig"]
+        self.assertNotIn("bedrockModelConfig", call_kwargs["model"])
+        self.assertEqual(model_cfg["modelId"], "claude-sonnet-5")
+        self.assertEqual(
+            model_cfg["apiKeyArn"],
+            "arn:aws:bedrock-agentcore:us-east-1:123456789012:token-vault/default/apikeycredentialprovider/loom-litellm_test-litellm-key",
+        )
+        self.assertEqual(model_cfg["apiBase"], "https://my-proxy.example.com")
+        self.assertEqual(model_cfg["maxTokens"], 2048)
+
+    @patch("boto3.client")
+    def test_create_harness_litellm_provider_without_key_or_base(self, mock_boto3_client):
+        from app.services.harness import create_harness
+
+        mock_client = MagicMock()
+        mock_boto3_client.return_value = mock_client
+        mock_client.create_harness.return_value = {"harnessId": "h-litellm2", "status": "CREATING"}
+
+        create_harness(
+            name="litellm_test2",
+            execution_role_arn="arn:role",
+            model_id="bedrock/anthropic.claude-sonnet-4-6",
+            system_prompt="prompt",
+            provider="litellm",
+        )
+
+        model_cfg = mock_client.create_harness.call_args[1]["model"]["liteLlmModelConfig"]
+        self.assertEqual(model_cfg["modelId"], "bedrock/anthropic.claude-sonnet-4-6")
+        self.assertNotIn("apiKeyArn", model_cfg)
+        self.assertNotIn("apiBase", model_cfg)
+
+    @patch("boto3.client")
+    def test_invoke_harness_stream_litellm_provider_override(self, mock_boto3_client):
+        from app.services.harness import invoke_harness_stream
+
+        mock_client = MagicMock()
+        mock_boto3_client.return_value = mock_client
+        mock_client.invoke_harness.return_value = {"stream": []}
+
+        list(invoke_harness_stream(
+            harness_arn="arn:harness",
+            session_id="sess-3",
+            prompt="Hi",
+            model_id="claude-opus-4-8",
+            provider="litellm",
+            litellm_api_key_arn="arn:cp",
+            litellm_api_base="https://my-proxy.example.com",
+        ))
+
+        call_kwargs = mock_client.invoke_harness.call_args[1]
+        model_cfg = call_kwargs["model"]["liteLlmModelConfig"]
+        self.assertEqual(model_cfg["modelId"], "claude-opus-4-8")
+        self.assertEqual(model_cfg["apiKeyArn"], "arn:cp")
+        self.assertEqual(model_cfg["apiBase"], "https://my-proxy.example.com")
+
+
+class TestDeployHarnessLitellmProvider(unittest.TestCase):
+    """Test the /api/agents harness deploy path for provider='litellm'."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=cls.engine)
+        cls.TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    def setUp(self):
+        self.session = self.TestingSessionLocal()
+
+        def override_get_db():
+            try:
+                yield self.session
+            finally:
+                pass
+
+        app.dependency_overrides[get_db] = override_get_db
+
+        import app.routers.agents as _agents_mod
+        self._original_session_local = _agents_mod.SessionLocal
+        _agents_mod.SessionLocal = self.TestingSessionLocal
+
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        import app.routers.agents as _agents_mod
+        _agents_mod.SessionLocal = self._original_session_local
+
+        self.session.rollback()
+        self.session.close()
+        Base.metadata.drop_all(bind=self.engine)
+        Base.metadata.create_all(bind=self.engine)
+
+    @patch("app.routers.agents.create_harness_api")
+    @patch("app.routers.agents.create_api_key_credential_provider")
+    @patch("app.services.litellm.vend_virtual_key")
+    @patch("app.services.litellm.get_agent_base_url")
+    def test_deploy_harness_with_litellm_provider(
+        self, mock_agent_base_url, mock_vend, mock_create_cp, mock_create_harness
+    ):
+        mock_agent_base_url.return_value = "https://my-proxy.example.com"
+        mock_vend.return_value = "sk-virtual-key"
+        mock_create_cp.return_value = {
+            "credentialProviderArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:token-vault/default/apikeycredentialprovider/loom-litellm_harness-litellm-key",
+        }
+        mock_create_harness.return_value = {
+            "harnessId": "h-litellm-e2e",
+            "harnessArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:harness/h-litellm-e2e",
+            "status": "CREATING",
+            "environment": {"agentCoreRuntimeEnvironment": {}},
+        }
+
+        response = self.client.post(
+            "/api/agents",
+            json={
+                "source": "harness",
+                "name": "litellm_harness",
+                "model_id": "claude-sonnet-5",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
+                "provider": "litellm",
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+
+        mock_vend.assert_called_once()
+        mock_create_cp.assert_called_once()
+        self.assertEqual(mock_create_cp.call_args[1]["name"], "loom-litellm_harness-litellm-key")
+        self.assertEqual(mock_create_cp.call_args[1]["api_key"], "sk-virtual-key")
+
+        create_kwargs = mock_create_harness.call_args[1]
+        self.assertEqual(create_kwargs["provider"], "litellm")
+        self.assertEqual(
+            create_kwargs["litellm_api_key_arn"],
+            "arn:aws:bedrock-agentcore:us-east-1:123456789012:token-vault/default/apikeycredentialprovider/loom-litellm_harness-litellm-key",
+        )
+        self.assertEqual(create_kwargs["litellm_api_base"], "https://my-proxy.example.com")
+
+        agent = self.session.query(Agent).filter(Agent.name == "litellm_harness").first()
+        config = self.session.query(ConfigEntry).filter(
+            ConfigEntry.agent_id == agent.id,
+            ConfigEntry.key == "AGENT_CONFIG_JSON",
+        ).first()
+        config_data = json.loads(config.value)
+        self.assertEqual(config_data["provider"], "litellm")
+        self.assertEqual(config_data["base_url"], "https://my-proxy.example.com")
+        self.assertEqual(config_data["litellm_api_key_credential_provider_name"], "loom-litellm_harness-litellm-key")
+
+    @patch("app.services.litellm.get_agent_base_url", return_value="")
+    def test_deploy_harness_litellm_requires_configured_connection(self, mock_agent_base_url):
+        response = self.client.post(
+            "/api/agents",
+            json={
+                "source": "harness",
+                "name": "litellm_harness_unconfigured",
+                "model_id": "claude-sonnet-5",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
+                "provider": "litellm",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("not configured", response.json()["detail"])
+
+    @patch("app.routers.agents.create_api_key_credential_provider")
+    @patch("app.services.litellm.vend_virtual_key")
+    @patch("app.services.litellm.get_agent_base_url")
+    def test_deploy_harness_litellm_credential_provider_failure_sets_failed_status(
+        self, mock_agent_base_url, mock_vend, mock_create_cp
+    ):
+        mock_agent_base_url.return_value = "https://my-proxy.example.com"
+        mock_vend.return_value = "sk-virtual-key"
+        mock_create_cp.side_effect = Exception("AWS error")
+
+        response = self.client.post(
+            "/api/agents",
+            json={
+                "source": "harness",
+                "name": "litellm_harness_cp_fail",
+                "model_id": "claude-sonnet-5",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
+                "provider": "litellm",
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+
+        agent = self.session.query(Agent).filter(Agent.name == "litellm_harness_cp_fail").first()
+        self.assertIsNotNone(agent)
+        self.assertEqual(agent.deployment_status, "credential_creation_failed")
+        self.assertEqual(agent.status, "FAILED")
+
+    @patch("app.services.litellm.vend_virtual_key", return_value=None)
+    @patch("app.services.litellm.get_agent_base_url")
+    def test_deploy_harness_litellm_vend_failure_sets_failed_status(self, mock_agent_base_url, mock_vend):
+        mock_agent_base_url.return_value = "https://my-proxy.example.com"
+
+        response = self.client.post(
+            "/api/agents",
+            json={
+                "source": "harness",
+                "name": "litellm_harness_vend_fail",
+                "model_id": "claude-sonnet-5",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
+                "provider": "litellm",
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+
+        agent = self.session.query(Agent).filter(Agent.name == "litellm_harness_vend_fail").first()
+        self.assertIsNotNone(agent)
+        self.assertEqual(agent.deployment_status, "credential_creation_failed")
+        self.assertEqual(agent.status, "FAILED")
+
 
 if __name__ == "__main__":
     unittest.main()

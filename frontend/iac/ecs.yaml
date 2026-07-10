@@ -52,7 +52,7 @@ Resources:
           ignore_checks:
             - EA017
     Properties:
-      Description: KMS key for frontend CloudWatch Logs encryption
+      Description: !Sub "KMS key for ${AWS::StackName} frontend CloudWatch Logs encryption"
       EnableKeyRotation: true
       KeyPolicy:
         Version: "2012-10-17"

@@ -86,7 +86,7 @@ def _fix_console_script_shebangs(target_dir: str) -> None:
         )
         with open(script_path, "w") as f:
             f.write(content)
-        os.chmod(script_path, 0o700)
+        os.chmod(script_path, 0o755)
         logger.info("Fixed shebang for %s", script_name)
 
 

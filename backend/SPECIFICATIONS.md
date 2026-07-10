@@ -34,6 +34,9 @@ All runtime configuration is injected via environment variables sourced from `et
 | `LOOM_COGNITO_REGION` | Region of the Cognito pool | `AWS_REGION` |
 | `LOOM_COGNITO_USER_CLIENT_ID` | Cognito user app client ID (auto-included in agent authorizer `allowedClients` on deploy) | — |
 | `LOOM_ALLOWED_ORIGINS` | Comma-separated additional CORS origins for deployed environments | — |
+| `LOOM_LITELLM_PROXY_BASE_URL` | Default Agent Base URL for the LiteLLM proxy (what deployed agents/harnesses call at runtime); seeds the Settings page on first load, empty disables the LiteLLM provider | — |
+| `LOOM_LITELLM_DISCOVERY_BASE_URL` | Default Discovery Base URL the backend itself uses for `/model/info`, `/key/generate`, `/key/delete`; falls back to `LOOM_LITELLM_PROXY_BASE_URL` when unset | — |
+| `LOOM_LITELLM_PROXY_API_KEY` | Default LiteLLM proxy master key; a Settings-page save always overrides this | — |
 
 AWS credentials use the standard boto3 credential chain (environment variables, AWS profile, instance metadata).
 
@@ -551,7 +554,9 @@ The `/api/auth/config` endpoint returns only the pool ID and region. The user cl
 | `PUT` | `/api/agents/{agent_id}/redeploy-harness` | Update and redeploy a harness agent with new configuration (UpdateHarness API). |
 | `GET` | `/api/agents/roles` | List IAM roles suitable for AgentCore. |
 | `GET` | `/api/agents/cognito-pools` | List Cognito user pools. |
-| `GET` | `/api/agents/models` | List supported foundation models (with display name and group). |
+| `GET` | `/api/agents/models` | List supported foundation models (with display name and group). Bedrock-only — the merged static/live Bedrock catalog from `model_catalog.get_bedrock_models()`, filtered by `enabled_model_ids`. |
+| `GET` | `/api/agents/models/litellm` | List models reported by the configured LiteLLM proxy's live catalog (`model_catalog.get_litellm_models_live()`). Fetched on demand by the frontend when the LiteLLM provider is selected, not eagerly alongside `/models`. Returns an empty list if no proxy is configured/reachable. |
+| `GET` | `/api/agents/providers` | List the supported LLM provider registry (`backend/etc/providers.json`), each entry annotated with a live `available: bool` (LiteLLM is available only when a proxy connection is configured and enabled). |
 | `GET` | `/api/agents/models/pricing` | List models with pricing metadata (input/output price per 1K tokens). |
 | `GET` | `/api/agents/defaults` | Get configurable defaults (idle timeout, max lifetime). |
 | `PATCH` | `/api/agents/{agent_id}` | Update editable agent fields (description, model_id, allowed_model_ids). Description changes propagated to AgentCore. |
@@ -601,6 +606,9 @@ The `model_id` field is optional on registration and stored as an `AGENT_CONFIG_
 | `output_expectations` | Expected output format/behavior |
 | `model_id` | Foundation model identifier (required) |
 | `allowed_model_ids` | Optional subset of model IDs the user may select at invoke time (defaults to `[model_id]`) |
+| `provider` | LLM provider: `"bedrock"` (default) or `"litellm"`. Non-bedrock providers are only supported for `source="deploy"` and `source="harness"`, validated against `SUPPORTED_PROVIDER_IDS` from `backend/etc/providers.json`. |
+| `base_url` | Custom/private endpoint base URL for OpenAI-compatible providers (unused for `litellm`, which resolves its base URL from the configured proxy connection instead). |
+| `api_key` | Provider API key. Required for non-bedrock, non-litellm providers; ignored for `litellm`, which vends a scoped virtual key automatically (see `services/litellm.py`). |
 | `role_arn` | IAM execution role ARN (required) |
 | `protocol` | `HTTP`, `MCP`, or `A2A` |
 | `network_mode` | `PUBLIC` or `VPC` |
@@ -1028,14 +1036,18 @@ The `has_token` and `token_source` fields in `session_start` indicate whether an
 |--------|------|-------------|
 | `GET` | `/api/settings/site` | List all site settings (includes defaults for unset keys). |
 | `PUT` | `/api/settings/site/{key}` | Create or update a site setting. |
-| `GET` | `/api/settings/models` | Get admin-enabled model IDs and full model catalog. |
-| `PUT` | `/api/settings/models` | Update the set of admin-enabled models. Validates model IDs against `SUPPORTED_MODELS`. |
+| `GET` | `/api/settings/models` | Get admin-enabled model IDs and the full merged model catalog (`model_catalog.get_merged_models()` — static + live Bedrock + live LiteLLM). |
+| `PUT` | `/api/settings/models` | Update the set of admin-enabled models. Validates model IDs against the merged catalog (`get_merged_models()`), so dynamically-discovered Bedrock and LiteLLM models can be enabled too, not just the curated static list. |
 | `GET` | `/api/settings/registry` | Get current registry configuration (ARN, ID, enabled status). |
 | `PUT` | `/api/settings/registry` | Update registry configuration. Validates ARN format before saving. Empty ARN disables. |
+| `GET` | `/api/settings/litellm-proxy` | Get the current LiteLLM proxy configuration (`enabled`, `base_url`, `discovery_base_url`, `has_master_key`). Reflects env-seeded defaults when no Settings-page override has been saved. Never returns the master key. |
+| `PUT` | `/api/settings/litellm-proxy` | Update the LiteLLM proxy configuration. `master_key` is write-only — omit it to leave the stored key untouched. Persists to `SiteSetting` rows + Secrets Manager, then clears the LiteLLM model-catalog cache. |
+| `POST` | `/api/settings/litellm-proxy/refresh` | Force a live re-fetch of the LiteLLM proxy's model catalog, bypassing the cache TTL — recovers from a stale/empty result (e.g. cached while the proxy was unreachable) without a backend restart. Returns the same shape as `GET/PUT /api/settings/models`. |
 
 Current site settings:
 - `cpu_io_wait_discount` (default: `75`) — CPU I/O wait discount percentage (0–99). Applied universally to runtime CPU costs.
-- `enabled_model_ids` (default: `[]`) — JSON array of admin-enabled model IDs. When empty, all models are available. Filters the response of `GET /api/agents/models`.
+- `enabled_model_ids` (default: `[]`) — JSON array of admin-enabled model IDs. When empty, all models are available. Filters the response of `GET /api/agents/models`. May include LiteLLM model IDs.
+- `litellm_enabled`, `litellm_proxy_base_url`, `litellm_discovery_base_url` — LiteLLM proxy connection settings managed via `GET/PUT /api/settings/litellm-proxy` (see [16. Alternate LLM Providers](#16-alternate-llm-providers-litellm-proxy)). The master key is stored separately in Secrets Manager, not as a site setting.
 - `loom_registry_id` (default: `""`) — AWS Agent Registry ARN. Stored in `site_settings`, loaded into memory on startup. Validated format: `arn:aws:bedrock-agentcore:<region>:<account>:registry/<id>`.
 
 ### CloudWatch Logs
@@ -1122,12 +1134,13 @@ Handles agent artifact build and runtime lifecycle:
 
 AgentCore Harness API wrapper for managed agent deployments:
 
-- `create_harness(name, execution_role_arn, model_id, system_prompt, tools, allowed_tools, max_iterations, max_tokens, authorizer_config, network_mode, idle_timeout, max_lifetime, tags, region) -> dict` — creates a new AgentCore Harness via the `bedrock-agentcore-control` client. Builds `bedrockModelConfig` with optional model parameters (maxTokens). Supports tool types: `remote_mcp`, `agentcore_code_interpreter`, `agentcore_browser`. Sets `allowedTools: ["*"]` by default. Returns the harness response with ARN in the `"arn"` field.
+- `create_harness(name, execution_role_arn, model_id, system_prompt, tools, allowed_tools, max_iterations, max_tokens, authorizer_config, network_mode, idle_timeout, max_lifetime, tags, region, provider="bedrock", litellm_api_key_arn=None, litellm_api_base=None) -> dict` — creates a new AgentCore Harness via the `bedrock-agentcore-control` client. Builds the `model` field via `_build_model_config()` — `bedrockModelConfig` (default) or, when `provider="litellm"`, `liteLlmModelConfig` (`modelId`, optional `apiKeyArn` pointing at an AgentCore API key credential provider, `apiBase`, `maxTokens`). Supports tool types: `remote_mcp`, `agentcore_code_interpreter`, `agentcore_browser`. Sets `allowedTools: ["*"]` by default. Returns the harness response with ARN in the `"arn"` field.
 - `get_harness(harness_id, region) -> dict` — retrieves current harness state from the control plane.
 - `delete_harness(harness_id, region) -> dict` — deletes a harness.
-- `update_harness(harness_id, execution_role_arn, model_id, system_prompt, tools, allowed_tools, max_iterations, max_tokens, authorizer_config, network_mode, idle_timeout, max_lifetime, region) -> dict` — updates an existing harness via the `bedrock-agentcore-control` client. Only sends parameters that are explicitly provided (non-None). Used by the `redeploy-harness` endpoint.
-- `invoke_harness_stream(harness_arn, session_id, prompt, region, model_id, system_prompt, tools, allowed_tools, max_iterations, timeout_seconds, max_tokens, actor_id, access_token, user_access_token) -> Generator[dict]` — invokes a harness and yields translated events. When `access_token` is provided, configures the `bedrock-agentcore` client with `UNSIGNED` SigV4 and injects `Authorization: Bearer <token>` via a boto3 `before-send` event hook for JWT auth. When `user_access_token` is provided, injects it as `X-Loom-User-Access-Token` header for OBO token exchange flows. Translates Converse API streaming format (`messageStart`, `contentBlockStart`, `contentBlockDelta`, `contentBlockStop`, `messageStop`, `metadata`) into `{"type": "text", "content": str}`, `{"type": "structured", "content": {"tool_use": {"name": str}}}`, and `{"type": "metadata", "content": dict}` events. Accumulates token counts from metadata events.
+- `update_harness(harness_id, execution_role_arn, model_id, system_prompt, tools, allowed_tools, max_iterations, max_tokens, authorizer_config, network_mode, idle_timeout, max_lifetime, region, provider="bedrock", litellm_api_key_arn=None, litellm_api_base=None) -> dict` — updates an existing harness via the `bedrock-agentcore-control` client. Only sends parameters that are explicitly provided (non-None). Uses the same `_build_model_config()` provider dispatch as `create_harness`. Used by the `redeploy-harness` endpoint.
+- `invoke_harness_stream(harness_arn, session_id, prompt, region, model_id, system_prompt, tools, allowed_tools, max_iterations, timeout_seconds, max_tokens, actor_id, access_token, user_access_token, provider="bedrock", litellm_api_key_arn=None, litellm_api_base=None) -> Generator[dict]` — invokes a harness and yields translated events. When `access_token` is provided, configures the `bedrock-agentcore` client with `UNSIGNED` SigV4 and injects `Authorization: Bearer <token>` via a boto3 `before-send` event hook for JWT auth. When `user_access_token` is provided, injects it as `X-Loom-User-Access-Token` header for OBO token exchange flows. Translates Converse API streaming format (`messageStart`, `contentBlockStart`, `contentBlockDelta`, `contentBlockStop`, `messageStop`, `metadata`) into `{"type": "text", "content": str}`, `{"type": "structured", "content": {"tool_use": {"name": str}}}`, and `{"type": "metadata", "content": dict}` events. Accumulates token counts from metadata events.
 - `resume_harness_stream(harness_arn, session_id, tool_result, region, ..., user_access_token) -> Generator[dict]` — re-invokes a harness with a `toolResult` to resume after an inline function call. Supports the same `user_access_token` header injection for OBO flows.
+- `_build_model_config(provider, model_id, max_tokens=None, litellm_api_key_arn=None, litellm_api_base=None) -> dict` — internal helper selecting the `model` payload shape for `CreateHarness`/`UpdateHarness`/`InvokeHarness` based on `provider`.
 
 ### `services/credential.py`
 
@@ -1135,6 +1148,8 @@ AgentCore credential provider management:
 
 - `create_oauth2_credential_provider(name: str, client_id: str, client_secret: str, auth_server_url: str, region: str, tags: dict | None, delegation_mode: str = "m2m", obo_grant_type: str | None = None) -> dict` — creates or updates an OAuth2 credential provider using the `CustomOauth2` vendor type. When `delegation_mode` is `"obo"`, configures `onBehalfOfTokenExchangeConfig` with the specified grant type (`TOKEN_EXCHANGE` for RFC 8693 or `JWT_AUTHORIZATION_GRANT` for RFC 7523). TOKEN_EXCHANGE uses `actorTokenContent: NONE` with `CLIENT_SECRET_BASIC` auth method; JWT_AUTHORIZATION_GRANT uses `CLIENT_SECRET_POST`. If creation fails with a `ValidationException` indicating the provider already exists, automatically falls back to `update_oauth2_credential_provider` (without tags, which the update API does not accept). Retries other transient failures with exponential backoff (4 retries, delays 2s/4s/8s/16s). Raises on exhaustion.
 - `delete_credential_provider(provider_name: str, region: str)` — deletes an OAuth2 credential provider by name.
+- `create_api_key_credential_provider(name: str, api_key: str, region: str) -> dict` — creates (or, on `ValidationException` indicating the provider already exists, updates) an AgentCore **API key** credential provider — a distinct provider type from the OAuth2 ones above. Used for harness agents' `liteLlmModelConfig.apiKeyArn`, which the Harness resolves itself via `bedrock-agentcore:GetResourceApiKey` at invocation time (not Secrets Manager). Returns the response dict including `credentialProviderArn`.
+- `delete_api_key_credential_provider(provider_name: str, region: str)` — deletes an API key credential provider by name.
 
 **IAM permissions required:** The ECS task role needs both `bedrock-agentcore:*` actions (for the control plane API) and Secrets Manager permissions scoped to `bedrock-agentcore-identity!*` secrets. Credential providers internally store OAuth2 client credentials in Secrets Manager under this prefix. The task role requires `secretsmanager:GetSecretValue`, `CreateSecret`, `DeleteSecret`, and `PutSecretValue` on `arn:aws:secretsmanager:*:${AccountId}:secret:bedrock-agentcore-identity!*`. The CloudWatch Logs policy covers both `/aws/bedrock-agentcore/*` and `/aws/vendedlogs/bedrock-agentcore/*` log group prefixes (the latter is used for agent observability vended logs).
 
@@ -1219,6 +1234,27 @@ A2A Agent Card fetching and connection testing:
 - `store_secret(name: str, secret_value: str, region: str)` — creates or updates a secret.
 - `get_secret(name: str, region: str) -> str` — retrieves a secret value with a 5-minute in-memory cache.
 - `delete_secret(name: str, region: str)` — deletes a secret.
+
+### `services/litellm.py`
+
+LiteLLM proxy master-key resolution and per-agent virtual key vending — see [16. Alternate LLM Providers (LiteLLM Proxy)](#16-alternate-llm-providers-litellm-proxy) for the full design.
+
+- `is_enabled(db) -> bool`, `get_agent_base_url(db) -> str`, `get_effective_config(db) -> dict` — resolve whether the connection is active and which base URL deployed agents use, applying the Settings-override-then-env-var-fallback order.
+- `get_litellm_proxy_config(db) -> tuple[str, str] | None` — resolves `(base_url, master_key)` for calls the Loom *backend itself* makes to the proxy (uses `discovery_base_url`). Returns `None` if no proxy is configured, the Settings-page toggle is off, or the master key can't be read from Secrets Manager.
+- `has_master_key(db) -> bool` — whether a master key is currently resolvable.
+- `vend_virtual_key(agent_id, agent_name, allowed_model_ids, db, timeout=10.0) -> str | None` — mints a scoped virtual key via `POST /key/generate` on the proxy, aliased `loom-agent-{agent_id}`. Revokes any stale key under the same alias first (idempotent under redeploy retries). Returns `None` (rather than raising) if the proxy isn't configured or the request fails — deploy degrades gracefully since the LiteLLM integration is optional.
+- `revoke_virtual_key(key_alias, db, timeout=10.0) -> None` — best-effort `POST /key/delete` by alias; logs and returns on any failure (including 404, expected on first deploy) rather than raising, so an unreachable proxy never blocks agent deletion.
+
+### `services/model_catalog.py`
+
+Dynamic model catalog merging the static list with live Bedrock and LiteLLM sources — see [16. Alternate LLM Providers (LiteLLM Proxy)](#16-alternate-llm-providers-litellm-proxy).
+
+- `get_bedrock_models(region) -> list[dict]` — static `models.json` (Bedrock-lab entries only) enriched with live availability (`list_foundation_models`/`list_inference_profiles`) and live pricing (LiteLLM's public pricing JSON), plus any live-discovered Bedrock model not yet curated in `models.json`. Never contacts the LiteLLM proxy. Cached with a TTL (`LOOM_MODEL_CATALOG_TTL_SECONDS`, default 900s), thread-safe via a lock with re-check-after-acquire.
+- `get_litellm_models_live() -> list[dict]` — models actually configured on the deployed LiteLLM proxy (`/model/info`), resolved via `services/litellm.get_litellm_proxy_config()`. No public-catalog or placeholder fallback — returns `[]` if the proxy isn't configured/enabled/reachable. Cached independently of `get_bedrock_models` with the same TTL.
+- `get_merged_models(region) -> list[dict]` — `get_bedrock_models() + get_litellm_models_live()`, for callers needing the full valid-model-ID universe (settings validation, `PATCH /api/agents/{id}`, pricing).
+- `get_providers_merged() -> list[dict]` — thin passthrough returning `SUPPORTED_PROVIDERS` (a hook for future live provider discovery).
+- `clear_litellm_cache() -> None` — drops the cached LiteLLM proxy catalog so the next call re-fetches live, bypassing the TTL. Called by `PUT /api/settings/litellm-proxy` and `POST /api/settings/litellm-proxy/refresh`.
+- `_normalize_model_id(model_id) -> str` — strips region (`us.`/`eu.`/`apac.`) and `bedrock/` prefixes and lowercases, for cross-source matching between `models.json` IDs, Bedrock's IDs, and LiteLLM's pricing JSON keys.
 
 ### `services/iam.py`
 
@@ -1587,3 +1623,76 @@ agentcore.memory.records               # Query LTM records by actor ID (resolves
 agentcore.memory.records-by-namespace  # List LTM records by memory ID and namespace
 agentcore.memory.extraction-jobs       # List memory extraction jobs
 ```
+
+---
+
+## 16. Alternate LLM Providers (LiteLLM Proxy)
+
+### Overview
+
+Agent model calls default to Amazon Bedrock (IAM-authenticated, no additional configuration). Loom also supports routing an agent's model calls through a self-hosted [LiteLLM](https://www.litellm.ai/) proxy, giving access to any model the proxy exposes (including non-Bedrock providers) without Loom needing per-provider integration code. The provider registry is static and file-based (`backend/etc/providers.json`), loaded into `SUPPORTED_PROVIDERS`/`SUPPORTED_PROVIDER_IDS` in `routers/agents.py`:
+
+```json
+[
+  {"id": "bedrock", "display_name": "Amazon Bedrock", "requires_api_key": false, "requires_base_url": false, "harness_supported": true},
+  {"id": "litellm", "display_name": "LiteLLM", "requires_api_key": false, "requires_base_url": false, "harness_supported": true}
+]
+```
+
+`GET /api/agents/providers` returns this registry merged with a live `available: bool` per provider — LiteLLM is `available` only when a proxy connection is configured and enabled (`services.litellm.is_enabled()`).
+
+### Proxy Connection Resolution (`services/litellm.py`)
+
+The LiteLLM master key is the one credential Loom holds for the proxy; it is never handed to an individual agent (see virtual key vending below). Resolution order for the master key and base URLs, applied uniformly by `get_litellm_proxy_config()`/`get_agent_base_url()`/`get_effective_config()`:
+
+1. **Settings-page override** — `SiteSetting` rows (`litellm_enabled`, `litellm_proxy_base_url`, `litellm_discovery_base_url`) plus the master key in Secrets Manager (`loom/settings/litellm-master-key`), set via Settings → Models → LiteLLM. Wins once an agent base URL has been saved there, gated by the `litellm_enabled` toggle.
+2. **CFN-seeded env vars** — `LOOM_LITELLM_PROXY_BASE_URL`, `LOOM_LITELLM_DISCOVERY_BASE_URL`, `LOOM_LITELLM_PROXY_API_KEY` — used only when no agent base URL has ever been saved via Settings. Considered "enabled" automatically once `LOOM_LITELLM_PROXY_BASE_URL` is set (there's no separate toggle at this tier), so a fresh deploy works without a Settings-page visit.
+
+Two distinct base URLs are tracked because the machine calling the proxy differs:
+- **`agent_base_url`** — what deployed agents/harnesses use at runtime to reach the proxy directly. Must be reachable from wherever the agent runs (e.g. an internal ALB).
+- **`discovery_base_url`** — what the Loom *backend itself* uses for calls it makes directly to the proxy (`/model/info` discovery, `/key/generate`, `/key/delete`). Falls back to `agent_base_url` when not separately set — they're identical in a deployed environment, but during local dev the backend typically reaches the proxy through an SSM tunnel (e.g. `http://localhost:4000`) while agents reach it through the real ALB.
+
+### Per-Agent Virtual Key Vending
+
+Each LiteLLM-provider agent gets a scoped *virtual key* minted via the proxy's key-management API rather than sharing the master key:
+
+- `vend_virtual_key()` calls `POST /key/generate` with `models: allowed_model_ids` and a deterministic `key_alias` of `loom-agent-{agent_id}`, so a retried/redeployed agent doesn't collide with a stale key from a prior attempt (LiteLLM rejects duplicate aliases with 400) — the alias is revoked first, making vending idempotent.
+- `revoke_virtual_key()` calls `POST /key/delete` by alias on agent redeploy/delete. Both functions are best-effort: any failure (unreachable proxy, 404 on delete) is logged and swallowed rather than raised, so the LiteLLM integration being optional never blocks a deploy or delete.
+- **Custom (deploy-type) agents:** the vended virtual key is stored as a Secrets Manager secret at `loom/agents/{name}-{id}/llm-provider-api-key` and referenced via the `LLM_PROVIDER_API_KEY_SECRET_ARN` agent config entry. The agent runtime resolves it at model-build time via `agents/strands_agent/src/integrations/secrets.py::resolve_secret()`.
+- **Harness agents:** the vended key is instead registered as an AgentCore **API key credential provider** (`create_api_key_credential_provider()` in `services/credential.py`, distinct from the OAuth2 credential providers used for MCP/A2A auth). The Harness API's `liteLlmModelConfig.apiKeyArn` resolves it directly via `bedrock-agentcore:GetResourceApiKey` at invocation time — Secrets Manager is not involved for this path. The credential provider name and ARN are stored in `AGENT_CONFIG_JSON` (`litellm_api_key_credential_provider_name`/`_arn`) for cleanup on redeploy/delete.
+
+### Agent Runtime Model Construction
+
+`agents/strands_agent/src/config.py`'s `AgentConfig` carries `provider` (default `"bedrock"`), `base_url`, and `api_key_secret_arn`, parsed from the deploy-time JSON config. `agents/strands_agent/src/agent.py::_build_model()` dispatches on `provider`:
+
+- **`bedrock`** (default) — unchanged `BedrockModel`, IAM-authenticated via the execution role.
+- **`openai` / `anthropic` / `litellm`** — resolves the API key once via `resolve_secret(config.api_key_secret_arn)` and constructs `OpenAIModel` / `AnthropicModel` / `LiteLLMModel` respectively, with `client_args["timeout"]` bounded by `LOOM_MODEL_REQUEST_TIMEOUT_SECONDS` (default 30s). Without this bound, a network path that accepts the TCP connection but never responds (misconfigured security group, unreachable ALB target) hangs the underlying httpx client indefinitely — the failure would otherwise only ever surface as the invoke caller's own read timeout, minutes later, with no detail.
+- For `litellm` specifically, `client_args["use_litellm_proxy"] = True` is set. Without it, a bare model ID (e.g. `"claude-sonnet-5"`) is handed to LiteLLM's SDK unprefixed, and LiteLLM's own provider auto-detection routes the call straight at the real upstream provider (e.g. Anthropic) instead of through the configured proxy's `base_url` — using the proxy's virtual key as if it were a real provider key. Setting this flag makes `LiteLLMModel._apply_proxy_prefix` add a `litellm_proxy/` prefix, forcing the proxy route.
+
+### Dynamic Model Catalog (`services/model_catalog.py`)
+
+The model picker merges four sources, none of which block on each other:
+
+1. **Static `models.json`** — curated `display_name`/`group`/`max_tokens` defaults, source of truth for known models.
+2. **Live Bedrock availability/catalog** — `list_foundation_models`/`list_inference_profiles`, restricted to an allow-listed set of labs (Anthropic, OpenAI, Amazon, DeepSeek, Qwen, Z.AI). Fills in models not yet curated in `models.json`.
+3. **Live LiteLLM proxy catalog** — `/model/info` on the configured proxy, reshaped into the same flat shape as the public pricing catalog. Only queried when a proxy is configured.
+4. **LiteLLM's public pricing JSON** (`model_prices_and_context_window.json` on GitHub, overridable via `LOOM_LITELLM_PRICING_URL`) — pricing fallback/enrichment for curated and dynamically-discovered Bedrock entries.
+
+`get_bedrock_models(region)` (sources 1+2, enriched by 4; never touches the proxy) and `get_litellm_models_live()` (source 3 only, no placeholder fallback) are cached independently with a shared TTL (`LOOM_MODEL_CATALOG_TTL_SECONDS`, default 900s), each behind its own lock with re-check-after-acquire for thread safety under concurrent sync FastAPI handlers. This split means the frontend's eager page-load fetch of Bedrock models never waits on a LiteLLM proxy round-trip, and selecting the LiteLLM provider fetches its catalog on demand rather than eagerly. `get_merged_models(region)` concatenates both for callers needing the complete valid-model-ID universe (`PUT /api/settings/models` validation, `PATCH /api/agents/{id}`, pricing lookups).
+
+`clear_litellm_cache()` drops the cached LiteLLM catalog, exposed via `POST /api/settings/litellm-proxy/refresh` for recovering from a stale/empty cache (e.g. cached while the proxy was momentarily unreachable) without waiting out the TTL or restarting the backend.
+
+### Settings Page Endpoints
+
+`GET/PUT /api/settings/litellm-proxy` manage the connection (`enabled`, `base_url`, `discovery_base_url`, write-only `master_key`). `PUT` persists the toggle/URLs as `SiteSetting` rows, writes the master key to Secrets Manager only if provided (omitting it leaves the stored key untouched), and clears the LiteLLM model-catalog cache so the change takes effect immediately. `POST /api/settings/litellm-proxy/refresh` forces a live re-fetch without changing the connection settings.
+
+### IAM / IaC (`backend/iac/ecs.yaml`)
+
+New parameters `pLitellmProxyBaseUrl`, `pLitellmDiscoveryBaseUrl`, `pLitellmProxyApiKeySecretArn`, `pLitellmProxyApiKeySecretKmsKeyArn` seed the env-var fallback tier described above. When `pLitellmProxyApiKeySecretArn` is set: it's injected as the `LOOM_LITELLM_PROXY_API_KEY` ECS task **Secret** (not a plain environment variable), and the backend task execution role is granted `secretsmanager:GetSecretValue` on it (plus `kms:Decrypt` on `pLitellmProxyApiKeySecretKmsKeyArn`, if the secret uses a customer-managed KMS key rather than the default `aws/secretsmanager` key). Both grants are conditioned on the parameter being non-empty (`HasLitellmProxyApiKey`/`HasLitellmProxyApiKeySecretKmsKey` CFN conditions), so a deployment without LiteLLM configured grants nothing extra.
+
+Deploying and exercising this feature end-to-end also surfaced (and required fixing) several pre-existing IAM gaps on the backend task role, tracked here since they were necessary to actually deploy an agent:
+- **AgentCore runtime lifecycle:** `CreateAgentRuntime`, `CreateAgentRuntimeEndpoint`, `UpdateAgentRuntime`, `UpdateAgentRuntimeEndpoint`, `DeleteAgentRuntime`, `DeleteAgentRuntimeEndpoint` (previously only invoke-time actions were granted, since the original role was built around `register`-source agents).
+- **VPC-mode service-linked role:** `iam:CreateServiceLinkedRole` scoped to `arn:aws:iam::${AccountId}:role/aws-service-role/network.bedrock-agentcore.amazonaws.com/AWSServiceRoleForBedrockAgentCoreNetwork` (condition: `iam:AWSServiceName == network.bedrock-agentcore.amazonaws.com`). VPC-mode runtimes trigger AWS to lazily create this role on first use per account — without the grant, `CreateAgentRuntime` fails with "Failed creating service linked role" before AWS ever evaluates the action's own IAM permissions.
+- **CloudWatch Logs delivery pipeline:** `logs:PutDeliveryDestination`/`PutDeliverySource`/`CreateDelivery` (+ matching `Delete*`) and `logs:DescribeDeliveries` (list-only, no resource-level scoping), used by `services/observability.py` to route AgentCore Runtime and Code Interpreter vended logs into `/aws/vendedlogs/bedrock-agentcore/*`.
+- **Live Bedrock discovery:** `bedrock:ListFoundationModels`/`ListInferenceProfiles` (list-only), used by `model_catalog.py`'s live Bedrock availability/catalog fetch.
+- A dedicated `LogsKmsKey` (customer-managed, rotation enabled) now encrypts the backend's own ECS CloudWatch log group.

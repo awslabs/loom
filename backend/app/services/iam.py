@@ -123,6 +123,7 @@ def create_execution_role(
     tag_policies: list[dict[str, Any]] | None = None,
     extra_tags: dict[str, str] | None = None,
     code_interpreter: bool = False,
+    agent_id: int | str | None = None,
 ) -> str:
     """
     Create an IAM execution role for an agent runtime.
@@ -133,6 +134,8 @@ def create_execution_role(
         region: AWS region name
         account_id: AWS account ID
         code_interpreter: If True, include Code Interpreter permissions
+        agent_id: Loom agent DB ID (used to scope access to its LLM provider
+            API key secret, if any)
 
     Returns:
         ARN of the created IAM role
@@ -143,7 +146,9 @@ def create_execution_role(
 
     role_name = f"loom-agent-{runtime_id}"
     trust_policy = build_trust_policy()
-    base_policy = build_base_policy(region, account_id, agent_name, code_interpreter=code_interpreter)
+    base_policy = build_base_policy(
+        region, account_id, agent_name, code_interpreter=code_interpreter, agent_id=agent_id
+    )
 
     response = client.create_role(
         RoleName=role_name,
@@ -188,6 +193,7 @@ def build_base_policy(
     account_id: str,
     agent_name: str,
     code_interpreter: bool = False,
+    agent_id: int | str | None = None,
 ) -> dict:
     """
     Build the base IAM policy for workload access token permissions.
@@ -195,8 +201,15 @@ def build_base_policy(
     Args:
         region: AWS region name
         account_id: AWS account ID
-        agent_name: Name of the agent (used for resource scoping)
+        agent_name: Name of the agent (used for resource scoping). When this
+            role is shared across a family of agents (e.g. a managed role
+            like "loom-role-demo"), this is the common name prefix (e.g.
+            "demo") rather than one agent's exact name — matching the
+            wildcard scoping already used for logs/workload-identity above.
         code_interpreter: If True, include Code Interpreter sandbox permissions
+        agent_id: Unused (kept for backward-compatible call signatures).
+            Secrets Manager access is scoped by agent_name below, not by
+            agent_id, since agent_id isn't known at shared-role creation time.
 
     Returns:
         IAM policy document with bedrock-agentcore workload identity permissions
@@ -227,6 +240,15 @@ def build_base_policy(
         {
             "Effect": "Allow",
             "Action": [
+                "bedrock-agentcore:GetResourceApiKey",
+            ],
+            "Resource": [
+                f"arn:aws:bedrock-agentcore:{region}:{account_id}:token-vault/default/apikeycredentialprovider/*",
+            ],
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
                 "logs:CreateLogGroup",
                 "logs:CreateLogStream",
                 "logs:PutLogEvents",
@@ -241,6 +263,16 @@ def build_base_policy(
             ],
         },
     ]
+    statements.append({
+        "Effect": "Allow",
+        "Action": [
+            "secretsmanager:GetSecretValue",
+        ],
+        "Resource": [
+            f"arn:aws:secretsmanager:{region}:{account_id}:secret:loom/agents/{agent_name}*",
+            f"arn:aws:secretsmanager:{region}:{account_id}:secret:loom/agents/harness_{agent_name}*",
+        ],
+    })
     if code_interpreter:
         statements.append({
             "Effect": "Allow",
@@ -407,6 +439,7 @@ def update_role_policy(
     account_id: str,
     agent_name: str,
     code_interpreter: bool = False,
+    agent_id: int | str | None = None,
 ) -> None:
     """
     Update the inline policy on an execution role.
@@ -418,12 +451,16 @@ def update_role_policy(
         account_id: AWS account ID
         agent_name: Name of the agent (used for resource scoping)
         code_interpreter: If True, include Code Interpreter permissions
+        agent_id: Loom agent DB ID (used to scope access to its LLM provider
+            API key secret, if any)
     """
     import boto3
 
     client = boto3.client("iam")
 
-    base_policy = build_base_policy(region, account_id, agent_name, code_interpreter=code_interpreter)
+    base_policy = build_base_policy(
+        region, account_id, agent_name, code_interpreter=code_interpreter, agent_id=agent_id
+    )
     integration_statements = build_integration_policy_statements(integrations)
 
     if integration_statements:

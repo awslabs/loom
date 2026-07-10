@@ -1,10 +1,15 @@
 """Strands Agent initialization and configuration."""
 
 import logging
+import os
 from typing import Optional
 
 from strands import Agent
+from strands.models import Model
 from strands.models.bedrock import BedrockModel
+from strands.models.openai import OpenAIModel
+from strands.models.anthropic import AnthropicModel
+from strands.models.litellm import LiteLLMModel
 
 from strands_tools.code_interpreter import AgentCoreCodeInterpreter
 
@@ -13,9 +18,80 @@ from src.integrations.approval import ApprovalHook
 from src.integrations.mcp_client import build_mcp_clients, create_mcp_clients, has_oauth2_servers, _install_logging_callback, TokenInfoHook
 from src.integrations.a2a_client import create_a2a_clients
 from src.integrations.memory import MemoryHook
+from src.integrations.secrets import resolve_secret
 from src.telemetry import TelemetryHook
 
 logger = logging.getLogger(__name__)
+
+
+def _build_model(config: AgentConfig) -> Model:
+    """Instantiate the Strands model provider selected by ``config.provider``.
+
+    Supports ``bedrock`` (default, IAM-authenticated), ``openai``, ``anthropic``,
+    and ``litellm``. The latter three require an API key, resolved once from
+    Secrets Manager via ``config.api_key_secret_arn``.
+    """
+    provider = config.provider or "bedrock"
+
+    if provider == "bedrock":
+        return BedrockModel(
+            model_id=config.model_id,
+            max_tokens=config.max_tokens,
+            streaming=True,
+        )
+
+    if provider not in ("openai", "anthropic", "litellm"):
+        raise ValueError(f"Unsupported model provider: '{provider}'")
+
+    if not config.api_key_secret_arn:
+        raise ValueError(f"Provider '{provider}' requires 'api_key_secret_arn' to be configured")
+    api_key = resolve_secret(config.api_key_secret_arn)
+
+    # Without an explicit timeout, a network path that accepts the TCP
+    # connection but never responds (misconfigured security group/NACL,
+    # unreachable ALB target, wrong port) hangs the underlying httpx client
+    # indefinitely instead of raising — which means nothing ever gets logged
+    # and the failure only ever surfaces as the *caller's* read timeout on
+    # invoke_agent_runtime, minutes later, with zero detail. Bound it so a
+    # bad connection fails fast with a loggable exception.
+    request_timeout = float(os.environ.get("LOOM_MODEL_REQUEST_TIMEOUT_SECONDS", "30"))
+
+    if provider == "anthropic":
+        client_args: dict = {"api_key": api_key, "timeout": request_timeout}
+        return AnthropicModel(
+            client_args=client_args,
+            model_id=config.model_id,
+            max_tokens=config.max_tokens,
+        )
+
+    # openai and litellm share the same client_args/params shape
+    client_args = {"api_key": api_key, "timeout": request_timeout}
+    if config.base_url:
+        client_args["base_url"] = config.base_url
+    if provider == "litellm":
+        # Without this, a bare model_id (e.g. "claude-sonnet-5") is handed to
+        # litellm's SDK unprefixed, so litellm's own provider auto-detection
+        # routes the call straight at the real upstream provider (e.g.
+        # Anthropic) instead of through our proxy's base_url — using the
+        # proxy's virtual key as if it were a real provider key. Setting this
+        # makes LiteLLMModel._apply_proxy_prefix add a "litellm_proxy/"
+        # prefix, forcing the proxy route. See
+        # https://github.com/BerriAI/litellm/issues/13454.
+        client_args["use_litellm_proxy"] = True
+        logger.info(
+            "LiteLLM client configured: base_url=%s use_litellm_proxy=%s timeout=%s api_key_len=%d",
+            config.base_url or "<unset>",
+            client_args["use_litellm_proxy"],
+            request_timeout,
+            len(api_key or ""),
+        )
+
+    model_cls = OpenAIModel if provider == "openai" else LiteLLMModel
+    return model_cls(
+        client_args=client_args,
+        model_id=config.model_id,
+        params={"max_tokens": config.max_tokens},
+    )
 
 
 def build_agent(config: AgentConfig, defer_mcp: bool = False) -> tuple[Agent, ApprovalHook, "AgentCoreCodeInterpreter | None"]:
@@ -35,12 +111,8 @@ def build_agent(config: AgentConfig, defer_mcp: bool = False) -> tuple[Agent, Ap
     Returns:
         A configured Strands Agent instance.
     """
-    model = BedrockModel(
-        model_id=config.model_id,
-        max_tokens=config.max_tokens,
-        streaming=True,
-    )
-    logger.info("Initialized BedrockModel with model_id=%s", config.model_id)
+    model = _build_model(config)
+    logger.info("Initialized %s with provider=%s model_id=%s", type(model).__name__, config.provider, config.model_id)
 
     tools: list = []
     hooks: list = []

@@ -10,7 +10,7 @@ from src.config import (
     A2AAgentConfig,
     MemoryConfig,
 )
-from src.agent import build_agent
+from src.agent import build_agent, _build_model
 from src.telemetry import TelemetryHook
 
 
@@ -135,6 +135,114 @@ class TestBuildAgent(unittest.TestCase):
         call_kwargs = mock_agent_cls.call_args[1]
         telemetry_hooks = [h for h in call_kwargs["hooks"] if isinstance(h, TelemetryHook)]
         self.assertEqual(len(telemetry_hooks), 1)
+
+
+class TestBuildModel(unittest.TestCase):
+    """Tests for the _build_model provider dispatch."""
+
+    def _make_config(self, **overrides) -> AgentConfig:
+        base = dict(
+            system_prompt="Test prompt",
+            model_id="us.anthropic.claude-sonnet-4-20250514",
+        )
+        base.update(overrides)
+        return AgentConfig(**base)
+
+    @patch("src.agent.BedrockModel")
+    def test_defaults_to_bedrock(self, mock_bedrock_cls: MagicMock) -> None:
+        config = self._make_config()
+        model = _build_model(config)
+        mock_bedrock_cls.assert_called_once_with(
+            model_id="us.anthropic.claude-sonnet-4-20250514",
+            max_tokens=4096,
+            streaming=True,
+        )
+        self.assertEqual(model, mock_bedrock_cls.return_value)
+
+    @patch("src.agent.resolve_secret", return_value="sk-test-key")
+    @patch("src.agent.OpenAIModel")
+    def test_openai_provider(self, mock_openai_cls: MagicMock, mock_resolve: MagicMock) -> None:
+        config = self._make_config(
+            model_id="gpt-4o",
+            provider="openai",
+            base_url="https://api.example.com/v1",
+            api_key_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:llm-key",
+        )
+        _build_model(config)
+        mock_resolve.assert_called_once_with("arn:aws:secretsmanager:us-east-1:123456789012:secret:llm-key")
+        mock_openai_cls.assert_called_once_with(
+            client_args={"api_key": "sk-test-key", "timeout": 30.0, "base_url": "https://api.example.com/v1"},
+            model_id="gpt-4o",
+            params={"max_tokens": 4096},
+        )
+
+    @patch("src.agent.resolve_secret", return_value="sk-ant-test-key")
+    @patch("src.agent.AnthropicModel")
+    def test_anthropic_provider(self, mock_anthropic_cls: MagicMock, mock_resolve: MagicMock) -> None:
+        config = self._make_config(
+            model_id="claude-3-7-sonnet-latest",
+            provider="anthropic",
+            api_key_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:llm-key",
+        )
+        _build_model(config)
+        mock_anthropic_cls.assert_called_once_with(
+            client_args={"api_key": "sk-ant-test-key", "timeout": 30.0},
+            model_id="claude-3-7-sonnet-latest",
+            max_tokens=4096,
+        )
+
+    @patch("src.agent.resolve_secret", return_value="litellm-key")
+    @patch("src.agent.LiteLLMModel")
+    def test_litellm_provider(self, mock_litellm_cls: MagicMock, mock_resolve: MagicMock) -> None:
+        config = self._make_config(
+            model_id="openai/gpt-4o",
+            provider="litellm",
+            base_url="https://litellm.internal.example.com",
+            api_key_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:llm-key",
+        )
+        _build_model(config)
+        mock_litellm_cls.assert_called_once_with(
+            client_args={
+                "api_key": "litellm-key",
+                "timeout": 30.0,
+                "base_url": "https://litellm.internal.example.com",
+                "use_litellm_proxy": True,
+            },
+            model_id="openai/gpt-4o",
+            params={"max_tokens": 4096},
+        )
+
+    @patch("src.agent.resolve_secret", return_value="litellm-key")
+    @patch("src.agent.LiteLLMModel")
+    def test_litellm_provider_with_bare_model_id_still_routes_through_proxy(
+        self, mock_litellm_cls: MagicMock, mock_resolve: MagicMock
+    ) -> None:
+        """A bare model id (no "openai/"/"anthropic/" prefix) — e.g.
+        "claude-sonnet-5" as configured on a LiteLLM proxy's model list —
+        must still set use_litellm_proxy=True. Without it, litellm's SDK-side
+        provider auto-detection would route straight at the real upstream
+        provider using our proxy's virtual key, instead of through base_url."""
+        config = self._make_config(
+            model_id="claude-sonnet-5",
+            provider="litellm",
+            base_url="https://litellm.internal.example.com",
+            api_key_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:llm-key",
+        )
+        _build_model(config)
+        call_kwargs = mock_litellm_cls.call_args.kwargs
+        self.assertTrue(call_kwargs["client_args"]["use_litellm_proxy"])
+
+    def test_non_bedrock_provider_requires_secret_arn(self) -> None:
+        config = self._make_config(model_id="gpt-4o", provider="openai")
+        with self.assertRaises(ValueError) as ctx:
+            _build_model(config)
+        self.assertIn("api_key_secret_arn", str(ctx.exception))
+
+    def test_unknown_provider_raises(self) -> None:
+        config = self._make_config(model_id="some-model", provider="cohere")
+        with self.assertRaises(ValueError) as ctx:
+            _build_model(config)
+        self.assertIn("Unsupported model provider", str(ctx.exception))
 
 
 if __name__ == "__main__":

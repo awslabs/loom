@@ -1,6 +1,7 @@
 """Settings endpoints for managing tag policies and site settings."""
 import json
 import logging
+import os
 from datetime import datetime
 from typing import Any
 
@@ -27,6 +28,7 @@ SITE_SETTING_DEFAULTS: dict[str, str] = {
     "cpu_io_wait_discount": "75",
     "enabled_model_ids": "[]",
     "loom_registry_id": "",
+    "litellm_proxy_base_url": "",
 }
 
 
@@ -391,6 +393,93 @@ def update_registry_config(
     )
 
 
+# ---------------------------------------------------------------------------
+# LiteLLM Proxy Configuration
+# ---------------------------------------------------------------------------
+class LitellmProxyConfigResponse(BaseModel):
+    """Response for LiteLLM proxy configuration. Never returns the master key itself."""
+    enabled: bool
+    base_url: str
+    discovery_base_url: str
+    has_master_key: bool
+
+
+@router.get("/litellm-proxy", response_model=LitellmProxyConfigResponse)
+def get_litellm_proxy_config(
+    user: UserInfo = Depends(require_scopes("settings:read")),
+    db: Session = Depends(get_db),
+) -> LitellmProxyConfigResponse:
+    """Get the current LiteLLM proxy configuration (URLs only; key is write-only).
+
+    Reflects the env-seeded defaults (LOOM_LITELLM_PROXY_BASE_URL /
+    LOOM_LITELLM_DISCOVERY_BASE_URL) when no Settings-page override has been
+    saved yet, so the page shows real values to edit rather than blanks.
+    """
+    from app.services.litellm import get_effective_config, has_master_key
+
+    config = get_effective_config(db)
+    return LitellmProxyConfigResponse(
+        enabled=config["enabled"],
+        base_url=config["agent_base_url"],
+        discovery_base_url=config["discovery_base_url"],
+        has_master_key=has_master_key(db),
+    )
+
+
+class LitellmProxyConfigRequest(BaseModel):
+    """Request to update LiteLLM proxy configuration."""
+    enabled: bool = Field(..., description="Whether the LiteLLM connection is active")
+    base_url: str = Field(..., description="Agent Base URL — what deployed agents/harnesses use at runtime")
+    discovery_base_url: str = Field(
+        "", description="Discovery Base URL — what Loom itself uses to list models. "
+        "Leave empty to reuse Agent Base URL (they're typically the same in production)."
+    )
+    master_key: str | None = Field(None, description="Master key. Omit to keep the currently stored key.")
+
+
+@router.put("/litellm-proxy", response_model=LitellmProxyConfigResponse)
+def update_litellm_proxy_config(
+    request: LitellmProxyConfigRequest,
+    user: UserInfo = Depends(require_scopes("settings:write")),
+    db: Session = Depends(get_db),
+) -> LitellmProxyConfigResponse:
+    """Update the LiteLLM proxy configuration. Omitting master_key leaves the stored key untouched."""
+    from app.services.litellm import MASTER_KEY_SECRET_NAME, has_master_key, is_enabled
+    from app.services.model_catalog import clear_litellm_cache
+    from app.services.secrets import store_secret
+
+    for key, value in (
+        ("litellm_enabled", "true" if request.enabled else "false"),
+        ("litellm_proxy_base_url", request.base_url),
+        ("litellm_discovery_base_url", request.discovery_base_url),
+    ):
+        setting = db.query(SiteSetting).filter(SiteSetting.key == key).first()
+        if setting:
+            setting.value = value
+            setting.updated_at = datetime.utcnow()
+        else:
+            db.add(SiteSetting(key=key, value=value))
+    db.commit()
+
+    if request.master_key:
+        region = os.getenv("AWS_REGION", "us-east-1")
+        store_secret(
+            name=MASTER_KEY_SECRET_NAME,
+            secret_value=request.master_key,
+            region=region,
+            description="LiteLLM proxy master key (site-level, used to vend per-agent virtual keys)",
+        )
+
+    clear_litellm_cache()
+
+    return LitellmProxyConfigResponse(
+        enabled=is_enabled(db),
+        base_url=request.base_url,
+        discovery_base_url=request.discovery_base_url,
+        has_master_key=has_master_key(db),
+    )
+
+
 def _sync_registry_statuses(client, db: Session) -> None:  # noqa: ANN001
     """Validate stored registry_record_id / registry_status against the live registry."""
     from app.models.mcp import McpServer
@@ -465,9 +554,10 @@ def get_enabled_models(
     db: Session = Depends(get_db),
 ) -> EnabledModelsResponse:
     """Get the list of admin-enabled model IDs along with the full model catalog."""
-    from app.routers.agents import SUPPORTED_MODELS
+    from app.routers.agents import DEFAULT_REGION
+    from app.services.model_catalog import get_merged_models
     enabled = get_enabled_model_ids(db)
-    return EnabledModelsResponse(model_ids=enabled, all_models=SUPPORTED_MODELS)
+    return EnabledModelsResponse(model_ids=enabled, all_models=get_merged_models(DEFAULT_REGION))
 
 
 @router.put("/models", response_model=EnabledModelsResponse)
@@ -477,8 +567,13 @@ def update_enabled_models(
     db: Session = Depends(get_db),
 ) -> EnabledModelsResponse:
     """Update the set of admin-enabled models."""
-    from app.routers.agents import SUPPORTED_MODELS
-    valid_ids = {m["model_id"] for m in SUPPORTED_MODELS}
+    from app.routers.agents import DEFAULT_REGION
+    from app.services.model_catalog import get_merged_models
+    # Validate against the dynamic merged catalog (static + live LiteLLM/
+    # Bedrock models) so dynamically-discovered ids can be enabled too — a
+    # model that's momentarily unavailable per the live catalog is still a
+    # known, valid model ID as long as it appears in the merged list.
+    valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
     invalid = [mid for mid in request.model_ids if mid not in valid_ids]
     if invalid:
         raise HTTPException(
@@ -494,7 +589,23 @@ def update_enabled_models(
         setting = SiteSetting(key="enabled_model_ids", value=value)
         db.add(setting)
     db.commit()
-    return EnabledModelsResponse(model_ids=request.model_ids, all_models=SUPPORTED_MODELS)
+    return EnabledModelsResponse(model_ids=request.model_ids, all_models=get_merged_models(DEFAULT_REGION))
+
+
+@router.post("/litellm-proxy/refresh", response_model=EnabledModelsResponse)
+def refresh_litellm_models(
+    user: UserInfo = Depends(require_scopes("settings:write")),
+    db: Session = Depends(get_db),
+) -> EnabledModelsResponse:
+    """Force a live re-fetch of the LiteLLM proxy's model catalog, bypassing
+    the cache — recovers from a stale empty result (e.g. cached while the
+    proxy was unreachable) without waiting out the TTL or restarting."""
+    from app.routers.agents import DEFAULT_REGION
+    from app.services.model_catalog import clear_litellm_cache, get_merged_models
+
+    clear_litellm_cache()
+    enabled = get_enabled_model_ids(db)
+    return EnabledModelsResponse(model_ids=enabled, all_models=get_merged_models(DEFAULT_REGION))
 
 
 # ---------------------------------------------------------------------------

@@ -220,6 +220,10 @@ ecs.deploy:
 			pCognitoUserPoolId=$(O_COGNITO_USER_POOL_ID) \
 			pCognitoRegion=$(P_LOOM_COGNITO_REGION) \
 			$(if $(P_LOOM_ALLOWED_ORIGINS),pAllowedOrigins=$(P_LOOM_ALLOWED_ORIGINS)) \
+			$(if $(P_LITELLM_PROXY_BASE_URL),pLitellmProxyBaseUrl=$(P_LITELLM_PROXY_BASE_URL)) \
+			$(if $(P_LITELLM_DISCOVERY_BASE_URL),pLitellmDiscoveryBaseUrl=$(P_LITELLM_DISCOVERY_BASE_URL)) \
+			$(if $(P_LITELLM_PROXY_API_KEY_SECRET_ARN),pLitellmProxyApiKeySecretArn=$(P_LITELLM_PROXY_API_KEY_SECRET_ARN)) \
+			$(if $(P_LITELLM_PROXY_API_KEY_SECRET_KMS_KEY_ARN),pLitellmProxyApiKeySecretKmsKeyArn=$(P_LITELLM_PROXY_API_KEY_SECRET_KMS_KEY_ARN)) \
 			pTagApplication=$(P_TAG_APPLICATION) \
 			pTagGroup=$(P_TAG_GROUP) \
 			pTagOwner=$(P_TAG_OWNER) \

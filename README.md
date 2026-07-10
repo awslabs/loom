@@ -19,6 +19,12 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 - Active session tracking with idle timeout heuristic
 - External integration info: invocation URLs, auth requirements (SigV4/OAuth2), and copy-ready code snippets for connecting from outside Loom
 
+### Alternate LLM Providers
+- Route an agent's model calls through a self-hosted LiteLLM proxy instead of Amazon Bedrock, selectable per agent (custom or managed/harness deployments)
+- Settings page connection management: enabled toggle, agent/discovery base URLs, write-only master key, live model catalog with per-provider enable/disable and a Refresh button
+- Per-agent scoped virtual keys vended automatically from the proxy — no shared credential is ever stored on an individual agent
+- Dynamic model catalog merging curated static models with live Bedrock availability and the proxy's own reported models, so new proxy-side models appear without a Loom code change
+
 ### Memory Management
 - Create and manage AgentCore Memory resources
 - Configurable strategies: semantic, summary, user preference, episodic, custom

@@ -1,6 +1,6 @@
 # Loom Backend
 
-FastAPI backend for the Loom Agent Builder Playground. Provides endpoints for agent registration, deployment, SSE streaming invocation, paginated CloudWatch log retrieval, cold-start latency measurement, session liveness tracking, memory resource management, MCP server management, A2A agent management, AWS Agent Registry integration (governance and discovery), security administration, 3rd-party identity provider management (Microsoft Entra ID, Okta, Auth0, Generic OIDC), per-user authorizer linking (cross-IdP OAuth popup flow with Secrets Manager token storage), on-behalf-of (OBO) token exchange (RFC 8693) for user-scoped delegation to downstream MCP servers and A2A agents, tag policy management, tag profile management, cost estimation dashboard, actual runtime cost retrieval from CloudWatch usage logs, and admin audit tracking (login events, user actions, page views, per-session aggregation). Agent deploy applies resolved tags to the DB record immediately on creation so tag-based resource filtering (e.g., demo user group restrictions) is effective from CREATING status.
+FastAPI backend for the Loom Agent Builder Playground. Provides endpoints for agent registration, deployment, SSE streaming invocation, paginated CloudWatch log retrieval, cold-start latency measurement, session liveness tracking, memory resource management, MCP server management, A2A agent management, AWS Agent Registry integration (governance and discovery), alternate LLM provider support (self-hosted LiteLLM proxy with per-agent virtual key vending and a dynamic model catalog), security administration, 3rd-party identity provider management (Microsoft Entra ID, Okta, Auth0, Generic OIDC), per-user authorizer linking (cross-IdP OAuth popup flow with Secrets Manager token storage), on-behalf-of (OBO) token exchange (RFC 8693) for user-scoped delegation to downstream MCP servers and A2A agents, tag policy management, tag profile management, cost estimation dashboard, actual runtime cost retrieval from CloudWatch usage logs, and admin audit tracking (login events, user actions, page views, per-session aggregation). Agent deploy applies resolved tags to the DB record immediately on creation so tag-based resource filtering (e.g., demo user group restrictions) is effective from CREATING status.
 
 ## Technology Stack
 
@@ -64,6 +64,9 @@ Runtime configuration is sourced from `etc/environment.sh`:
 | `LOOM_COGNITO_USER_CLIENT_ID` | Cognito user app client ID (auto-included in agent `allowedClients` on deploy) | — |
 | `LOOM_ALLOWED_ORIGINS` | Comma-separated additional CORS origins for deployed environments | — |
 | `LOOM_REGISTRY_ID` | AWS Agent Registry ID (bootstrap fallback; prefer Settings page configuration) | — |
+| `LOOM_LITELLM_PROXY_BASE_URL` | Default Agent Base URL for a self-hosted LiteLLM proxy (bootstrap fallback; prefer Settings → Models → LiteLLM). Leave unset to disable the LiteLLM provider. | — |
+| `LOOM_LITELLM_DISCOVERY_BASE_URL` | Default Discovery Base URL the backend itself uses for model discovery, if different from `LOOM_LITELLM_PROXY_BASE_URL` (e.g. a local SSM tunnel during dev) | — |
+| `LOOM_LITELLM_PROXY_API_KEY` | Default LiteLLM proxy master key (bootstrap fallback; a Settings-page save always overrides this) | — |
 
 AWS credentials use the standard boto3 credential chain (environment variables, AWS profile, instance metadata).
 
@@ -316,7 +319,9 @@ Write-only audit tables populated by the frontend. `audit_login` records user lo
 | `POST` | `/api/agents/{agent_id}/redeploy` | Redeploy with current config |
 | `GET` | `/api/agents/roles` | List IAM roles for AgentCore |
 | `GET` | `/api/agents/cognito-pools` | List Cognito user pools |
-| `GET` | `/api/agents/models` | List supported models (with display name and group) |
+| `GET` | `/api/agents/models` | List supported Bedrock models (with display name and group) |
+| `GET` | `/api/agents/models/litellm` | List models reported live by the connected LiteLLM proxy, if any (fetched on demand, not part of `/models`) |
+| `GET` | `/api/agents/providers` | List supported LLM providers (`bedrock`, `litellm`), each with a live `available` flag |
 | `GET` | `/api/agents/models/pricing` | List models with pricing metadata |
 | `GET` | `/api/agents/defaults` | Get configurable defaults (idle timeout, max lifetime) |
 | `GET` | `/api/agents/{agent_id}/integration` | Get external integration info (endpoints, auth, code snippets) |
@@ -375,6 +380,8 @@ Runtime costs are recomputed from `client_duration_ms` at view time using curren
 |--------|------|-------------|
 | `GET` | `/api/settings/site` | List all site settings (includes defaults for unset keys) |
 | `PUT` | `/api/settings/site/{key}` | Create or update a site setting |
+| `GET`/`PUT` | `/api/settings/litellm-proxy` | Get/update the LiteLLM proxy connection (`enabled`, `base_url`, `discovery_base_url`, write-only `master_key`) |
+| `POST` | `/api/settings/litellm-proxy/refresh` | Force a live re-fetch of the LiteLLM proxy's model catalog, bypassing the cache |
 
 ### Authentication
 
@@ -529,6 +536,10 @@ Tags are resolved from the tag policy system at deploy time. Deploy-time tags ar
 
 Deletion with `cleanup_aws=true` immediately deletes all sessions and invocations for the agent (preventing stale data on admin pages), then initiates background async AWS deletion (endpoint + runtime + MCP and A2A credential providers + Secrets Manager cleanup), marks the agent as DELETING, and returns the updated agent. The frontend polls the status endpoint until AWS confirms deletion (404), then calls the purge endpoint to remove the local record. Credential providers cascade delete when the agent is deleted.
 
+## Alternate LLM Providers
+
+By default, agent model calls go straight to Amazon Bedrock. Agents can instead be deployed with `provider="litellm"` to route model calls through a self-hosted [LiteLLM](https://www.litellm.ai/) proxy. Configure the connection once (Settings page → Models → LiteLLM, or the `LOOM_LITELLM_PROXY_BASE_URL`/`LOOM_LITELLM_DISCOVERY_BASE_URL`/`LOOM_LITELLM_PROXY_API_KEY` env vars as a bootstrap fallback), then each LiteLLM-provider agent gets its own scoped virtual key vended automatically via the proxy's `/key/generate` API — no shared credential is ever stored on an individual agent. Custom agents receive the key via a Secrets Manager secret; harness agents receive it via an AgentCore API key credential provider. See [`backend/SPECIFICATIONS.md` § 16](SPECIFICATIONS.md#16-alternate-llm-providers-litellm-proxy) for the full design (master-key resolution order, virtual key vending, dynamic model catalog merging).
+
 ## Authenticated Invocation
 
 Invocations support multiple token sources with priority ordering:
@@ -552,6 +563,8 @@ Backend-specific SAM templates:
 | `loom-ecs-backend` | `iac/ecs.yaml` | Backend ECS Fargate service (task def, task role, service, auto-scaling) |
 
 The ECS task role includes policies for Bedrock, AgentCore, S3, CloudWatch Logs, IAM PassRole, Secrets Manager, Cognito, and CloudFormation. Notably, the Secrets Manager policy covers both the RDS database secret and `bedrock-agentcore-identity!*` secrets used by OAuth2 credential providers (created/deleted during agent deployment). The CloudWatch Logs policy covers both `/aws/bedrock-agentcore/*` and `/aws/vendedlogs/bedrock-agentcore/*` prefixes. Default task resources are 1 vCPU / 2 GB RAM.
+
+Optional `pLitellmProxyBaseUrl`/`pLitellmDiscoveryBaseUrl`/`pLitellmProxyApiKeySecretArn`/`pLitellmProxyApiKeySecretKmsKeyArn` parameters on the `loom-ecs-backend` stack seed the LiteLLM proxy connection's env-var fallback tier (see Alternate LLM Providers above); when a secret ARN is supplied, the task execution role is granted `secretsmanager:GetSecretValue` on it (and `kms:Decrypt` on its KMS key, if customer-managed). The stack also grants the task role the AgentCore runtime lifecycle actions (`Create`/`Update`/`DeleteAgentRuntime(Endpoint)`), `iam:CreateServiceLinkedRole` for VPC-mode runtimes, and CloudWatch Logs delivery-pipeline permissions needed by `services/observability.py` for vended log routing.
 
 The backend Docker image is built with the repository root as the build context (via `-f backend/Dockerfile ..` from `shared/makefile`) so it can include both `backend/app/` and `agents/strands_agent/` source. The agent source is required by `build_agent_artifact` to package and upload agent code to S3 during deployment.
 

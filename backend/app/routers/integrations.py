@@ -69,7 +69,8 @@ def _sync_role_policy(agent: Agent, db: Session) -> None:
             integrations=integration_dicts,
             region=agent.region,
             account_id=agent.account_id,
-            agent_name=agent.name or ""
+            agent_name=agent.name or "",
+            agent_id=agent.id,
         )
     except Exception as e:
         logger.error("Failed to update IAM role policy for agent %s: %s", agent.id, e)

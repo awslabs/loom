@@ -1,6 +1,6 @@
 # Loom Frontend
 
-Single-page React application for managing, deploying, and invoking Bedrock AgentCore agents with real-time streaming, latency measurement, session liveness tracking, memory resource management, MCP server management, A2A agent management, AWS Agent Registry integration, security administration, 3rd-party identity provider management (Microsoft Entra ID, Okta, Auth0, Generic OIDC), per-user authorizer linking (cross-IdP OAuth popup flow with same-IdP auto-detection), on-behalf-of (OBO) token exchange configuration and token inspection, resource tag management, tag profile management, cost estimation dashboard, actual runtime cost analysis, an admin dashboard with platform usage analytics, and an end-user chat interface.
+Single-page React application for managing, deploying, and invoking Bedrock AgentCore agents with real-time streaming, latency measurement, session liveness tracking, memory resource management, MCP server management, A2A agent management, AWS Agent Registry integration, provider-aware model selection (Bedrock or a connected LiteLLM proxy), security administration, 3rd-party identity provider management (Microsoft Entra ID, Okta, Auth0, Generic OIDC), per-user authorizer linking (cross-IdP OAuth popup flow with same-IdP auto-detection), on-behalf-of (OBO) token exchange configuration and token inspection, resource tag management, tag profile management, cost estimation dashboard, actual runtime cost analysis, an admin dashboard with platform usage analytics, and an end-user chat interface.
 
 ## Prerequisites
 
@@ -65,7 +65,7 @@ The sidebar provides access to persona-based workflows:
 | **Registry** | Library | Browse and manage AWS Agent Registry records for governance and discovery |
 | **Tags** | Tags | Manage tag policies and tag profiles with collapsible groups and JSON import |
 | **Costs** | DollarSign | Cost dashboard with estimated costs, actual runtime costs from CloudWatch, and cost settings |
-| **Settings** | Settings | Manage display preferences (theme, timezone), cost estimation settings (CPU I/O wait discount), and Agent Registry configuration (ARN-based, opt-in governance) |
+| **Settings** | Settings | Manage display preferences (theme, timezone), cost estimation settings (CPU I/O wait discount), Agent Registry configuration (ARN-based, opt-in governance), enabled models (per-provider), and an optional LiteLLM proxy connection for alternate model providers |
 | **Admin Dashboard** | BarChart3 | Platform usage analytics with custom tooltips on all charts, login tracking, action tracking, page navigation, per-session drill-down (super-admins only) |
 
 **End-user chat layout:** Users in the `t-user` Cognito group (without `t-admin`) see a dedicated `ChatPage` instead of the admin sidebar. The chat layout provides a focused chat interface with agent selection, conversation history with immediate tab creation on `session_start`, streaming responses scoped to the active conversation, queued prompt support (single-slot, last-write-wins, auto-sends on stream completion), markdown rendering for all bubbles (user, assistant, queued) with collapsible JSON blocks, and a memory panel — with no admin navigation items exposed.

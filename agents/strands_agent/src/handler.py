@@ -23,6 +23,7 @@ Two invocation paths are supported:
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -33,12 +34,13 @@ from typing import Any, AsyncGenerator
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from strands.types.exceptions import MaxTokensReachedException, ToolProviderException
 
+from strands.models import Model
 from strands.models.bedrock import BedrockModel
 
 from mcp.types import ElicitResult
 
 from src.config import AgentConfig, MCPServerConfig, AuthConfig, load_config
-from src.agent import attach_mcp_tools, build_agent
+from src.agent import _build_model, attach_mcp_tools, build_agent
 from src.integrations.approval import ApprovalHook
 from src.integrations.mcp_client import has_deferred_auth_servers, _build_transport_callable, drain_token_info_events, reset_token_info_state, set_user_access_token
 from src.telemetry import trace_invocation
@@ -61,8 +63,8 @@ _agent = None
 _config: AgentConfig | None = None
 _mcp_attached = False
 _dynamic_mcp_clients: dict[str, Any] = {}  # keyed by (server_name, actor_id)
-_default_model: BedrockModel | None = None
-_model_cache: dict[str, BedrockModel] = {}  # keyed by model_id
+_default_model: Model | None = None
+_model_cache: dict[tuple[str, str, str], Model] = {}  # keyed by (provider, model_id, base_url)
 _approval_hook: ApprovalHook | None = None
 _code_interpreter = None  # AgentCoreCodeInterpreter instance for pre-warm
 
@@ -337,14 +339,11 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
     # Runtime model override
     runtime_model_id = payload.get("model_id")
     if runtime_model_id and _config:
-        if runtime_model_id not in _model_cache:
-            _model_cache[runtime_model_id] = BedrockModel(
-                model_id=runtime_model_id,
-                max_tokens=_config.max_tokens,
-                streaming=True,
-            )
-            logger.info("Created cached BedrockModel for runtime override: %s", runtime_model_id)
-        agent.model = _model_cache[runtime_model_id]
+        cache_key = (_config.provider, runtime_model_id, _config.base_url)
+        if cache_key not in _model_cache:
+            _model_cache[cache_key] = _build_model(dataclasses.replace(_config, model_id=runtime_model_id))
+            logger.info("Created cached model for runtime override: provider=%s model_id=%s", _config.provider, runtime_model_id)
+        agent.model = _model_cache[cache_key]
     elif _default_model:
         agent.model = _default_model
 
@@ -410,8 +409,8 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
                 logger.warning("Tool provider error session_id=%s: %s", session_id, e)
                 await queue.put({"_error": f"A tool provider encountered an error: {e}"})
             except Exception as e:
-                logger.error("Agent task error session_id=%s: %s", session_id, e)
-                await queue.put({"_error": str(e)})
+                logger.exception("Agent task error session_id=%s (%s): %s", session_id, type(e).__name__, e)
+                await queue.put({"_error": f"{type(e).__name__}: {e}" if str(e) else type(e).__name__})
             finally:
                 await queue.put(None)
 
@@ -466,6 +465,10 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
             except ToolProviderException as e:
                 logger.warning("Tool provider error session_id=%s: %s", session_id, e)
                 yield f"\n\nA tool provider encountered an error: {e}"
+            except Exception as e:
+                logger.exception("Agent stream error session_id=%s (%s): %s", session_id, type(e).__name__, e)
+                detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                yield f"\n\nError: {detail}"
 
 
 async def _drain_queue(queue: asyncio.Queue) -> AsyncGenerator[Any, None]:
@@ -565,13 +568,10 @@ async def ws_invoke(websocket, context) -> None:
             # Runtime model override
             runtime_model_id = data.get("model_id")
             if runtime_model_id and _config:
-                if runtime_model_id not in _model_cache:
-                    _model_cache[runtime_model_id] = BedrockModel(
-                        model_id=runtime_model_id,
-                        max_tokens=_config.max_tokens,
-                        streaming=True,
-                    )
-                agent.model = _model_cache[runtime_model_id]
+                cache_key = (_config.provider, runtime_model_id, _config.base_url)
+                if cache_key not in _model_cache:
+                    _model_cache[cache_key] = _build_model(dataclasses.replace(_config, model_id=runtime_model_id))
+                agent.model = _model_cache[cache_key]
             elif _default_model:
                 agent.model = _default_model
 

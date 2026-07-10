@@ -116,6 +116,26 @@ class TestParseConfig(unittest.TestCase):
         self.assertEqual(server.endpoint_url, "")
         self.assertIsNone(server.auth)
 
+    def test_provider_defaults_to_bedrock(self) -> None:
+        data = {"system_prompt": "Test", "model_id": "model"}
+        config = _parse_config(data)
+        self.assertEqual(config.provider, "bedrock")
+        self.assertEqual(config.base_url, "")
+        self.assertEqual(config.api_key_secret_arn, "")
+
+    def test_provider_and_secret_arn_parsed(self) -> None:
+        data = {
+            "system_prompt": "Test",
+            "model_id": "gpt-4o",
+            "provider": "OpenAI",
+            "base_url": "https://api.example.com/v1",
+            "api_key_secret_arn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:llm-key",
+        }
+        config = _parse_config(data)
+        self.assertEqual(config.provider, "openai")
+        self.assertEqual(config.base_url, "https://api.example.com/v1")
+        self.assertEqual(config.api_key_secret_arn, "arn:aws:secretsmanager:us-east-1:123456789012:secret:llm-key")
+
     def test_empty_integrations(self) -> None:
         data = {
             "system_prompt": "Test",

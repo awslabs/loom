@@ -21,7 +21,7 @@ import { listA2aAgents } from "@/api/a2a";
 import { useAuth } from "@/contexts/AuthContext";
 import { listMemories } from "@/api/memories";
 import { ResourceTagFields } from "@/components/ResourceTagFields";
-import type { AgentDeployRequest, AgentHarnessDeployRequest, ModelOption, ManagedRole, AuthorizerConfigResponse, TagProfile, McpServer, A2aAgent, MemoryResponse, VpcConfig, VpcConfigDetail } from "@/api/types";
+import type { AgentDeployRequest, AgentHarnessDeployRequest, ModelOption, Provider, ManagedRole, AuthorizerConfigResponse, TagProfile, McpServer, A2aAgent, MemoryResponse, VpcConfig, VpcConfigDetail } from "@/api/types";
 import { groupModels } from "@/lib/models";
 import { toast } from "sonner";
 
@@ -199,6 +199,9 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   const [systemPrompt, setSystemPrompt] = useState("");
   const [modelId, setModelId] = useState("");
   const [selectedAllowedModelIds, setSelectedAllowedModelIds] = useState<string[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<string>("bedrock");
+  const [providerApiKey, setProviderApiKey] = useState("");
+  const [providerBaseUrl, setProviderBaseUrl] = useState("");
   const [selectedRoleId, setSelectedRoleId] = useState<string>("");
   const [protocol] = useState("HTTP");
   const [networkMode, setNetworkMode] = useState("PUBLIC");
@@ -248,6 +251,9 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
 
   // Discovery data
   const [models, setModels] = useState<ModelOption[]>([]);
+  const [litellmModels, setLitellmModels] = useState<ModelOption[]>([]);
+  const [litellmModelsLoaded, setLitellmModelsLoaded] = useState(false);
+  const [providers, setProviders] = useState<Provider[]>([]);
   const [managedRoles, setManagedRoles] = useState<ManagedRole[]>([]);
   const [authConfigs, setAuthConfigs] = useState<AuthorizerConfigResponse[]>([]);
   const [defaults, setDefaults] = useState<agentsApi.LoomDefaults>({ idle_timeout_seconds: 300, max_lifetime_seconds: 3600, region: "us-east-1" });
@@ -255,6 +261,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   const [dataLoaded, setDataLoaded] = useState(false);
   useEffect(() => {
     void agentsApi.fetchModels().then(setModels).catch(() => {});
+    void agentsApi.fetchProviders().then(setProviders).catch(() => {});
     void agentsApi.fetchDefaults().then(setDefaults).catch(() => {});
     if (mode === "deploy") {
       Promise.all([
@@ -285,13 +292,20 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       if (parsed.description) setDescription(parsed.description as string);
       if (parsed.system_prompt) setSystemPrompt(parsed.system_prompt as string);
       else if (parsed.persona) setSystemPrompt(parsed.persona as string);
-      if (parsed.model) {
-        const match = models.find((m) => m.model_id === parsed.model || m.display_name === parsed.model);
-        if (match) setModelId(match.model_id);
-      }
-      if (Array.isArray(parsed.allowed_models)) {
-        const validIds = models.map((m) => m.model_id);
-        setSelectedAllowedModelIds((parsed.allowed_models as string[]).filter((id) => validIds.includes(id)));
+      if (typeof parsed.provider === "string") setSelectedProvider(parsed.provider);
+      if (typeof parsed.base_url === "string") setProviderBaseUrl(parsed.base_url);
+      const importedAllowedModels = Array.isArray(parsed.allowed_models) ? (parsed.allowed_models as string[]) : undefined;
+      if (parsed.provider === "litellm") {
+        loadLitellmModels(typeof parsed.model === "string" ? parsed.model : undefined, importedAllowedModels);
+      } else {
+        if (parsed.model) {
+          const match = models.find((m) => m.model_id === parsed.model || m.display_name === parsed.model);
+          if (match) setModelId(match.model_id);
+        }
+        if (importedAllowedModels) {
+          const validIds = models.map((m) => m.model_id);
+          setSelectedAllowedModelIds(importedAllowedModels.filter((id) => validIds.includes(id)));
+        }
       }
       if (parsed.role) {
         const match = managedRoles.find((r) => r.role_name === parsed.role || r.role_arn === parsed.role);
@@ -384,6 +398,53 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   const selectedRole = managedRoles.find((r) => r.id.toString() === selectedRoleId);
   const selectedAuthConfig = authConfigs.find((c) => c.id.toString() === selectedAuthConfigId);
   const selectedVpcConfig = vpcConfigs.find((c) => c.id.toString() === vpcConfigId);
+  const selectedProviderInfo = providers.find((p) => p.id === selectedProvider);
+  const providerModels = selectedProvider === "litellm"
+    ? litellmModels
+    : models.filter((m) => !m.provider || m.provider === selectedProvider);
+
+  // LiteLLM models are only fetched on demand (when the provider is
+  // selected, or an imported/edited manifest references it) — the endpoint
+  // reflects exactly what's configured on the deployed proxy and shouldn't
+  // be fetched eagerly alongside Bedrock's list on page load.
+  const loadLitellmModels = (matchModelName?: string, matchAllowedModelIds?: string[]) => {
+    setLitellmModelsLoaded(false);
+    void agentsApi.fetchLitellmModels().then((list) => {
+      setLitellmModels(list);
+      setLitellmModelsLoaded(true);
+      if (matchModelName) {
+        const match = list.find((m) => m.model_id === matchModelName || m.display_name === matchModelName);
+        if (match) setModelId(match.model_id);
+      }
+      if (matchAllowedModelIds) {
+        const validIds = list.map((m) => m.model_id);
+        setSelectedAllowedModelIds(matchAllowedModelIds.filter((id) => validIds.includes(id)));
+      }
+    }).catch(() => {
+      setLitellmModels([]);
+      setLitellmModelsLoaded(true);
+    });
+  };
+
+  // A provider without harness support can only run as a Custom Agent —
+  // fail fast in the UI instead of letting the backend reject it after deploy.
+  useEffect(() => {
+    if (selectedProviderInfo && !selectedProviderInfo.harness_supported && deploymentType === "managed") {
+      setDeploymentType("custom");
+    }
+  }, [selectedProviderInfo, deploymentType]);
+
+  const handleProviderChange = (providerId: string) => {
+    setSelectedProvider(providerId);
+    // Previous model/credentials may not apply under the new provider.
+    setModelId("");
+    setSelectedAllowedModelIds([]);
+    setProviderApiKey("");
+    setProviderBaseUrl("");
+    if (providerId === "litellm") {
+      loadLitellmModels();
+    }
+  };
 
   const validateName = (value: string) => {
     if (!value) {
@@ -454,6 +515,9 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
         allowed_model_ids: selectedAllowedModelIds.length > 0
           ? (selectedAllowedModelIds.includes(modelId) ? selectedAllowedModelIds : [modelId, ...selectedAllowedModelIds])
           : undefined,
+        provider: selectedProvider,
+        ...(providerApiKey ? { api_key: providerApiKey } : {}),
+        ...(providerBaseUrl ? { base_url: providerBaseUrl } : {}),
         role_arn: roleArn,
         network_mode: networkMode,
         vpc_config_id: networkMode === "VPC" && vpcConfigId ? parseInt(vpcConfigId, 10) : null,
@@ -517,6 +581,11 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
         allowed_model_ids: selectedAllowedModelIds.length > 0
           ? (selectedAllowedModelIds.includes(modelId) ? selectedAllowedModelIds : [modelId, ...selectedAllowedModelIds])
           : undefined,
+        provider: selectedProvider,
+        // Omit empty api_key/base_url so an edit that doesn't touch the
+        // credential doesn't overwrite a previously-stored secret.
+        ...(providerApiKey ? { api_key: providerApiKey } : {}),
+        ...(providerBaseUrl ? { base_url: providerBaseUrl } : {}),
         role_arn: roleArn,
         protocol,
         network_mode: networkMode,
@@ -549,6 +618,9 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       setSystemPrompt("");
       setModelId("");
       setSelectedAllowedModelIds([]);
+      setSelectedProvider("bedrock");
+      setProviderApiKey("");
+      setProviderBaseUrl("");
       setSelectedRoleId("");
       setNetworkMode("PUBLIC");
       setSelectedAuthConfigId("");
@@ -622,13 +694,32 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                     if (parsed.description) setDescription(parsed.description);
                     if (parsed.system_prompt) setSystemPrompt(parsed.system_prompt);
                     else if (parsed.persona) setSystemPrompt(parsed.persona);
-                    if (parsed.model) {
-                      const match = models.find((m) => m.model_id === parsed.model || m.display_name === parsed.model);
-                      if (match) setModelId(match.model_id);
+                    // provider may be a flat string (legacy manifests / backend export) or
+                    // a nested { id, base_url, api_key } object (current manifest format).
+                    let providerId: string | undefined;
+                    if (typeof parsed.provider === "string") {
+                      providerId = parsed.provider;
+                      if (typeof parsed.base_url === "string") setProviderBaseUrl(parsed.base_url);
+                      if (typeof parsed.api_key === "string") setProviderApiKey(parsed.api_key);
+                    } else if (parsed.provider && typeof parsed.provider === "object") {
+                      const providerBlock = parsed.provider as Record<string, unknown>;
+                      if (typeof providerBlock.id === "string") providerId = providerBlock.id;
+                      if (typeof providerBlock.base_url === "string") setProviderBaseUrl(providerBlock.base_url);
+                      if (typeof providerBlock.api_key === "string") setProviderApiKey(providerBlock.api_key);
                     }
-                    if (Array.isArray(parsed.allowed_models)) {
-                      const validIds = models.map((m) => m.model_id);
-                      setSelectedAllowedModelIds(parsed.allowed_models.filter((id: string) => validIds.includes(id)));
+                    if (providerId) setSelectedProvider(providerId);
+                    const importedAllowedModels = Array.isArray(parsed.allowed_models) ? (parsed.allowed_models as string[]) : undefined;
+                    if (providerId === "litellm") {
+                      loadLitellmModels(typeof parsed.model === "string" ? parsed.model : undefined, importedAllowedModels);
+                    } else {
+                      if (parsed.model) {
+                        const match = models.find((m) => m.model_id === parsed.model || m.display_name === parsed.model);
+                        if (match) setModelId(match.model_id);
+                      }
+                      if (importedAllowedModels) {
+                        const validIds = models.map((m) => m.model_id);
+                        setSelectedAllowedModelIds(importedAllowedModels.filter((id: string) => validIds.includes(id)));
+                      }
                     }
                     if (parsed.role) {
                       const match = managedRoles.find((r) => r.role_name === parsed.role || r.role_arn === parsed.role);
@@ -706,7 +797,11 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                 onExport={async () => {
                   if (exportAgentId && hasScope("admin:write")) {
                     const data = await agentsApi.exportAgent(exportAgentId);
-                    return JSON.stringify(data, null, 2);
+                    // base_url/api_key are resolved from the global LiteLLM
+                    // connection now, not per-agent — drop them from the
+                    // manifest and just record which provider was used.
+                    const { base_url: _base_url, api_key: _api_key, ...rest } = data;
+                    return JSON.stringify(rest, null, 2);
                   }
                   const result: Record<string, unknown> = {};
                   result.deployment_type = deploymentType;
@@ -716,6 +811,9 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                   if (modelId) result.model = modelId;
                   if (selectedAllowedModelIds.length > 0) {
                     result.allowed_models = selectedAllowedModelIds;
+                  }
+                  if (selectedProvider && selectedProvider !== "bedrock") {
+                    result.provider = selectedProvider;
                   }
                   if (networkMode && networkMode !== "PUBLIC") {
                     const vpcBlock: Record<string, string> = { mode: networkMode };
@@ -796,12 +894,13 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                     <span>Custom Agent</span>
                     <span className="text-[10px] text-muted-foreground">Deploys your agent code into AgentCore Runtime</span>
                   </label>
-                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <label className={`flex items-center gap-2 text-sm ${selectedProviderInfo && !selectedProviderInfo.harness_supported ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}>
                     <input
                       type="radio"
                       name="deploymentType"
                       value="managed"
                       checked={deploymentType === "managed"}
+                      disabled={selectedProviderInfo ? !selectedProviderInfo.harness_supported : false}
                       onChange={() => setDeploymentType("managed")}
                       className="h-3.5 w-3.5"
                     />
@@ -851,33 +950,85 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                 />
               </section>
 
-              {/* Model, Protocol, Network, IAM Role */}
-              <div className="flex gap-3">
-                <section className="w-[20%] min-w-0 space-y-2">
-                  <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Default Model</h4>
-                  <SearchableSelect
-                    options={models.map((m) => ({ value: m.model_id, label: m.display_name, group: m.group }))}
-                    value={modelId}
-                    onValueChange={setModelId}
-                    placeholder="Select model..."
-                  />
-                </section>
-                {deploymentType === "custom" && (
-                  <section className="w-[10%] min-w-0 space-y-2">
-                    <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Protocol</h4>
-                    <Select value={protocol} onValueChange={() => {}}>
-                      <SelectTrigger className="w-full text-sm">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="HTTP">HTTP</SelectItem>
-                        <SelectItem value="MCP" disabled>MCP (coming soon)</SelectItem>
-                        <SelectItem value="A2A" disabled>A2A (coming soon)</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </section>
+              {/* Provider Selector */}
+              <section className="space-y-2">
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Model Provider</h4>
+                <div className="flex gap-3 flex-wrap">
+                  {providers.map((p) => (
+                    <label
+                      key={p.id}
+                      className={`flex items-center gap-2 text-sm ${p.available ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`}
+                      title={p.available ? undefined : `Enable ${p.display_name} in Settings → Models first.`}
+                    >
+                      <input
+                        type="radio"
+                        name="provider"
+                        value={p.id}
+                        checked={selectedProvider === p.id}
+                        disabled={!p.available}
+                        onChange={() => handleProviderChange(p.id)}
+                        className="h-3.5 w-3.5"
+                      />
+                      <span>{p.display_name}</span>
+                    </label>
+                  ))}
+                </div>
+                {selectedProviderInfo && !selectedProviderInfo.available && (
+                  <p className="text-[10px] text-muted-foreground">
+                    {selectedProviderInfo.display_name} is not enabled — configure it in Settings → Models first.
+                  </p>
                 )}
-                <section className="w-[10%] min-w-0 space-y-2">
+                {selectedProviderInfo && !selectedProviderInfo.harness_supported && deploymentType === "custom" && (
+                  <p className="text-[10px] text-muted-foreground">Managed Agent deployment is not available for {selectedProviderInfo.display_name}.</p>
+                )}
+                {(selectedProviderInfo?.requires_api_key || selectedProviderInfo?.requires_base_url) && (
+                  <div className="flex gap-3">
+                    {selectedProviderInfo.requires_base_url && (
+                      <Input
+                        placeholder="Base URL (e.g. https://litellm.example.com)"
+                        value={providerBaseUrl}
+                        onChange={(e) => setProviderBaseUrl(e.target.value)}
+                        className="flex-1 min-w-0"
+                      />
+                    )}
+                    {selectedProviderInfo.requires_api_key && (
+                      <Input
+                        type="password"
+                        placeholder={exportAgentId ? "API key (leave blank to keep current)" : "API key"}
+                        value={providerApiKey}
+                        onChange={(e) => setProviderApiKey(e.target.value)}
+                        className="flex-1 min-w-0"
+                        autoComplete="off"
+                      />
+                    )}
+                  </div>
+                )}
+                {selectedProvider === "litellm" && (
+                  <p className="text-[10px] text-muted-foreground">
+                    Base URL and a scoped virtual key are resolved automatically from the LiteLLM connection configured in Settings → Models.
+                  </p>
+                )}
+                {selectedProvider === "litellm" && litellmModelsLoaded && litellmModels.length === 0 && (
+                  <p className="text-[10px] text-destructive">
+                    No LiteLLM models detected — configure the connection in Settings → Models.
+                  </p>
+                )}
+              </section>
+
+              {/* Default Model */}
+              <section className="w-[20%] min-w-0 space-y-2">
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Default Model</h4>
+                <SearchableSelect
+                  options={providerModels.map((m) => ({ value: m.model_id, label: m.display_name, group: m.group }))}
+                  value={modelId}
+                  onValueChange={setModelId}
+                  placeholder="Select model..."
+                />
+              </section>
+
+              {/* Network + VPC Configuration */}
+              <div className="flex gap-3">
+                <section className="w-[15%] min-w-0 space-y-2">
                   <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Network</h4>
                   <Select value={networkMode} onValueChange={setNetworkMode}>
                     <SelectTrigger className="w-full text-sm">
@@ -889,19 +1040,111 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                     </SelectContent>
                   </Select>
                 </section>
-                <section className="flex-1 min-w-0 space-y-2">
-                  <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">IAM Role</h4>
-                  <SearchableSelect
-                    options={filteredRoles.map((r) => ({
-                      value: r.id.toString(),
-                      label: r.role_name,
-                    }))}
-                    value={selectedRoleId}
-                    onValueChange={setSelectedRoleId}
-                    placeholder="Select managed role..."
-                  />
-                </section>
+                {networkMode === "VPC" && (
+                  <section className="w-[30%] min-w-0 space-y-2">
+                    <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">VPC Configuration</h4>
+                    <SearchableSelect
+                      options={vpcConfigs.map((c) => ({ value: c.id.toString(), label: c.name, description: `${c.vpc_id} · ${c.subnet_ids.length} subnets · ${c.sg_ids.length} SGs` }))}
+                      value={vpcConfigId}
+                      onValueChange={(v) => {
+                        setVpcConfigId(v);
+                        setShowVpcDetail(false);
+                        setVpcDetail(null);
+                      }}
+                      placeholder="Select VPC configuration..."
+                    />
+                    {vpcConfigs.length === 0 && (
+                      <p className="text-xs text-muted-foreground">No VPC configurations available. Add one in Settings → Networking.</p>
+                    )}
+                  </section>
+                )}
               </div>
+
+              {networkMode === "VPC" && selectedVpcConfig && (
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !showVpcDetail;
+                      setShowVpcDetail(next);
+                      if (next && !vpcDetail) {
+                        setVpcDetail("loading");
+                        settingsApi.getVpcConfigDetail(selectedVpcConfig.id)
+                          .then(setVpcDetail)
+                          .catch(() => setVpcDetail(null));
+                      }
+                    }}
+                    className="flex items-center gap-1 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground"
+                  >
+                    {showVpcDetail ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                    VPC Details (read-only)
+                  </button>
+                  {showVpcDetail && (
+                    <div className="rounded border p-3 bg-muted/30 space-y-3">
+                      {vpcDetail === "loading" ? (
+                        <p className="text-xs text-muted-foreground">Loading…</p>
+                      ) : vpcDetail ? (
+                        <>
+                          <p className="text-xs text-muted-foreground font-mono">{vpcDetail.vpc_id}</p>
+                          <VpcDetailTables detail={vpcDetail} />
+                        </>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">Could not load VPC details.</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Allowed Models for Runtime Selection */}
+              {modelId && providerModels.length > 0 && (
+                <section className="space-y-2">
+                  <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Allowed Models (runtime selection)</h4>
+                  <p className="text-xs text-muted-foreground">Users can choose from these models when invoking the agent. The deploy model is always included.</p>
+                  <div className="space-y-1.5">
+                    {groupModels(providerModels).map(([group, groupedModels]) => (
+                      <div key={group} className="flex flex-wrap gap-x-4 gap-y-1 items-center">
+                        <span className="text-[10px] font-medium text-muted-foreground w-16 shrink-0">{group}</span>
+                        {groupedModels.map((m) => (
+                          <label key={m.model_id} className="flex items-center gap-2 text-xs cursor-pointer">
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 shrink-0"
+                              checked={m.model_id === modelId || selectedAllowedModelIds.includes(m.model_id)}
+                              disabled={m.model_id === modelId}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedAllowedModelIds((prev) => [...prev, m.model_id]);
+                                } else {
+                                  setSelectedAllowedModelIds((prev) => prev.filter((id) => id !== m.model_id));
+                                }
+                              }}
+                            />
+                            <span>{m.display_name}</span>
+                            {m.model_id === modelId && (
+                              <span className="text-[10px] text-muted-foreground bg-accent px-1 rounded">default</span>
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {/* IAM Role */}
+              <section className="w-1/3 min-w-0 space-y-2">
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">IAM Role</h4>
+                <SearchableSelect
+                  options={filteredRoles.map((r) => ({
+                    value: r.id.toString(),
+                    label: r.role_name,
+                  }))}
+                  value={selectedRoleId}
+                  onValueChange={setSelectedRoleId}
+                  placeholder="Select managed role..."
+                />
+              </section>
 
               {/* IAM Role Permissions (read-only) */}
               {selectedRole && (
@@ -990,97 +1233,6 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                       </Button>
                     </div>
                   )}
-                </section>
-              )}
-
-              {/* VPC Configuration */}
-              {networkMode === "VPC" && (
-                <section className="space-y-2">
-                  <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">VPC Configuration</h4>
-                  <SearchableSelect
-                    options={vpcConfigs.map((c) => ({ value: c.id.toString(), label: c.name, description: `${c.vpc_id} · ${c.subnet_ids.length} subnets · ${c.sg_ids.length} SGs` }))}
-                    value={vpcConfigId}
-                    onValueChange={(v) => {
-                      setVpcConfigId(v);
-                      setShowVpcDetail(false);
-                      setVpcDetail(null);
-                    }}
-                    placeholder="Select VPC configuration..."
-                  />
-                  {vpcConfigs.length === 0 && (
-                    <p className="text-xs text-muted-foreground">No VPC configurations available. Add one in Settings → Networking.</p>
-                  )}
-                  {selectedVpcConfig && (
-                    <div className="space-y-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const next = !showVpcDetail;
-                          setShowVpcDetail(next);
-                          if (next && !vpcDetail) {
-                            setVpcDetail("loading");
-                            settingsApi.getVpcConfigDetail(selectedVpcConfig.id)
-                              .then(setVpcDetail)
-                              .catch(() => setVpcDetail(null));
-                          }
-                        }}
-                        className="flex items-center gap-1 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground"
-                      >
-                        {showVpcDetail ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                        VPC Details (read-only)
-                      </button>
-                      {showVpcDetail && (
-                        <div className="rounded border p-3 bg-muted/30 space-y-3">
-                          {vpcDetail === "loading" ? (
-                            <p className="text-xs text-muted-foreground">Loading…</p>
-                          ) : vpcDetail ? (
-                            <>
-                              <p className="text-xs text-muted-foreground font-mono">{vpcDetail.vpc_id}</p>
-                              <VpcDetailTables detail={vpcDetail} />
-                            </>
-                          ) : (
-                            <p className="text-xs text-muted-foreground">Could not load VPC details.</p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </section>
-              )}
-
-              {/* Allowed Models for Runtime Selection */}
-              {modelId && models.length > 0 && (
-                <section className="space-y-2">
-                  <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Allowed Models (runtime selection)</h4>
-                  <p className="text-xs text-muted-foreground">Users can choose from these models when invoking the agent. The deploy model is always included.</p>
-                  <div className="space-y-1.5">
-                    {groupModels(models).map(([group, groupedModels]) => (
-                      <div key={group} className="flex flex-wrap gap-x-4 gap-y-1 items-center">
-                        <span className="text-[10px] font-medium text-muted-foreground w-16 shrink-0">{group}</span>
-                        {groupedModels.map((m) => (
-                          <label key={m.model_id} className="flex items-center gap-2 text-xs cursor-pointer">
-                            <input
-                              type="checkbox"
-                              className="h-3.5 w-3.5 shrink-0"
-                              checked={m.model_id === modelId || selectedAllowedModelIds.includes(m.model_id)}
-                              disabled={m.model_id === modelId}
-                              onChange={(e) => {
-                                if (e.target.checked) {
-                                  setSelectedAllowedModelIds((prev) => [...prev, m.model_id]);
-                                } else {
-                                  setSelectedAllowedModelIds((prev) => prev.filter((id) => id !== m.model_id));
-                                }
-                              }}
-                            />
-                            <span>{m.display_name}</span>
-                            {m.model_id === modelId && (
-                              <span className="text-[10px] text-muted-foreground bg-accent px-1 rounded">default</span>
-                            )}
-                          </label>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
                 </section>
               )}
 
@@ -1408,6 +1560,9 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                     setDescription("");
                     setSystemPrompt("");
                     setModelId("");
+                    setSelectedProvider("bedrock");
+                    setProviderApiKey("");
+                    setProviderBaseUrl("");
                     setSelectedRoleId("");
                     setNetworkMode("PUBLIC");
                     setSelectedAuthConfigId("");

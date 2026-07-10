@@ -411,8 +411,10 @@ def _finalize_invocation(
     # Cost calculation
     estimated_cost = None
     if agent_model_id:
-        from app.routers.agents import SUPPORTED_MODELS
-        model_pricing = next((m for m in SUPPORTED_MODELS if m["model_id"] == agent_model_id), None)
+        from app.routers.agents import DEFAULT_REGION
+        from app.services.model_catalog import get_merged_models
+        models = get_merged_models(DEFAULT_REGION)
+        model_pricing = next((m for m in models if m["model_id"] == agent_model_id), None)
         if model_pricing:
             input_price = model_pricing.get("input_price_per_1k_tokens", 0)
             output_price = model_pricing.get("output_price_per_1k_tokens", 0)
@@ -868,8 +870,10 @@ async def invoke_agent_stream(
         # Cost calculation
         estimated_cost = None
         if agent_model_id:
-            from app.routers.agents import SUPPORTED_MODELS
-            model_pricing = next((m for m in SUPPORTED_MODELS if m["model_id"] == agent_model_id), None)
+            from app.routers.agents import DEFAULT_REGION
+            from app.services.model_catalog import get_merged_models
+            models = await asyncio.to_thread(get_merged_models, DEFAULT_REGION)
+            model_pricing = next((m for m in models if m["model_id"] == agent_model_id), None)
             if model_pricing:
                 input_price = model_pricing.get("input_price_per_1k_tokens", 0)
                 output_price = model_pricing.get("output_price_per_1k_tokens", 0)
@@ -999,10 +1003,17 @@ async def invoke_harness_agent_stream(
     config_map = {e.key: e.value for e in agent.config_entries}
     import json as _json
     agent_model_id = None
+    agent_provider = "bedrock"
+    agent_litellm_api_key_arn = None
+    agent_litellm_api_base = None
     config_json_str = config_map.get("AGENT_CONFIG_JSON", "")
     if config_json_str:
         try:
-            agent_model_id = _json.loads(config_json_str).get("model_id")
+            _harness_cfg = _json.loads(config_json_str)
+            agent_model_id = _harness_cfg.get("model_id")
+            agent_provider = _harness_cfg.get("provider") or "bedrock"
+            agent_litellm_api_key_arn = _harness_cfg.get("litellm_api_key_credential_provider_arn") or None
+            agent_litellm_api_base = _harness_cfg.get("base_url") or None
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -1112,6 +1123,9 @@ async def invoke_harness_agent_stream(
             access_token=access_token,
             tools=invoke_tools,
             user_access_token=user_access_token,
+            provider=agent_provider,
+            litellm_api_key_arn=agent_litellm_api_key_arn,
+            litellm_api_base=agent_litellm_api_base,
         )
 
         _sentinel = object()
@@ -1266,8 +1280,10 @@ async def invoke_harness_agent_stream(
 
         estimated_cost = None
         if agent_model_id:
-            from app.routers.agents import SUPPORTED_MODELS
-            model_pricing = next((m for m in SUPPORTED_MODELS if m["model_id"] == agent_model_id), None)
+            from app.routers.agents import DEFAULT_REGION
+            from app.services.model_catalog import get_merged_models
+            models = await asyncio.to_thread(get_merged_models, DEFAULT_REGION)
+            model_pricing = next((m for m in models if m["model_id"] == agent_model_id), None)
             if model_pricing:
                 input_price = model_pricing.get("input_price_per_1k_tokens", 0)
                 output_price = model_pricing.get("output_price_per_1k_tokens", 0)

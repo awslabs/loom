@@ -243,7 +243,7 @@ Resources:
           FromPort: 443
           ToPort: 443
           CidrIp: !Ref pAlbIngressCidr
-          Description: Allow inbound HTTPS traffic to the ALB
+          Description: Allow inbound HTTPS from allowed clients
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-alb-sg"
@@ -264,7 +264,7 @@ Resources:
           FromPort: 8000
           ToPort: 8000
           SourceSecurityGroupId: !GetAtt AlbSecurityGroup.GroupId
-          Description: Allow inbound traffic from ALB to ECS tasks
+          Description: Allow inbound traffic from the ALB security group
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-ecs-sg"

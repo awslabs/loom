@@ -86,6 +86,9 @@ class AgentConfig:
     system_prompt: str
     model_id: str
     max_tokens: int = 4096
+    provider: str = "bedrock"
+    base_url: str = ""
+    api_key_secret_arn: str = ""
     integrations: IntegrationsConfig = field(default_factory=IntegrationsConfig)
 
 
@@ -182,6 +185,9 @@ def _parse_config(data: dict) -> AgentConfig:
         system_prompt=system_prompt,
         model_id=data["model_id"],
         max_tokens=data.get("max_tokens", 4096),
+        provider=(data.get("provider") or "bedrock").lower(),
+        base_url=data.get("base_url", ""),
+        api_key_secret_arn=data.get("api_key_secret_arn", ""),
         integrations=_parse_integrations(data.get("integrations")),
     )
 

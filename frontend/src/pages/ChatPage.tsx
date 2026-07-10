@@ -8,7 +8,7 @@ import ReactMarkdown from "react-markdown";
 import { CollapsibleJsonBlock } from "@/components/CollapsibleJsonBlock";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
-import { listAgents, fetchModels } from "@/api/agents";
+import { listAgents, fetchModels, fetchLitellmModels } from "@/api/agents";
 import { listSessions, getSession, hideSession } from "@/api/invocations";
 import { listMemories, getMemoryRecords } from "@/api/memories";
 import { trackAction } from "@/api/audit";
@@ -100,7 +100,17 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
   const modelPickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    fetchModels().then(setAllModels).catch(() => {});
+    // /api/agents/models is Bedrock-only (see backend's TestModelsEndpointsSplit) —
+    // LiteLLM's catalog is a separate on-demand endpoint. Merge both so agents whose
+    // allowed_model_ids reference LiteLLM models still resolve to entries here;
+    // otherwise the runtime model-switch picker has nothing to match against and
+    // silently renders as if the agent only has one allowed model.
+    Promise.all([
+      fetchModels().catch(() => []),
+      fetchLitellmModels().catch(() => []),
+    ]).then(([bedrockModels, litellmModels]) => {
+      setAllModels([...bedrockModels, ...litellmModels]);
+    });
   }, []);
 
   useEffect(() => {
@@ -451,9 +461,17 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
 
   const availableModels = useMemo(() => {
     if (!selectedAgent) return [];
+    // The catalog (allModels) is filtered by the admin's global enabled-models
+    // allowlist (Settings -> Models), which is independent of — and may be
+    // narrower than — this agent's own allowed_model_ids. The invoke endpoint
+    // only ever validates against the agent's allowed_model_ids, so synthesize
+    // an entry for any allowed id the catalog is missing rather than silently
+    // hiding an otherwise-invocable model from the picker.
+    const withFallback = (ids: string[]) =>
+      ids.map((id) => allModels.find((m) => m.model_id === id) ?? { model_id: id, display_name: id });
     const allowed = selectedAgent.allowed_model_ids;
-    if (allowed.length > 0) return allModels.filter((m) => allowed.includes(m.model_id));
-    if (selectedAgent.model_id) return allModels.filter((m) => m.model_id === selectedAgent.model_id);
+    if (allowed.length > 0) return withFallback(allowed);
+    if (selectedAgent.model_id) return withFallback([selectedAgent.model_id]);
     return [];
   }, [selectedAgent, allModels]);
 

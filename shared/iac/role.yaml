@@ -102,7 +102,10 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: !Sub "arn:aws:secretsmanager:${pAgentCoreRegions}:${AWS::AccountId}:secret:bedrock-agentcore-identity!*"
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${pAgentCoreRegions}:${AWS::AccountId}:secret:bedrock-agentcore-identity!*"
+                  - !Sub "arn:aws:secretsmanager:${pAgentCoreRegions}:${AWS::AccountId}:secret:loom/agents/${pAgentName}*"
+                  - !Sub "arn:aws:secretsmanager:${pAgentCoreRegions}:${AWS::AccountId}:secret:loom/agents/harness_${pAgentName}*"
         - PolicyName: observability
           PolicyDocument:
             Version: "2012-10-17"

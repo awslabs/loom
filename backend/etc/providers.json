@@ -1,0 +1,4 @@
+[
+  {"id": "bedrock", "display_name": "Amazon Bedrock", "requires_api_key": false, "requires_base_url": false, "harness_supported": true},
+  {"id": "litellm", "display_name": "LiteLLM", "requires_api_key": false, "requires_base_url": false, "harness_supported": true}
+]

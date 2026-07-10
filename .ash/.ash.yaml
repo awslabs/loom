@@ -9,6 +9,10 @@ global_settings:
       reason: Gitignored scratch/build-output directory; not part of the shipped codebase.
     - path: node_modules/**
       reason: Third-party dependency tree; vulnerabilities tracked via npm-audit, not other scanners.
+    - path: "agents/strands_agent/build/**"
+      reason: "Gitignored Lambda packaging build output; vendors botocore's own SDK docs/examples which contain non-secret placeholder AWS example credentials."
+    - path: "**/*_output.yaml"
+      reason: "Gitignored generated SAM/CloudFormation package output, duplicating findings already reported against the source template."
   suppressions:
     - path: DEPLOYMENT.md
       rule_id: SECRET-BASIC-AUTH-CREDENTIALS
@@ -94,6 +98,24 @@ global_settings:
     - path: backend/tests/test_security.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using placeholder secret-like strings to exercise security-related logic.
+    - path: agents/strands_agent/tests/test_agent.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder API keys/secret ARNs to exercise model-provider construction logic.
+    - path: backend/app/services/litellm.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Secrets Manager path prefix constant ("loom/settings/litellm-master-key") used to store a secret, not the secret value itself.
+    - path: backend/tests/test_credential_service.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder API keys to exercise credential provider logic.
+    - path: backend/tests/test_litellm_service.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using a placeholder API key env var to exercise LiteLLM proxy config fallback logic.
+    - path: backend/tests/test_harness.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder credential provider ARNs to exercise harness creation/invocation logic.
+    - path: frontend/src/components/AgentRegistrationForm.tsx
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Variable/field name ("api_key") used while parsing a user-supplied provider manifest, not a secret value.
 fail_on_findings: true
 ash_plugin_modules: []
 external_reports_to_include: []

@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/select";
 import { Plug, Unplug, KeyRound, ChevronDown, Send, X, Link2, UserCheck, AlertTriangle } from "lucide-react";
 import { listAuthorizerConfigs, listAuthorizerCredentials, checkAuthorizerLinkStatus, getAuthorizerLinkAuthorizeUrl, submitAuthorizerLinkCallback, deleteAuthorizerLink } from "@/api/security";
-import { fetchModels } from "@/api/agents";
+import { fetchModels, fetchLitellmModels } from "@/api/agents";
 import { listConnectors, setUserApiKey, deleteUserApiKey } from "@/api/mcp";
 import { groupModels } from "@/lib/models";
 import type { SessionResponse, AuthorizerCredential, ModelOption, ConnectorInfo } from "@/api/types";
@@ -170,9 +170,15 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
   useEffect(() => {
     if (!modelId) return;
     let cancelled = false;
-    fetchModels().then((models) => {
-      if (!cancelled) setModelOptions(models);
-    }).catch(() => {});
+    // /api/agents/models is Bedrock-only; LiteLLM's catalog is a separate
+    // on-demand endpoint. Merge both so a LiteLLM agent's allowed_model_ids
+    // resolve here — otherwise filteredModels is empty and the picker hides.
+    Promise.all([
+      fetchModels().catch(() => []),
+      fetchLitellmModels().catch(() => []),
+    ]).then(([bedrockModels, litellmModels]) => {
+      if (!cancelled) setModelOptions([...bedrockModels, ...litellmModels]);
+    });
     return () => { cancelled = true; };
   }, [modelId]);
 

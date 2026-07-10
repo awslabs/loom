@@ -86,6 +86,21 @@ P_LOOM_COGNITO_REGION=$(REGION)
 P_LOOM_ALLOWED_ORIGINS=$(LOOM_ALLOWED_ORIGINS)
 P_LOOM_ARTIFACT_BUCKET=$(LOOM_ARTIFACT_BUCKET)
 
+# LiteLLM proxy connection, seeded into the deployed backend at startup as
+# defaults — editable afterward in Settings -> Models (a Settings-page save
+# always wins over these). Leave all empty to disable. Agent Base URL must
+# be reachable from inside the backend's VPC. Discovery Base URL is only
+# needed if the backend reaches the proxy differently than agents do (e.g.
+# locally, via an SSM tunnel); leave empty to reuse Agent Base URL. Secret
+# ARN must point to a plain-string secret holding the proxy's master key. If
+# that secret is encrypted with a customer-managed KMS key (not the default
+# aws/secretsmanager key), also set the KMS key ARN below so the ECS task
+# execution role can decrypt it when pulling the secret at container start.
+P_LITELLM_PROXY_BASE_URL=<https://litellm-proxy-internal-endpoint>
+P_LITELLM_DISCOVERY_BASE_URL=<http://localhost:4000 (local dev only)>
+P_LITELLM_PROXY_API_KEY_SECRET_ARN=<arn:aws:secretsmanager:region:account:secret:name>
+P_LITELLM_PROXY_API_KEY_SECRET_KMS_KEY_ARN=<arn:aws:kms:region:account:key/key-id (leave empty if default key)>
+
 # AgentCore memory queries (used by make agentcore.memory.* targets)
 P_MEMORY_ID=<your-memory-id>
 P_MEMORY_ACTOR_ID=<cognito-username-or-sub>

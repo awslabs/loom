@@ -11,6 +11,38 @@ from typing import Any, Generator
 logger = logging.getLogger(__name__)
 
 
+def _build_model_config(
+    provider: str,
+    model_id: str,
+    max_tokens: int | None = None,
+    litellm_api_key_arn: str | None = None,
+    litellm_api_base: str | None = None,
+) -> dict[str, Any]:
+    """Build the `model` field for CreateHarness/UpdateHarness/InvokeHarness.
+
+    Bedrock (the default) uses `bedrockModelConfig`. LiteLLM uses
+    `liteLlmModelConfig` — `apiKeyArn` points at an AgentCore Identity API
+    key credential provider (not Secrets Manager), and `apiBase` is the
+    LiteLLM proxy's endpoint. Both are optional per the API, but Loom's
+    LiteLLM provider always requires a base_url so `apiBase` is effectively
+    always set for LiteLLM harness agents.
+    """
+    if provider == "litellm":
+        cfg: dict[str, Any] = {"modelId": model_id}
+        if litellm_api_key_arn:
+            cfg["apiKeyArn"] = litellm_api_key_arn
+        if litellm_api_base:
+            cfg["apiBase"] = litellm_api_base
+        if max_tokens is not None:
+            cfg["maxTokens"] = max_tokens
+        return {"liteLlmModelConfig": cfg}
+
+    cfg = {"modelId": model_id}
+    if max_tokens is not None:
+        cfg["maxTokens"] = max_tokens
+    return {"bedrockModelConfig": cfg}
+
+
 def create_harness(
     name: str,
     execution_role_arn: str,
@@ -30,6 +62,9 @@ def create_harness(
     memory_arn: str | None = None,
     memory_retrieval_config: dict[str, Any] | None = None,
     region: str = "us-east-1",
+    provider: str = "bedrock",
+    litellm_api_key_arn: str | None = None,
+    litellm_api_base: str | None = None,
 ) -> dict[str, Any]:
     """Create a new AgentCore Harness (managed agent loop).
 
@@ -42,14 +77,9 @@ def create_harness(
     params: dict[str, Any] = {
         "harnessName": name,
         "executionRoleArn": execution_role_arn,
-        "model": {
-            "bedrockModelConfig": {"modelId": model_id},
-        },
+        "model": _build_model_config(provider, model_id, max_tokens, litellm_api_key_arn, litellm_api_base),
         "systemPrompt": [{"text": system_prompt}],
     }
-
-    if max_tokens is not None:
-        params["model"]["bedrockModelConfig"]["maxTokens"] = max_tokens
 
     if tools:
         params["tools"] = tools
@@ -125,6 +155,9 @@ def update_harness(
     memory_arn: str | None = None,
     memory_retrieval_config: dict[str, Any] | None = None,
     region: str = "us-east-1",
+    provider: str = "bedrock",
+    litellm_api_key_arn: str | None = None,
+    litellm_api_base: str | None = None,
 ) -> dict[str, Any]:
     """Update an existing AgentCore Harness."""
     import boto3
@@ -136,10 +169,7 @@ def update_harness(
     if execution_role_arn:
         params["executionRoleArn"] = execution_role_arn
     if model_id:
-        model_config: dict[str, Any] = {"modelId": model_id}
-        if max_tokens is not None:
-            model_config["maxTokens"] = max_tokens
-        params["model"] = {"bedrockModelConfig": model_config}
+        params["model"] = _build_model_config(provider, model_id, max_tokens, litellm_api_key_arn, litellm_api_base)
     if system_prompt is not None:
         params["systemPrompt"] = [{"text": system_prompt}]
     if tools is not None:
@@ -210,6 +240,9 @@ def invoke_harness_stream(
     actor_id: str | None = None,
     access_token: str | None = None,
     user_access_token: str | None = None,
+    provider: str = "bedrock",
+    litellm_api_key_arn: str | None = None,
+    litellm_api_base: str | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """Invoke a harness and yield translated SSE events.
 
@@ -248,7 +281,7 @@ def invoke_harness_stream(
     }
 
     if model_id:
-        params["model"] = {"bedrockModelConfig": {"modelId": model_id}}
+        params["model"] = _build_model_config(provider, model_id, litellm_api_key_arn=litellm_api_key_arn, litellm_api_base=litellm_api_base)
     if system_prompt:
         params["systemPrompt"] = [{"text": system_prompt}]
     if tools:

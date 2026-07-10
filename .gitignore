@@ -1,5 +1,6 @@
 # directories
 __pycache__
+.ash
 .claude/worktrees
 .pytest_cache
 .venv

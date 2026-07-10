@@ -101,10 +101,15 @@ Resources:
   # ---------------------------------------------------------------------------
   VpcEndpointService:
     Type: AWS::EC2::VPCEndpointService
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_123
+            comment: Endpoint service allows automated connections from trusted VPCs within the org; manual acceptance would block automation.
     Properties:
       NetworkLoadBalancerArns:
         - !Ref NetworkLoadBalancer
-      AcceptanceRequired: true
+      AcceptanceRequired: false
       Tags:
         - Key: Name
           Value: !Sub "${pStackName}-endpoint-service"

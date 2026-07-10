@@ -9,6 +9,7 @@ import type {
   IamRole,
   CognitoPool,
   ModelOption,
+  Provider,
   IntegrationInfoResponse,
 } from "./types";
 
@@ -112,7 +113,14 @@ export function updateAgentConfig(
 
 export function patchAgent(
   id: number,
-  updates: { description?: string | null; model_id?: string; allowed_model_ids?: string[] },
+  updates: {
+    description?: string | null;
+    model_id?: string;
+    allowed_model_ids?: string[];
+    provider?: string;
+    base_url?: string;
+    api_key?: string;
+  },
 ): Promise<AgentResponse> {
   return apiFetch<AgentResponse>(`/api/agents/${id}`, {
     method: "PATCH",
@@ -130,6 +138,14 @@ export function fetchCognitoPools(): Promise<CognitoPool[]> {
 
 export function fetchModels(): Promise<ModelOption[]> {
   return apiFetch<ModelOption[]>("/api/agents/models");
+}
+
+export function fetchLitellmModels(): Promise<ModelOption[]> {
+  return apiFetch<ModelOption[]>("/api/agents/models/litellm");
+}
+
+export function fetchProviders(): Promise<Provider[]> {
+  return apiFetch<Provider[]>("/api/agents/providers");
 }
 
 export interface LoomDefaults {

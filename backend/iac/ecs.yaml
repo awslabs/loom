@@ -59,6 +59,22 @@ Parameters:
     Type: String
     Description: Agent Registry ID (from bedrock-agentcore-control list-registries)
     Default: ""
+  pLitellmProxyBaseUrl:
+    Type: String
+    Description: Agent Base URL of the deployed LiteLLM proxy — what deployed agents/harnesses call at runtime (leave empty to disable). Also used by the backend for its own model discovery when pLitellmDiscoveryBaseUrl is empty.
+    Default: ""
+  pLitellmDiscoveryBaseUrl:
+    Type: String
+    Description: Discovery Base URL — what the backend itself uses to list live models/pricing, if different from pLitellmProxyBaseUrl (e.g. reached via a different path than agents use). Leave empty to reuse pLitellmProxyBaseUrl.
+    Default: ""
+  pLitellmProxyApiKeySecretArn:
+    Type: String
+    Description: Secrets Manager ARN containing the LiteLLM proxy's master/virtual API key (plain string secret, leave empty to disable)
+    Default: ""
+  pLitellmProxyApiKeySecretKmsKeyArn:
+    Type: String
+    Description: ARN of the customer-managed KMS key that encrypts pLitellmProxyApiKeySecretArn, if any (leave empty if the secret uses the default aws/secretsmanager key)
+    Default: ""
   pEcrKmsKeyArn:
     Type: String
     Description: ARN of the KMS key used to encrypt ECR repositories (from infra stack output oEcrKmsKeyArn)
@@ -77,6 +93,8 @@ Parameters:
 
 Conditions:
   CognitoRegionEmpty: !Equals [!Ref pCognitoRegion, ""]
+  HasLitellmProxyApiKey: !Not [!Equals [!Ref pLitellmProxyApiKeySecretArn, ""]]
+  HasLitellmProxyApiKeySecretKmsKey: !Not [!Equals [!Ref pLitellmProxyApiKeySecretKmsKeyArn, ""]]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -90,7 +108,7 @@ Resources:
           ignore_checks:
             - EA017
     Properties:
-      Description: KMS key for backend CloudWatch Logs encryption
+      Description: !Sub "KMS key for ${AWS::StackName} backend CloudWatch Logs encryption"
       EnableKeyRotation: true
       KeyPolicy:
         Version: "2012-10-17"
@@ -189,7 +207,11 @@ Resources:
               - Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !Ref pDatabaseSecretArn
+                Resource: !If
+                  - HasLitellmProxyApiKey
+                  - - !Ref pDatabaseSecretArn
+                    - !Ref pLitellmProxyApiKeySecretArn
+                  - - !Ref pDatabaseSecretArn
         - PolicyName: EcrKmsPolicy
           PolicyDocument:
             Version: "2012-10-17"
@@ -206,7 +228,11 @@ Resources:
               - Effect: Allow
                 Action:
                   - kms:Decrypt
-                Resource: !Ref pSecretsKmsKeyArn
+                Resource: !If
+                  - HasLitellmProxyApiKeySecretKmsKey
+                  - - !Ref pSecretsKmsKeyArn
+                    - !Ref pLitellmProxyApiKeySecretKmsKeyArn
+                  - !Ref pSecretsKmsKeyArn
       Tags:
         - Key: loom:application
           Value: !Ref pTagApplication
@@ -247,6 +273,13 @@ Resources:
                 Resource:
                   - arn:aws:bedrock:*:*:inference-profile/*
                   - arn:aws:bedrock:*::foundation-model/*
+              # List operations don't support resource-level scoping — used by
+              # model_catalog.py's live Bedrock availability/catalog discovery.
+              - Effect: Allow
+                Action:
+                  - bedrock:ListFoundationModels
+                  - bedrock:ListInferenceProfiles
+                Resource: "*"
         - PolicyName: BedrockAgentCorePolicy
           PolicyDocument:
             Version: "2012-10-17"
@@ -270,6 +303,37 @@ Resources:
                   - bedrock-agentcore-control:UpdateRegistryRecord
                   - bedrock-agentcore-control:DeleteRegistryRecord
                 Resource: !Sub "arn:aws:bedrock-agentcore-control:*:${AWS::AccountId}:registry/*"
+              # Agent runtime lifecycle management — resource ARNs use the base
+              # "bedrock-agentcore" namespace even though these actions are
+              # under "bedrock-agentcore-control" (see backend/SPECIFICATIONS.md
+              # runtime ARN format).
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore-control:CreateAgentRuntime
+                  - bedrock-agentcore-control:CreateAgentRuntimeEndpoint
+                  - bedrock-agentcore-control:GetAgentRuntime
+                  - bedrock-agentcore-control:GetAgentRuntimeEndpoint
+                  - bedrock-agentcore-control:UpdateAgentRuntime
+                  - bedrock-agentcore-control:UpdateAgentRuntimeEndpoint
+                  - bedrock-agentcore-control:DeleteAgentRuntime
+                  - bedrock-agentcore-control:DeleteAgentRuntimeEndpoint
+                Resource: !Sub "arn:aws:bedrock-agentcore:*:${AWS::AccountId}:runtime/*"
+        - PolicyName: BedrockAgentCoreServiceLinkedRolePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # VPC-mode agent runtimes trigger AWS to lazily create this
+              # service-linked role on first use per account — without this
+              # grant, CreateAgentRuntime fails with "Failed creating service
+              # linked role" before ever evaluating the action's own IAM
+              # permissions.
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/network.bedrock-agentcore.amazonaws.com/AWSServiceRoleForBedrockAgentCoreNetwork"
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: network.bedrock-agentcore.amazonaws.com
         - PolicyName: S3ArtifactPolicy
           PolicyDocument:
             Version: "2012-10-17"
@@ -303,6 +367,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                   - logs:DescribeLogGroups
@@ -312,6 +377,29 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
                   - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/vendedlogs/bedrock-agentcore/*"
+              # CloudWatch Logs delivery pipeline — used by
+              # app/services/observability.py to route AgentCore Runtime and
+              # Code Interpreter vended logs into the log groups above.
+              - Effect: Allow
+                Action:
+                  - logs:PutDeliveryDestination
+                  - logs:DeleteDeliveryDestination
+                  - logs:PutDeliverySource
+                  - logs:DeleteDeliverySource
+                Resource:
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:delivery-destination:loom-*"
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:delivery-source:loom-*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateDelivery
+                  - logs:DeleteDelivery
+                Resource: !Sub "arn:aws:logs:*:${AWS::AccountId}:delivery:*"
+              # DescribeDeliveries is a list operation with no resource-level
+              # scoping support.
+              - Effect: Allow
+                Action:
+                  - logs:DescribeDeliveries
+                Resource: "*"
         - PolicyName: IamPassRolePolicy
           PolicyDocument:
             Version: "2012-10-17"
@@ -441,11 +529,20 @@ Resources:
               Value: !Ref pAllowedOrigins
             - Name: LOOM_REGISTRY_ID
               Value: !Ref pRegistryId
+            - Name: LOOM_LITELLM_PROXY_BASE_URL
+              Value: !Ref pLitellmProxyBaseUrl
+            - Name: LOOM_LITELLM_DISCOVERY_BASE_URL
+              Value: !Ref pLitellmDiscoveryBaseUrl
             - Name: LOG_LEVEL
               Value: info
-          Secrets:
-            - Name: LOOM_DATABASE_URL
-              ValueFrom: !Sub "${pDatabaseSecretArn}:url::"
+          Secrets: !If
+            - HasLitellmProxyApiKey
+            - - Name: LOOM_DATABASE_URL
+                ValueFrom: !Sub "${pDatabaseSecretArn}:url::"
+              - Name: LOOM_LITELLM_PROXY_API_KEY
+                ValueFrom: !Ref pLitellmProxyApiKeySecretArn
+            - - Name: LOOM_DATABASE_URL
+                ValueFrom: !Sub "${pDatabaseSecretArn}:url::"
       Tags:
         - Key: loom:application
           Value: !Ref pTagApplication

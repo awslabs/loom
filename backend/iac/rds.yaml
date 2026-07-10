@@ -83,7 +83,7 @@ Resources:
           FromPort: 5432
           ToPort: 5432
           CidrIp: !Ref pAllowedCidr
-          Description: Allow PostgreSQL access from ECS tasks within the VPC
+          Description: Allow PostgreSQL access from ECS tasks
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-rds-sg"
@@ -165,7 +165,7 @@ Resources:
           Value: !Ref pTagOwner
 
   # ---------------------------------------------------------------------------
-  # RDS Instance
+  # RDS Enhanced Monitoring role
   # ---------------------------------------------------------------------------
   RdsMonitoringRole:
     Type: AWS::IAM::Role
@@ -188,6 +188,9 @@ Resources:
         - Key: loom:owner
           Value: !Ref pTagOwner
 
+  # ---------------------------------------------------------------------------
+  # RDS Instance
+  # ---------------------------------------------------------------------------
   RdsInstance:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Snapshot

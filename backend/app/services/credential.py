@@ -137,3 +137,51 @@ def delete_credential_provider(provider_name: str, region: str) -> None:
 
     client = boto3.client('bedrock-agentcore-control', region_name=region)
     client.delete_oauth2_credential_provider(name=provider_name)
+
+
+def create_api_key_credential_provider(name: str, api_key: str, region: str) -> dict[str, Any]:
+    """
+    Create an API key credential provider via the AgentCore control plane.
+
+    Used by AgentCore Harness's `liteLlmModelConfig.apiKeyArn` — the harness
+    resolves the key itself at invocation time via
+    bedrock-agentcore:GetResourceApiKey, so this is a distinct resource from
+    Secrets Manager (which is used for non-harness LLM provider API keys).
+
+    Args:
+        name: Name for the credential provider
+        api_key: The raw API key value
+        region: AWS region name
+
+    Returns:
+        Dictionary with provider details from the API response, including
+        `credentialProviderArn`.
+    """
+    import boto3
+
+    client = boto3.client('bedrock-agentcore-control', region_name=region)
+
+    try:
+        return client.create_api_key_credential_provider(name=name, apiKey=api_key)
+    except client.exceptions.ValidationException as e:
+        if "already exists" in str(e):
+            logger.info(
+                "API key credential provider '%s' already exists, updating instead",
+                name,
+            )
+            return client.update_api_key_credential_provider(name=name, apiKey=api_key)
+        raise
+
+
+def delete_api_key_credential_provider(provider_name: str, region: str) -> None:
+    """
+    Delete an API key credential provider.
+
+    Args:
+        provider_name: Name of the credential provider to delete
+        region: AWS region name
+    """
+    import boto3
+
+    client = boto3.client('bedrock-agentcore-control', region_name=region)
+    client.delete_api_key_credential_provider(name=provider_name)

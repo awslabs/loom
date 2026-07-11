@@ -546,7 +546,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         window.location.href = `${issuer}/v1/logout?${params.toString()}`;
       } else if (currentConfig.provider_type === "entra_id") {
         const params = new URLSearchParams({ post_logout_redirect_uri: returnUrl });
-        window.location.href = `${issuer}/oauth2/v2.0/logout?${params.toString()}`;
+        const authority = issuer.replace(/\/v2\.0$/i, "");
+        window.location.href = `${authority}/oauth2/v2.0/logout?${params.toString()}`;
       }
     }
   }, [tokens, logout]);

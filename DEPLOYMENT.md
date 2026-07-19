@@ -45,7 +45,7 @@ The deployment model has three phases:
 **Step 1: Clone the repository**
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/awslabs/loom.git
 cd loom
 ```
 
@@ -119,7 +119,7 @@ make cognito.set-passwords     # Set permanent passwords for demo users
 - `t-user` — User UI with limited navigation
 
 **Resource Groups** (determine access to resources):
-- `g-admins-super` — All 19 scopes (catalog:r/w, agent:r/w, memory:r/w, security:r/w, settings:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, invoke)
+- `g-admins-super` — All 21 scopes (catalog:r/w, agent:r/w, memory:r/w, security:r/w, settings:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, registry:r/w, invoke)
 - `g-admins-demo` — Read-only to all pages + read/write to demo group resources + costs:write
 - `g-admins-security` — security:read/write, settings:read
 - `g-admins-memory` — memory:read/write, settings:read

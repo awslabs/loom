@@ -9,6 +9,14 @@ import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+# Delegate TLS verification to the OS trust store when enabled (e.g. behind a
+# corporate TLS-intercepting proxy such as Zscaler, whose root CA OpenSSL 3.x
+# rejects). Must run before any module creates an SSL context.
+if os.getenv("LOOM_USE_SYSTEM_TRUST_STORE", "").lower() in ("1", "true", "yes"):
+    import truststore
+
+    truststore.inject_into_ssl()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

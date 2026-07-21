@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -173,6 +174,7 @@ function SidebarItem({
 }
 
 function AppContent() {
+  const { t } = useTranslation();
   const { isAuthenticated, isLoading, user, logout, hasScope, browserSessionId } = useAuth();
   const { theme, setTheme } = useTheme();
   const [showThemePicker, setShowThemePicker] = useState(false);
@@ -357,7 +359,7 @@ function AppContent() {
   if (isLoading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
-        <p className="text-muted-foreground">Loading...</p>
+        <p className="text-muted-foreground">{t("common.loading")}</p>
       </div>
     );
   }
@@ -520,7 +522,7 @@ function AppContent() {
           {effectiveHasScope("catalog:read") && (
             <SidebarItem
               icon={BookOpen}
-              label="Catalog"
+              label={t("nav.catalog")}
               active={activePersona === "catalog"}
               onClick={() => setActivePersona("catalog")}
             />
@@ -528,7 +530,7 @@ function AppContent() {
           {(effectiveHasScope("agent:read") || effectiveHasScope("agent:write")) && (
             <SidebarItem
               icon={Bot}
-              label="Agents"
+              label={t("nav.agents")}
               active={activePersona === "builder"}
               onClick={() => setActivePersona("builder")}
             />
@@ -536,7 +538,7 @@ function AppContent() {
           {(effectiveHasScope("memory:read") || effectiveHasScope("memory:write")) && (
             <SidebarItem
               icon={Brain}
-              label="Memory"
+              label={t("nav.memory")}
               active={activePersona === "memory"}
               onClick={() => setActivePersona("memory")}
             />
@@ -544,7 +546,7 @@ function AppContent() {
           {(effectiveHasScope("security:read") || effectiveHasScope("security:write")) && (
             <SidebarItem
               icon={Shield}
-              label="Security"
+              label={t("nav.security")}
               active={activePersona === "security"}
               onClick={() => setActivePersona("security")}
             />
@@ -552,7 +554,7 @@ function AppContent() {
           {effectiveHasScope("registry:read") && (
             <SidebarItem
               icon={Library}
-              label="Registry"
+              label={t("nav.registry")}
               active={activePersona === "registry"}
               onClick={() => setActivePersona("registry")}
             />
@@ -560,7 +562,7 @@ function AppContent() {
           {(effectiveHasScope("mcp:read") || effectiveHasScope("mcp:write")) && (
             <SidebarItem
               icon={Network}
-              label="MCP Servers"
+              label={t("nav.mcpServers")}
               active={activePersona === "mcp"}
               onClick={() => setActivePersona("mcp")}
             />
@@ -568,7 +570,7 @@ function AppContent() {
           {(effectiveHasScope("a2a:read") || effectiveHasScope("a2a:write")) && (
             <SidebarItem
               icon={Users}
-              label="A2A Agents"
+              label={t("nav.a2aAgents")}
               active={activePersona === "a2a"}
               onClick={() => setActivePersona("a2a")}
             />
@@ -576,7 +578,7 @@ function AppContent() {
           {(effectiveHasScope("agent:write") || effectiveHasScope("security:write") || effectiveHasScope("memory:write")) && (
             <SidebarItem
               icon={Tags}
-              label="Tagging"
+              label={t("nav.tagging")}
               active={activePersona === "tagging"}
               onClick={() => setActivePersona("tagging")}
             />
@@ -584,7 +586,7 @@ function AppContent() {
           {effectiveHasScope("catalog:read") && (
             <SidebarItem
               icon={DollarSign}
-              label="Costs"
+              label={t("nav.costs")}
               active={activePersona === "costs"}
               onClick={() => setActivePersona("costs")}
             />
@@ -592,7 +594,7 @@ function AppContent() {
           {effectiveHasScope("admin:read") && (
             <SidebarItem
               icon={BarChart3}
-              label="Admin"
+              label={t("nav.admin")}
               active={activePersona === "admin"}
               onClick={() => setActivePersona("admin")}
             />
@@ -600,7 +602,7 @@ function AppContent() {
           {effectiveHasScope("settings:read") && (
             <SidebarItem
               icon={Settings}
-              label="Settings"
+              label={t("nav.settings")}
               active={activePersona === "settings"}
               onClick={() => setActivePersona("settings")}
             />
@@ -651,7 +653,7 @@ function AppContent() {
                 type="button"
                 onClick={() => setShowThemePicker((v) => !v)}
                 className="text-muted-foreground hover:text-foreground transition-colors"
-                title="Change theme"
+                title={t("common.changeTheme")}
               >
                 <Palette className="h-3.5 w-3.5" />
               </button>
@@ -691,7 +693,7 @@ function AppContent() {
                 logout();
               }}
               className="text-muted-foreground hover:text-foreground transition-colors"
-              title="Sign out"
+              title={t("common.signOut")}
             >
               <LogOut className="h-3.5 w-3.5" />
             </button>

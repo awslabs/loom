@@ -1,0 +1,48 @@
+{
+  "common": {
+    "loading": "読み込み中...",
+    "signOut": "サインアウト",
+    "changeTheme": "テーマを変更",
+    "user": "ユーザー",
+    "light": "ライト",
+    "dark": "ダーク"
+  },
+  "nav": {
+    "catalog": "カタログ",
+    "agents": "エージェント",
+    "memory": "メモリ",
+    "security": "セキュリティ",
+    "registry": "レジストリ",
+    "mcpServers": "MCPサーバー",
+    "a2aAgents": "A2Aエージェント",
+    "tagging": "タグ管理",
+    "costs": "コスト",
+    "admin": "管理",
+    "settings": "設定"
+  },
+  "settings": {
+    "title": "設定",
+    "description": "環境設定、モデル、ネットワーク、インフラを管理します。",
+    "tabs": {
+      "general": "一般",
+      "models": "モデル",
+      "networking": "ネットワーク",
+      "infrastructure": "インフラ"
+    },
+    "preferences": {
+      "title": "環境設定",
+      "description": "外観と表示の設定。",
+      "timezone": "タイムゾーン",
+      "language": "言語"
+    },
+    "costEstimation": {
+      "title": "コスト見積もり",
+      "description": "ランタイムコスト計算の前提を設定します。",
+      "cpuIdleDiscount": "CPU I/O待機割引 (%)"
+    }
+  },
+  "languages": {
+    "en": "English",
+    "ja": "日本語"
+  }
+}

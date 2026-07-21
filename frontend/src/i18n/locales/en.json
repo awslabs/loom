@@ -1,0 +1,48 @@
+{
+  "common": {
+    "loading": "Loading...",
+    "signOut": "Sign out",
+    "changeTheme": "Change theme",
+    "user": "User",
+    "light": "Light",
+    "dark": "Dark"
+  },
+  "nav": {
+    "catalog": "Catalog",
+    "agents": "Agents",
+    "memory": "Memory",
+    "security": "Security",
+    "registry": "Registry",
+    "mcpServers": "MCP Servers",
+    "a2aAgents": "A2A Agents",
+    "tagging": "Tagging",
+    "costs": "Costs",
+    "admin": "Admin",
+    "settings": "Settings"
+  },
+  "settings": {
+    "title": "Settings",
+    "description": "Manage preferences, models, networking, and infrastructure.",
+    "tabs": {
+      "general": "General",
+      "models": "Models",
+      "networking": "Networking",
+      "infrastructure": "Infrastructure"
+    },
+    "preferences": {
+      "title": "Preferences",
+      "description": "Appearance and display settings.",
+      "timezone": "Timezone",
+      "language": "Language"
+    },
+    "costEstimation": {
+      "title": "Cost Estimation",
+      "description": "Configure assumptions for runtime cost calculations.",
+      "cpuIdleDiscount": "CPU I/O Wait Discount (%)"
+    }
+  },
+  "languages": {
+    "en": "English",
+    "ja": "日本語"
+  }
+}

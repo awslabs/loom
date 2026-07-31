@@ -383,7 +383,9 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
     const runtimeModelId = selectedModel && selectedModel !== modelId ? selectedModel : undefined;
     const invokeOnlyIds = [...enabledConnectors].filter((id) => {
       const c = connectors.find((cn) => cn.id === id);
-      return c && !mcpNames.includes(c.name);
+      // Deploy-time API-key tools still need the current user's key injected
+      // into each harness invocation.
+      return c && (!mcpNames.includes(c.name) || c.auth_type === "api_key");
     });
     const activeConnectorIds = invokeOnlyIds.length > 0 ? invokeOnlyIds : undefined;
     const useLinkedToken = selectedCredential === LINKED_TOKEN ? true : undefined;

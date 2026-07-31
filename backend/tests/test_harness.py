@@ -648,7 +648,7 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
         mock_agent_base_url.return_value = "https://my-proxy.example.com"
         mock_vend.return_value = "sk-virtual-key"
         mock_create_cp.return_value = {
-            "credentialProviderArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:token-vault/default/apikeycredentialprovider/loom-litellm_harness-litellm-key",
+            "credentialProviderArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:token-vault/default/apikeycredentialprovider/loom-litellm-harness-litellm-key",
         }
         mock_create_harness.return_value = {
             "harnessId": "h-litellm-e2e",
@@ -672,14 +672,14 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
 
         mock_vend.assert_called_once()
         mock_create_cp.assert_called_once()
-        self.assertEqual(mock_create_cp.call_args[1]["name"], "loom-litellm_harness-litellm-key")
+        self.assertEqual(mock_create_cp.call_args[1]["name"], "loom-litellm-harness-litellm-key")
         self.assertEqual(mock_create_cp.call_args[1]["api_key"], "sk-virtual-key")
 
         create_kwargs = mock_create_harness.call_args[1]
         self.assertEqual(create_kwargs["provider"], "litellm")
         self.assertEqual(
             create_kwargs["litellm_api_key_arn"],
-            "arn:aws:bedrock-agentcore:us-east-1:123456789012:token-vault/default/apikeycredentialprovider/loom-litellm_harness-litellm-key",
+            "arn:aws:bedrock-agentcore:us-east-1:123456789012:token-vault/default/apikeycredentialprovider/loom-litellm-harness-litellm-key",
         )
         self.assertEqual(create_kwargs["litellm_api_base"], "https://my-proxy.example.com")
 
@@ -691,7 +691,108 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
         config_data = json.loads(config.value)
         self.assertEqual(config_data["provider"], "litellm")
         self.assertEqual(config_data["base_url"], "https://my-proxy.example.com")
-        self.assertEqual(config_data["litellm_api_key_credential_provider_name"], "loom-litellm_harness-litellm-key")
+        self.assertEqual(config_data["litellm_api_key_credential_provider_name"], "loom-litellm-harness-litellm-key")
+
+    @patch("app.routers.agents.update_harness_api")
+    @patch("app.routers.agents.create_harness_api")
+    @patch("app.routers.agents.create_api_key_credential_provider")
+    @patch("app.services.litellm.vend_virtual_key")
+    @patch("app.services.litellm.get_agent_base_url")
+    def test_redeploy_harness_preserves_litellm_provider(
+        self,
+        mock_agent_base_url,
+        mock_vend,
+        mock_create_cp,
+        mock_create_harness,
+        mock_update_harness,
+    ):
+        mock_agent_base_url.return_value = "https://my-proxy.example.com"
+        mock_vend.return_value = "sk-virtual-key"
+        mock_create_cp.return_value = {
+            "credentialProviderArn": (
+                "arn:aws:bedrock-agentcore:us-east-1:123456789012:"
+                "token-vault/default/apikeycredentialprovider/"
+                "loom-litellm-harness-update-litellm-key"
+            ),
+        }
+        mock_create_harness.return_value = {
+            "harnessId": "h-litellm-update",
+            "harnessArn": (
+                "arn:aws:bedrock-agentcore:us-east-1:123456789012:"
+                "harness/h-litellm-update"
+            ),
+            "status": "READY",
+            "environment": {"agentCoreRuntimeEnvironment": {}},
+        }
+        mock_update_harness.return_value = {"status": "UPDATING"}
+
+        create_response = self.client.post(
+            "/api/agents",
+            json={
+                "source": "harness",
+                "name": "litellm_harness_update",
+                "model_id": "azure/gpt-4.1-mini",
+                "allowed_model_ids": ["azure/gpt-4.1-mini"],
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
+                "provider": "litellm",
+            },
+        )
+        self.assertEqual(create_response.status_code, 201)
+        agent_id = create_response.json()["id"]
+
+        # Simulate a legacy redeploy that dropped the LiteLLM credential
+        # metadata. The repair must reconstruct it from the agent's account.
+        agent = self.session.query(Agent).filter(Agent.id == agent_id).first()
+        agent.account_id = "123456789012"
+        existing_config = self.session.query(ConfigEntry).filter(
+            ConfigEntry.agent_id == agent_id,
+            ConfigEntry.key == "AGENT_CONFIG_JSON",
+        ).first()
+        existing_config_data = json.loads(existing_config.value)
+        existing_config_data.pop("litellm_api_key_credential_provider_name")
+        existing_config_data.pop("litellm_api_key_credential_provider_arn")
+        existing_config.value = json.dumps(existing_config_data)
+        self.session.commit()
+
+        update_response = self.client.put(
+            f"/api/agents/{agent_id}/redeploy-harness",
+            json={
+                "source": "harness",
+                "name": "litellm_harness_update",
+                "model_id": "azure/gpt-4.1-mini",
+                "allowed_model_ids": ["azure/gpt-4.1-mini"],
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
+                "provider": "litellm",
+            },
+        )
+        self.assertEqual(update_response.status_code, 200)
+
+        update_kwargs = mock_update_harness.call_args[1]
+        self.assertEqual(update_kwargs["provider"], "litellm")
+        self.assertEqual(
+            update_kwargs["litellm_api_key_arn"],
+            (
+                "arn:aws:bedrock-agentcore:us-east-1:123456789012:"
+                "token-vault/default/apikeycredentialprovider/"
+                "loom-litellm-harness-update-litellm-key"
+            ),
+        )
+        self.assertEqual(
+            update_kwargs["litellm_api_base"],
+            "https://my-proxy.example.com",
+        )
+
+        config = self.session.query(ConfigEntry).filter(
+            ConfigEntry.agent_id == agent_id,
+            ConfigEntry.key == "AGENT_CONFIG_JSON",
+        ).first()
+        config_data = json.loads(config.value)
+        self.assertEqual(config_data["provider"], "litellm")
+        self.assertEqual(config_data["base_url"], "https://my-proxy.example.com")
+        self.assertEqual(
+            config_data["litellm_api_key_credential_provider_name"],
+            "loom-litellm-harness-update-litellm-key",
+        )
 
     @patch("app.services.litellm.get_agent_base_url", return_value="")
     def test_deploy_harness_litellm_requires_configured_connection(self, mock_agent_base_url):

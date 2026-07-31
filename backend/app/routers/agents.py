@@ -2512,6 +2512,10 @@ def _update_harness_background(
     vpc_subnet_ids: list[str] | None = None,
     vpc_security_group_ids: list[str] | None = None,
     ci_config: dict[str, Any] | None = None,
+    provider: str = "bedrock",
+    base_url: str | None = None,
+    litellm_cp_name: str | None = None,
+    litellm_cp_arn: str | None = None,
 ) -> None:
     """Background task that updates an existing harness via UpdateHarness API."""
     db = SessionLocal()
@@ -2666,6 +2670,10 @@ def _update_harness_background(
             "system_prompt": system_prompt,
             "model_id": model_id,
             "max_tokens": max_tokens,
+            "provider": provider,
+            "base_url": base_url or "",
+            "litellm_api_key_credential_provider_name": litellm_cp_name or "",
+            "litellm_api_key_credential_provider_arn": litellm_cp_arn or "",
             "harness_config": {
                 "tools": all_mcp_tools,
                 "deploy_tools": harness_tools,
@@ -2704,6 +2712,9 @@ def _update_harness_background(
             memory_arn=primary_memory_arn,
             memory_retrieval_config=primary_memory_retrieval_config,
             region=region,
+            provider=provider,
+            litellm_api_key_arn=litellm_cp_arn,
+            litellm_api_base=base_url,
         )
 
         harness_status = response.get("status", "UPDATING")
@@ -3617,17 +3628,18 @@ def redeploy_harness_agent(
         )
 
     region = os.getenv("AWS_REGION", DEFAULT_REGION)
-    account_id = os.getenv("AWS_ACCOUNT_ID", "")
+    account_id = os.getenv("AWS_ACCOUNT_ID", "") or agent.account_id
 
     # Clean up old credential providers that are no longer needed
     old_config_entry = db.query(ConfigEntry).filter(
         ConfigEntry.agent_id == agent_id, ConfigEntry.key == "AGENT_CONFIG_JSON"
     ).first()
     old_cp_names: set[str] = set()
+    old_agent_config: dict[str, Any] = {}
     if old_config_entry:
         try:
-            old_config = json.loads(old_config_entry.value)
-            old_mcp = old_config.get("integrations", {}).get("mcp_servers", [])
+            old_agent_config = json.loads(old_config_entry.value)
+            old_mcp = old_agent_config.get("integrations", {}).get("mcp_servers", [])
             for srv in old_mcp:
                 cp_name = (srv.get("auth", {}) or {}).get("credential_provider_name")
                 if cp_name:
@@ -3640,6 +3652,32 @@ def redeploy_harness_agent(
     # Update agent fields
     resolved_tags, _ = _resolve_tags(db, request.tags)
     system_prompt = _build_system_prompt(request)
+
+    provider = request.provider
+    litellm_base_url: str | None = None
+    litellm_cp_name: str | None = None
+    litellm_cp_arn: str | None = None
+    if provider == "litellm":
+        from app.services.litellm import get_agent_base_url
+
+        litellm_base_url = (
+            get_agent_base_url(db)
+            or request.base_url
+            or old_agent_config.get("base_url")
+        )
+        sanitized_name = re.sub(r"[^a-zA-Z0-9-.]", "-", agent.name)
+        litellm_cp_name = (
+            old_agent_config.get("litellm_api_key_credential_provider_name")
+            or f"loom-{sanitized_name}-litellm-key"
+        )
+        litellm_cp_arn = old_agent_config.get(
+            "litellm_api_key_credential_provider_arn"
+        )
+        if not litellm_cp_arn and account_id:
+            litellm_cp_arn = (
+                f"arn:aws:bedrock-agentcore:{region}:{account_id}:"
+                f"token-vault/default/apikeycredentialprovider/{litellm_cp_name}"
+            )
 
     agent.description = request.description or agent.description
     agent.execution_role_arn = request.role_arn or agent.execution_role_arn
@@ -3776,6 +3814,10 @@ def redeploy_harness_agent(
         region=region,
         account_id=account_id,
         ci_config=update_ci_config,
+        provider=provider,
+        base_url=litellm_base_url,
+        litellm_cp_name=litellm_cp_name,
+        litellm_cp_arn=litellm_cp_arn,
     )
 
     return _agent_response(agent, db)

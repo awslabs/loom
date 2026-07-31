@@ -600,7 +600,7 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
       const deployNames = agent?.mcp_names ?? [];
       const invokeOnlyIds = Array.from(enabledConnectors).filter((id) => {
         const c = connectors.find((cn) => cn.id === id);
-        return c && !deployNames.includes(c.name);
+        return c && (!deployNames.includes(c.name) || c.auth_type === "api_key");
       });
       const activeConnectorIds = invokeOnlyIds.length > 0 ? invokeOnlyIds : undefined;
       invoke(prompt, "DEFAULT", currentSessionId ?? undefined, undefined, undefined, rtModel, activeConnectorIds, linkStatus === "linked" ? true : undefined);
@@ -629,7 +629,7 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
     const deployNames = selectedAgent?.mcp_names ?? [];
     const invokeOnlyIds = Array.from(enabledConnectors).filter((id) => {
       const c = connectors.find((cn) => cn.id === id);
-      return c && !deployNames.includes(c.name);
+      return c && (!deployNames.includes(c.name) || c.auth_type === "api_key");
     });
     const activeConnectorIds = invokeOnlyIds.length > 0 ? invokeOnlyIds : undefined;
     await invoke(prompt, "DEFAULT", currentSessionId ?? undefined, undefined, undefined, runtimeModelId, activeConnectorIds, linkStatus === "linked" ? true : undefined);

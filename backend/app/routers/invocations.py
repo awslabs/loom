@@ -1066,10 +1066,30 @@ async def invoke_harness_agent_stream(
     if dynamic_tools:
         if invoke_tools is None:
             invoke_tools = []
-        existing_names = {t.get("name") for t in invoke_tools}
+        existing_by_name = {
+            tool.get("name"): tool
+            for tool in invoke_tools
+            if tool.get("name")
+        }
         for tool in dynamic_tools:
-            if tool.get("name") not in existing_names:
+            existing = existing_by_name.get(tool.get("name"))
+            if existing is None:
                 invoke_tools.append(_json.loads(_json.dumps(tool)))
+                continue
+
+            # The deployed harness stores only the connector URL. Invocation
+            # data carries user-scoped credentials; merge those headers into
+            # the configured tool instead of dropping the duplicate by name.
+            dynamic_remote = (tool.get("config") or {}).get("remoteMcp") or {}
+            dynamic_headers = dynamic_remote.get("headers") or {}
+            if dynamic_headers:
+                existing_remote = (
+                    existing.setdefault("config", {})
+                    .setdefault("remoteMcp", {})
+                )
+                existing_headers = existing_remote.get("headers") or {}
+                existing_headers.update(dynamic_headers)
+                existing_remote["headers"] = existing_headers
 
     invocation.client_invoke_time = client_invoke_time
     invocation.status = "streaming"
@@ -1586,7 +1606,10 @@ async def invoke_agent_endpoint(
                 "endpoint_url": server.endpoint_url,
             }
             if server.auth_type == "api_key":
-                secret_name = f"loom/mcp/{server.name}/api-key/{actor_id}"
+                # Per-user keys are stored by the immutable IdP subject.  The
+                # actor_id is a separately formatted value used by AgentCore
+                # sessions and does not identify the Secrets Manager entry.
+                secret_name = f"loom/mcp/{server.name}/api-key/{user.sub}"
                 entry["auth"] = {
                     "type": "api_key",
                     "credentials_secret_arn": secret_name,
@@ -1667,10 +1690,31 @@ async def invoke_agent_endpoint(
         if dynamic_mcp_servers:
             dynamic_harness_tools = []
             for mcp in dynamic_mcp_servers:
+                remote_mcp: dict[str, Any] = {"url": mcp["endpoint_url"]}
+                auth = mcp.get("auth") or {}
+                if auth.get("type") == "api_key":
+                    try:
+                        api_key = get_secret(
+                            auth["credentials_secret_arn"],
+                            agent.region,
+                        )
+                        header_name = auth.get("api_key_header_name") or "x-api-key"
+                        header_value = (
+                            f"Bearer {api_key}"
+                            if header_name.lower() == "authorization"
+                            else api_key
+                        )
+                        remote_mcp["headers"] = {header_name: header_value}
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to resolve the user API key for MCP connector '%s': %s",
+                            mcp["name"],
+                            exc,
+                        )
                 tool_entry: dict[str, Any] = {
                     "type": "remote_mcp",
                     "name": mcp["name"],
-                    "config": {"remoteMcp": {"url": mcp["endpoint_url"]}},
+                    "config": {"remoteMcp": remote_mcp},
                 }
                 dynamic_harness_tools.append(tool_entry)
 

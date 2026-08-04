@@ -1,4 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
+import { useTranslation } from "react-i18next";
+import { SUPPORTED_LANGUAGES } from "@/i18n";
 import {
   Select,
   SelectContent,
@@ -18,6 +20,7 @@ import { VpcConfigPanel } from "@/components/VpcConfigPanel";
 type SettingsTab = "general" | "models" | "networking" | "infrastructure";
 
 export function SettingsPage() {
+  const { t, i18n } = useTranslation();
   const { timezone, setTimezone } = useTimezone();
   const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -177,17 +180,17 @@ export function SettingsPage() {
   };
 
   const tabs: { key: SettingsTab; label: string }[] = [
-    { key: "general", label: "General" },
-    { key: "models", label: "Models" },
-    { key: "networking", label: "Networking" },
-    { key: "infrastructure", label: "Infrastructure" },
+    { key: "general", label: t("settings.tabs.general") },
+    { key: "models", label: t("settings.tabs.models") },
+    { key: "networking", label: t("settings.tabs.networking") },
+    { key: "infrastructure", label: t("settings.tabs.infrastructure") },
   ];
 
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold">Settings</h2>
-        <p className="text-sm text-muted-foreground">Manage preferences, models, networking, and infrastructure.</p>
+        <h2 className="text-lg font-semibold">{t("settings.title")}</h2>
+        <p className="text-sm text-muted-foreground">{t("settings.description")}</p>
       </div>
 
       <div className="flex rounded-md border text-sm w-fit" role="tablist">
@@ -217,14 +220,14 @@ export function SettingsPage() {
         <div className="space-y-6">
           <div className="space-y-4">
             <div>
-              <h3 className="text-sm font-medium">Preferences</h3>
+              <h3 className="text-sm font-medium">{t("settings.preferences.title")}</h3>
               <p className="text-xs text-muted-foreground mt-1">
-                Appearance and display settings.
+                {t("settings.preferences.description")}
               </p>
             </div>
             <div className="flex gap-4">
               <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">Timezone</label>
+                <label className="text-xs text-muted-foreground">{t("settings.preferences.timezone")}</label>
                 <Select value={timezone} onValueChange={(v) => setTimezone(v as TimezonePreference)}>
                   <SelectTrigger className="h-8 w-[200px] text-xs">
                     <SelectValue />
@@ -235,19 +238,37 @@ export function SettingsPage() {
                   </SelectContent>
                 </Select>
               </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">{t("settings.preferences.language")}</label>
+                <Select
+                  value={i18n.resolvedLanguage ?? "en"}
+                  onValueChange={(v) => void i18n.changeLanguage(v)}
+                >
+                  <SelectTrigger className="h-8 w-[200px] text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SUPPORTED_LANGUAGES.map((lang) => (
+                      <SelectItem key={lang} value={lang}>
+                        {t(`languages.${lang}`)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
           </div>
 
           <div className="space-y-4">
             <div>
-              <h3 className="text-sm font-medium">Cost Estimation</h3>
+              <h3 className="text-sm font-medium">{t("settings.costEstimation.title")}</h3>
               <p className="text-xs text-muted-foreground mt-1">
-                Configure assumptions for runtime cost calculations.
+                {t("settings.costEstimation.description")}
               </p>
             </div>
             <div className="flex gap-4 items-end">
               <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">CPU I/O Wait Discount (%)</label>
+                <label className="text-xs text-muted-foreground">{t("settings.costEstimation.cpuIdleDiscount")}</label>
                 <div className="flex items-center gap-2">
                   <Input
                     type="number"

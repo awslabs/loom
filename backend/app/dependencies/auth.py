@@ -12,6 +12,28 @@ from app.services.jwt_validator import validate_cognito_token, validate_token
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Local-dev auth bypass (fail-closed by default)
+# ---------------------------------------------------------------------------
+# Historically, the absence of Cognito/IdP config silently granted every
+# request super-admin — including requests with no Authorization header —
+# which is an open admin panel on any deployment that forgets to wire up an
+# IdP. Bypass now requires an explicit opt-in and is further restricted to
+# requests arriving from loopback, so it can't be reached over a network
+# even if the env var is set in a deployed environment by mistake.
+LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV = "LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV"
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _bypass_auth_enabled() -> bool:
+    return os.getenv(LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV, "").strip().lower() in ("1", "true", "yes")
+
+
+def _is_loopback_request(request: Request) -> bool:
+    client = request.client
+    return bool(client) and client.host in _LOOPBACK_HOSTS
+
+
+# ---------------------------------------------------------------------------
 # Group-to-scope mapping (must match frontend GROUP_SCOPES)
 # ---------------------------------------------------------------------------
 # Users belong to two dimensions:
@@ -202,7 +224,11 @@ def get_current_user(request: Request) -> UserInfo:
     """Extract and validate the Bearer token, returning a UserInfo with derived scopes.
 
     Checks for an active external IdP first. Falls back to Cognito.
-    In bypass mode (LOOM_COGNITO_USER_POOL_ID not set and no active IdP) returns a user with all scopes.
+    In bypass mode (LOOM_COGNITO_USER_POOL_ID not set and no active IdP) returns a
+    user with all scopes, but ONLY when LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV is set
+    AND the request arrives from loopback. Fails closed (401) otherwise, since an
+    IdP-less deployment reachable over the network would otherwise be an open
+    admin panel.
     """
     user_pool_id = os.getenv("LOOM_COGNITO_USER_POOL_ID", "")
     region = os.getenv("LOOM_COGNITO_REGION", os.getenv("AWS_REGION", "us-east-1"))
@@ -213,16 +239,24 @@ def get_current_user(request: Request) -> UserInfo:
     # Check for active external IdP
     active_idp = _get_active_idp_cached()
 
-    # Bypass mode — no Cognito and no external IdP configured
+    # Bypass mode — no Cognito and no external IdP configured. Requires explicit
+    # opt-in and a loopback client; otherwise fail closed with 401.
     if not user_pool_id and not active_idp:
-        logger.warning("No identity provider configured; bypassing auth")
-        return UserInfo(
-            sub="local",
-            username="local-dev",
-            groups=["t-admin", "g-admins-super"],
-            scopes=ALL_SCOPES.copy(),
-            idp_type="local",
+        if _bypass_auth_enabled() and _is_loopback_request(request):
+            logger.warning("No identity provider configured; bypassing auth for loopback request")
+            return UserInfo(
+                sub="local",
+                username="local-dev",
+                groups=["t-admin", "g-admins-super"],
+                scopes=ALL_SCOPES.copy(),
+                idp_type="local",
+            )
+        logger.error(
+            "No identity provider configured and auth bypass not enabled "
+            "(set %s=true for local dev); rejecting request",
+            LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV,
         )
+        raise HTTPException(status_code=401, detail="No identity provider configured")
 
     if not token:
         raise HTTPException(status_code=401, detail="Missing authorization token")

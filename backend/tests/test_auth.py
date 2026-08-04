@@ -7,12 +7,19 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import jwt
+import pytest
 
 from app.main import app
 from app.db import Base, get_db
 from app.models.agent import Agent
 from app.services.jwt_validator import validate_cognito_token
 from app.dependencies.auth import derive_scopes
+
+
+@pytest.fixture(autouse=True)
+def _default_auth_bypass():
+    """Override the suite-wide auto-bypass fixture — this module tests bypass mechanics directly."""
+    yield
 
 
 class TestAuthConfigEndpoint(unittest.TestCase):
@@ -84,7 +91,7 @@ class TestJWTValidator(unittest.TestCase):
 
 
 class TestInvokeEndpointWithoutAuth(unittest.TestCase):
-    """Regression test: invoke endpoint works without auth headers."""
+    """Auth bypass now fails closed by default and requires explicit opt-in + loopback."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -131,13 +138,23 @@ class TestInvokeEndpointWithoutAuth(unittest.TestCase):
         Base.metadata.drop_all(bind=self.engine)
         Base.metadata.create_all(bind=self.engine)
 
+    @patch.dict("os.environ", {}, clear=True)
+    def test_invoke_without_auth_header_rejected_by_default(self) -> None:
+        """No IdP configured and no bypass opt-in: invoke is rejected, not silently admin."""
+        response = self.client.post(
+            f"/api/agents/{self.agent.id}/invoke",
+            json={"prompt": "Test prompt", "qualifier": "DEFAULT"},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    @patch.dict("os.environ", {"LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV": "true"}, clear=True)
     @patch("app.routers.invocations.get_log_events")
     @patch("app.routers.invocations.parse_agent_start_time")
     @patch("app.routers.invocations.compute_cold_start")
     @patch("app.routers.invocations.derive_log_group")
     @patch("app.routers.invocations.invoke_agent")
     @patch("app.routers.invocations.compute_client_duration")
-    def test_invoke_without_auth_header_still_works(
+    def test_invoke_without_auth_header_works_with_explicit_loopback_bypass(
         self,
         mock_compute_duration,
         mock_invoke,
@@ -146,14 +163,15 @@ class TestInvokeEndpointWithoutAuth(unittest.TestCase):
         mock_parse_agent_start,
         mock_get_log_events,
     ) -> None:
-        """Test that invoke works without Authorization header (regression)."""
+        """With LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV set and a loopback client, bypass still works."""
         mock_invoke.return_value = iter([{"type": "text", "content": "Hello"}])
         mock_compute_duration.return_value = 1000.0
         mock_derive_log_group.return_value = "/aws/bedrock-agentcore/runtimes/test-agent-DEFAULT"
         mock_get_log_events.return_value = []
         mock_parse_agent_start.return_value = None
 
-        response = self.client.post(
+        loopback_client = TestClient(app, client=("127.0.0.1", 12345))
+        response = loopback_client.post(
             f"/api/agents/{self.agent.id}/invoke",
             json={"prompt": "Test prompt", "qualifier": "DEFAULT"},
         )
@@ -162,6 +180,15 @@ class TestInvokeEndpointWithoutAuth(unittest.TestCase):
         self.assertIn("event: session_start", response.text)
         self.assertIn("event: chunk", response.text)
         self.assertIn("event: session_end", response.text)
+
+    @patch.dict("os.environ", {"LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV": "true"}, clear=True)
+    def test_invoke_without_auth_header_still_rejected_when_not_loopback(self) -> None:
+        """Bypass opt-in alone is not enough — a non-loopback client is still rejected."""
+        response = self.client.post(
+            f"/api/agents/{self.agent.id}/invoke",
+            json={"prompt": "Test prompt", "qualifier": "DEFAULT"},
+        )
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == "__main__":

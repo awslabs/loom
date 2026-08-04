@@ -5,6 +5,8 @@ from typing import Any
 
 import httpx
 
+from app.services.net_guard import SSRFBlockedError, safe_get, safe_post
+
 logger = logging.getLogger(__name__)
 
 A2A_REQUEST_TIMEOUT = 30
@@ -34,9 +36,12 @@ def _get_oauth2_token(agent: Any) -> str | None:
 
     if agent.oauth2_well_known_url:
         try:
-            resp = httpx.get(agent.oauth2_well_known_url, timeout=10)
+            resp = safe_get(agent.oauth2_well_known_url, timeout=10)
             resp.raise_for_status()
             token_url = resp.json().get("token_endpoint")
+        except SSRFBlockedError as e:
+            logger.warning("Blocked well-known URL %s: %s", agent.oauth2_well_known_url, e)
+            return None
         except Exception as e:
             logger.warning("Failed to discover token endpoint from %s: %s", agent.oauth2_well_known_url, e)
 
@@ -51,13 +56,16 @@ def _get_oauth2_token(agent: Any) -> str | None:
         }
         if agent.oauth2_scopes:
             data["scope"] = agent.oauth2_scopes
-        resp = httpx.post(token_url, data=data, timeout=10)
+        resp = safe_post(token_url, data=data, timeout=10)
         if resp.status_code == 400 and agent.oauth2_scopes:
             logger.info("Token request with scopes failed, retrying without scopes")
             data.pop("scope", None)
-            resp = httpx.post(token_url, data=data, timeout=10)
+            resp = safe_post(token_url, data=data, timeout=10)
         resp.raise_for_status()
         return resp.json().get("access_token")
+    except SSRFBlockedError as e:
+        logger.warning("Blocked token endpoint %s: %s", token_url, e)
+        return None
     except Exception as e:
         logger.warning("Failed to obtain OAuth2 token: %s", e)
         return None

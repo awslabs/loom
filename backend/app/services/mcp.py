@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from app.services.net_guard import SSRFBlockedError, safe_get, safe_post
 from app.services.secrets import get_secret
 
 logger = logging.getLogger(__name__)
@@ -24,9 +25,12 @@ def _get_oauth2_token(server: Any) -> str | None:
     # Discover token endpoint from well-known URL
     if server.oauth2_well_known_url:
         try:
-            resp = httpx.get(server.oauth2_well_known_url, timeout=10)
+            resp = safe_get(server.oauth2_well_known_url, timeout=10)
             resp.raise_for_status()
             token_url = resp.json().get("token_endpoint")
+        except SSRFBlockedError as e:
+            logger.warning("Blocked well-known URL %s: %s", server.oauth2_well_known_url, e)
+            return None
         except Exception as e:
             logger.warning("Failed to discover token endpoint from %s: %s", server.oauth2_well_known_url, e)
 
@@ -41,14 +45,17 @@ def _get_oauth2_token(server: Any) -> str | None:
         }
         if server.oauth2_scopes:
             data["scope"] = server.oauth2_scopes
-        resp = httpx.post(token_url, data=data, timeout=10)
+        resp = safe_post(token_url, data=data, timeout=10)
         if resp.status_code == 400 and server.oauth2_scopes:
             # Retry without scopes — some providers reject unknown scope values
             logger.info("Token request with scopes failed, retrying without scopes")
             data.pop("scope", None)
-            resp = httpx.post(token_url, data=data, timeout=10)
+            resp = safe_post(token_url, data=data, timeout=10)
         resp.raise_for_status()
         return resp.json().get("access_token")
+    except SSRFBlockedError as e:
+        logger.warning("Blocked token endpoint %s: %s", token_url, e)
+        return None
     except Exception as e:
         logger.warning("Failed to obtain OAuth2 token: %s", e)
         return None
@@ -86,10 +93,13 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
     token_url = None
     discovery: dict = {}
     try:
-        resp = httpx.get(server.oauth2_well_known_url, timeout=10)
+        resp = safe_get(server.oauth2_well_known_url, timeout=10)
         resp.raise_for_status()
         discovery = resp.json()
         token_url = discovery.get("token_endpoint")
+    except SSRFBlockedError as e:
+        logger.warning("Blocked well-known URL %s: %s", server.oauth2_well_known_url, e)
+        return None
     except Exception as e:
         logger.warning("Failed to discover token endpoint from %s: %s", server.oauth2_well_known_url, e)
 
@@ -120,7 +130,7 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
             }
             if server.oauth2_scopes:
                 data["scope"] = server.oauth2_scopes
-            resp = httpx.post(token_url, data=data, timeout=10)
+            resp = safe_post(token_url, data=data, timeout=10)
         else:
             # Okta RFC 8693 token exchange — use Basic Auth per Okta docs
             import base64 as _b64
@@ -151,7 +161,7 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
             if exchange_scopes:
                 data["scope"] = exchange_scopes
 
-            resp = httpx.post(token_url, data=data, headers=basic_headers, timeout=10)
+            resp = safe_post(token_url, data=data, headers=basic_headers, timeout=10)
         if resp.status_code != 200:
             logger.warning("OBO token exchange failed (HTTP %d): %s", resp.status_code, resp.text)
             return None

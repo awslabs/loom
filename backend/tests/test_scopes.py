@@ -2,6 +2,7 @@
 import unittest
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -17,6 +18,12 @@ from app.dependencies.auth import (
     get_current_user,
     require_scopes,
 )
+
+
+@pytest.fixture(autouse=True)
+def _default_auth_bypass():
+    """Override the suite-wide auto-bypass fixture — TestBypassMode tests bypass mechanics directly."""
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -200,17 +207,23 @@ class TestScopeEnforcement(unittest.TestCase):
 
 
 class TestBypassMode(unittest.TestCase):
-    """Test that bypass mode grants all scopes when Cognito is not configured."""
+    """Test that bypass mode grants all scopes only with explicit opt-in + loopback."""
 
     def setUp(self) -> None:
-        self.client = TestClient(app)
+        self.client = TestClient(app, client=("127.0.0.1", 12345))
 
-    @patch.dict("os.environ", {}, clear=True)
+    @patch.dict("os.environ", {"LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV": "true"}, clear=True)
     def test_bypass_mode_returns_all_scopes(self) -> None:
-        """When LOOM_COGNITO_USER_POOL_ID is not set, all scopes are granted."""
+        """With the opt-in set and a loopback client, all scopes are granted."""
         response = self.client.get("/api/agents")
         # Should succeed because bypass mode gives all scopes
         self.assertIn(response.status_code, [200, 500])  # 200 or 500 (no AWS), but not 401/403
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_bypass_mode_disabled_by_default(self) -> None:
+        """Without the opt-in, no identity provider configured means requests are rejected."""
+        response = self.client.get("/api/agents")
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == "__main__":

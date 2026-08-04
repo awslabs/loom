@@ -71,7 +71,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="Loom Backend API",
     description="Backend API for the Loom agent platform",
-    version="1.6.0",
+    version="1.6.1",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
@@ -119,7 +119,7 @@ async def root() -> dict:
     """Root endpoint - health check."""
     return {
         "service": "Loom Backend API",
-        "version": "1.6.0",
+        "version": "1.6.1",
         "status": "running"
     }
 

@@ -1,4 +1,5 @@
 """Tests for agent invocation endpoints."""
+import json
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -11,6 +12,8 @@ from sqlalchemy.pool import StaticPool
 from app.main import app
 from app.db import Base, get_db
 from app.models.agent import Agent
+from app.models.config_entry import ConfigEntry
+from app.models.mcp import McpServer
 from app.models.session import InvocationSession
 from app.models.invocation import Invocation
 
@@ -116,6 +119,85 @@ class TestInvocationsRouter(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+
+    @patch("app.routers.invocations.get_secret", return_value="updated-user-key")
+    @patch("app.routers.invocations.get_log_events", return_value=[])
+    @patch("app.routers.invocations.parse_agent_start_time", return_value=None)
+    @patch("app.routers.invocations.compute_cold_start")
+    @patch("app.routers.invocations.derive_log_group")
+    @patch("app.routers.invocations.invoke_harness_stream")
+    @patch("app.routers.invocations.compute_client_duration", return_value=100.0)
+    def test_harness_api_key_connector_injects_user_authorization_header(
+        self,
+        _mock_duration,
+        mock_invoke_harness,
+        _mock_derive_log_group,
+        _mock_compute_cold_start,
+        _mock_parse_agent_start,
+        _mock_get_log_events,
+        mock_get_secret,
+    ):
+        """Harness tools must receive the selected user's API key at invoke time."""
+        self.agent.source = "harness"
+        self.agent.harness_id = "h-test"
+        self.agent.arn = "arn:aws:bedrock-agentcore:us-east-1:123456789012:harness/h-test"
+
+        server = McpServer(
+            name="secured_mcp",
+            endpoint_url="https://mcp.example.com/mcp",
+            transport_type="streamable_http",
+            status="active",
+            auth_type="api_key",
+            api_key_header_name="Authorization",
+            delegation_mode="m2m",
+        )
+        self.session.add(server)
+        self.session.flush()
+        self.session.add(ConfigEntry(
+            agent_id=self.agent.id,
+            key="AGENT_CONFIG_JSON",
+            value=json.dumps({
+                "model_id": "azure/gpt-4.1-mini",
+                "provider": "litellm",
+                "harness_config": {
+                    "tools": [{
+                        "type": "remote_mcp",
+                        "name": "secured_mcp",
+                        "config": {"remoteMcp": {"url": server.endpoint_url}},
+                    }],
+                },
+                "integrations": {
+                    "mcp_servers": [{
+                        "name": "secured_mcp",
+                        "endpoint_url": server.endpoint_url,
+                        "auth_type": "api_key",
+                    }],
+                },
+            }),
+            source="env_var",
+        ))
+        self.session.commit()
+        mock_invoke_harness.return_value = iter([{"type": "text", "content": "ok"}])
+
+        response = self.client.post(
+            f"/api/agents/{self.agent.id}/invoke",
+            json={
+                "prompt": "list accessible resources",
+                "qualifier": "DEFAULT",
+                "connector_ids": [server.id],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        mock_get_secret.assert_called_once_with(
+            "loom/mcp/secured_mcp/api-key/local",
+            "us-east-1",
+        )
+        tools = mock_invoke_harness.call_args.kwargs["tools"]
+        self.assertEqual(
+            tools[0]["config"]["remoteMcp"]["headers"]["Authorization"],
+            "Bearer updated-user-key",
+        )
 
     def test_invoke_agent_invalid_qualifier(self):
         """Test invoking with an invalid qualifier."""

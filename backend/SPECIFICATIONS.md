@@ -934,7 +934,7 @@ Replaces all existing access rules for the agent. Personas not listed have no ac
 
 **Record lifecycle:** CREATING → DRAFT → PENDING_APPROVAL → APPROVED | REJECTED (also DEPRECATED)
 
-**Registry is opt-in:** The registry is configured via the Settings page by entering a registry ARN (validated format: `arn:aws:bedrock-agentcore:<region>:<account>:registry/<id>`). The ARN is stored in `site_settings` and loaded into memory on startup. When enabled, it provides additional governance mechanisms: agents, MCP servers, and A2A agents must be approved in the registry before they can be used. When not configured, all resources are available without registry approval. The `LOOM_REGISTRY_ID` env var is supported as a bootstrap fallback.
+**Registry is opt-in:** The registry is configured via the Settings page by entering a registry ARN (validated format: `arn:aws:agent-registry:<region>:<account>:registry/<id>`). The ARN is stored in `site_settings` and loaded into memory on startup. When enabled, it provides additional governance mechanisms: agents, MCP servers, and A2A agents must be approved in the registry before they can be used. When not configured, all resources are available without registry approval. The `LOOM_REGISTRY_ID` env var is supported as a bootstrap fallback.
 
 **Supported resource types:** `mcp` (MCP servers), `a2a` (A2A agents), `agent` (deployed agents). Agents are auto-registered in DRAFT status when deployment completes (if registry is configured).
 
@@ -1048,7 +1048,7 @@ Current site settings:
 - `cpu_io_wait_discount` (default: `75`) — CPU I/O wait discount percentage (0–99). Applied universally to runtime CPU costs.
 - `enabled_model_ids` (default: `[]`) — JSON array of admin-enabled model IDs. When empty, all models are available. Filters the response of `GET /api/agents/models`. May include LiteLLM model IDs.
 - `litellm_enabled`, `litellm_proxy_base_url`, `litellm_discovery_base_url` — LiteLLM proxy connection settings managed via `GET/PUT /api/settings/litellm-proxy` (see [16. Alternate LLM Providers](#16-alternate-llm-providers-litellm-proxy)). The master key is stored separately in Secrets Manager, not as a site setting.
-- `loom_registry_id` (default: `""`) — AWS Agent Registry ARN. Stored in `site_settings`, loaded into memory on startup. Validated format: `arn:aws:bedrock-agentcore:<region>:<account>:registry/<id>`.
+- `loom_registry_id` (default: `""`) — AWS Agent Registry ARN. Stored in `site_settings`, loaded into memory on startup. Validated format: `arn:aws:agent-registry:<region>:<account>:registry/<id>`.
 
 ### CloudWatch Logs
 
@@ -1293,21 +1293,22 @@ Background poller that updates estimated compute costs with actual USAGE_LOGS da
 
 ### `services/registry.py`
 
-Wraps `boto3.client('bedrock-agentcore-control')` (control plane) and `boto3.client('bedrock-agentcore')` (data plane) for AWS Agent Registry operations:
+Wraps `boto3.client('agent-registry-control')` (control plane) and `boto3.client('agent-registry')` (data plane) for AWS Agent Registry operations. AWS Agent Registry moved from the `bedrock-agentcore`/`bedrock-agentcore-control` namespace to its own dedicated `agent-registry`/`agent-registry-control` namespace at GA (2026-08-06), which also restructured the registry record schema — descriptors are now a flat, keyed structure (one primary descriptor per `recordType`, e.g. `mcpServer`/`a2aAgentCard`/`custom`, with supplementary content nested under `additionalData`) instead of a discriminated union, and records carry two new required top-level fields (`name` as a registry-unique dedup key, `recordType` as the semantic type — `AGENT`/`MCP`/`SKILL`/`CUSTOM`). The router (`routers/registry.py`) translates between this AWS shape and Loom's stable frontend-facing contract (`descriptor_type` values `MCP`/`A2A`), so `RegistryPage.tsx` and the rest of the frontend are unaffected by the AWS-side rename.
 
 - `RegistryClient(registry_id, region)` — lazy singleton via `get_registry_client()`. Gracefully returns empty results when `LOOM_REGISTRY_ID` is not set.
 - `list_records() -> dict` — lists all records in the registry.
 - `get_record(record_id) -> dict` — gets full record detail including descriptors.
-- `create_record(name, descriptor_type, descriptors, record_version, description) -> dict` — creates a new registry record.
+- `create_record(name, display_name, record_type, descriptors, record_version, description) -> dict` — creates a new registry record. `name` is the required registry-unique dedup key (Loom derives it from `resource_type`/`resource_id`, e.g. `loom-mcp-42`); `display_name` is the human-readable label shown in the UI.
 - `wait_for_record(record_id) -> dict` — polls until the record leaves the CREATING state.
 - `submit_for_approval(record_id) -> dict` — submits a record for approval review.
 - `approve_record(record_id) -> dict` — approves a record (sets status to APPROVED).
 - `reject_record(record_id, reason) -> dict` — rejects a record with a reason.
+- `update_record(record_id, display_name, descriptors, record_version, description) -> dict` — updates a record's mutable fields (`recordType` and `name` are immutable after creation).
 - `delete_record(record_id) -> dict` — deletes a registry record.
-- `search_records(query, max_results) -> dict` — semantic search over registry records (data plane).
-- `build_mcp_descriptors(server, tools) -> list[dict]` — builds MCP-type descriptors from a Loom McpServer and its tools (server manifest + tool definitions).
-- `build_a2a_descriptors(agent) -> list[dict]` — builds A2A-type descriptors from a Loom A2aAgent (agent card).
-- `build_agent_descriptors(agent) -> list[dict]` — builds AGENT-type descriptors from a Loom Agent (agent manifest with name, ARN, runtime ID, region, protocol, network mode).
+- `search_records(query, max_results) -> dict` — semantic search over registry records via `SearchDiscoverableRegistryRecords` (data plane).
+- `build_mcp_descriptors(server, tools) -> dict` — builds a flattened `mcpServer` descriptor from a Loom McpServer and its tools (server manifest as `data`, tool definitions nested under `additionalData.tools`).
+- `build_a2a_descriptors(agent) -> dict` — builds a flattened `a2aAgentCard` descriptor from a Loom A2aAgent (agent card as `data`).
+- `build_agent_descriptors(agent) -> dict` — builds a flattened `a2aAgentCard` descriptor from a Loom Agent (agent manifest with name, ARN, runtime ID, region, protocol, network mode). Maps to `recordType: "AGENT"` — AWS has no distinct A2A record type.
 
 ### `services/observability.py`
 

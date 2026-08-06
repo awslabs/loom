@@ -69,6 +69,25 @@ def _find_resource_by_record_id(record_id: str, db: Session) -> McpServer | A2aA
     return agent
 
 
+def _dedup_name(resource_type: str, resource_id: int) -> str:
+    """Build the required unique `name` (dedup key) for a registry record.
+
+    AWS Agent Registry requires a `name` unique within the registry at
+    creation time. Loom's own (resource_type, resource_id) pair is already
+    unique, so it's used directly rather than slugifying the display name
+    (which users can freely edit and isn't guaranteed unique).
+    """
+    return f"loom-{resource_type}-{resource_id}"
+
+
+def _to_record_type(descriptor_type: str) -> str:
+    """Map Loom's internal descriptor type (MCP/A2A) to the AWS `recordType`
+    enum (AGENT/MCP/SKILL/CUSTOM). A2A agent cards are recordType AGENT —
+    AWS has no distinct A2A record type.
+    """
+    return "AGENT" if descriptor_type == "A2A" else descriptor_type
+
+
 def _to_str(val) -> str:
     """Coerce a value to string — handles datetime objects from boto3."""
     if val is None:
@@ -78,12 +97,21 @@ def _to_str(val) -> str:
     return str(val)
 
 
+def _from_record_type(record_type: str) -> str:
+    """Map the AWS `recordType` enum (AGENT/MCP/SKILL/CUSTOM) back to Loom's
+    frontend-facing descriptor_type (A2A/MCP/...), preserving the existing
+    API contract for RegistryPage.tsx. Loom only ever creates AGENT- and
+    MCP-typed records today, so AGENT always means "A2A" (agent card) here.
+    """
+    return "A2A" if record_type == "AGENT" else record_type
+
+
 def _record_to_response(rec: dict) -> RegistryRecordResponse:
     """Map an AWS API record dict to a RegistryRecordResponse."""
     return RegistryRecordResponse(
         record_id=rec.get("recordId", ""),
-        name=rec.get("name", ""),
-        descriptor_type=rec.get("descriptorType", ""),
+        name=rec.get("displayName", rec.get("name", "")),
+        descriptor_type=_from_record_type(rec.get("recordType", "")),
         status=rec.get("status", ""),
         description=rec.get("description"),
         created_at=_to_str(rec.get("createdAt")),
@@ -95,8 +123,8 @@ def _record_to_detail_response(rec: dict) -> RegistryRecordDetailResponse:
     """Map an AWS API record dict to a RegistryRecordDetailResponse."""
     return RegistryRecordDetailResponse(
         record_id=rec.get("recordId", ""),
-        name=rec.get("name", ""),
-        descriptor_type=rec.get("descriptorType", ""),
+        name=rec.get("displayName", rec.get("name", "")),
+        descriptor_type=_from_record_type(rec.get("recordType", "")),
         status=rec.get("status", ""),
         description=rec.get("description"),
         created_at=_to_str(rec.get("createdAt")),
@@ -125,7 +153,7 @@ def list_records(
     for rec in records:
         if status_filter and rec.get("status") != status_filter:
             continue
-        if descriptor_type and rec.get("descriptorType") != descriptor_type:
+        if descriptor_type and _from_record_type(rec.get("recordType", "")) != descriptor_type:
             continue
         results.append(_record_to_response(rec))
     return results
@@ -171,7 +199,7 @@ def create_record(
             )
         tools = db.query(McpTool).filter(McpTool.server_id == server.id).all()
         descriptors = client.build_mcp_descriptors(server, tools, namespace=ns)
-        name = server.name
+        display_name = server.name
         description = server.description
         descriptor_type = "MCP"
         resource = server
@@ -184,7 +212,7 @@ def create_record(
                 detail=f"A2A agent with id {request.resource_id} not found",
             )
         descriptors = client.build_a2a_descriptors(agent)
-        name = agent.name
+        display_name = agent.name
         description = agent.description
         descriptor_type = "A2A"
         resource = agent
@@ -197,7 +225,7 @@ def create_record(
                 detail=f"Agent with id {request.resource_id} not found",
             )
         descriptors = client.build_agent_descriptors(agent_record)
-        name = agent_record.name or agent_record.runtime_id
+        display_name = agent_record.name or agent_record.runtime_id
         description = agent_record.description
         descriptor_type = "A2A"
         resource = agent_record
@@ -210,8 +238,9 @@ def create_record(
 
     rv = "1.0"
     result = client.create_record(
-        name=name,
-        descriptor_type=descriptor_type,
+        name=_dedup_name(request.resource_type, request.resource_id),
+        display_name=display_name,
+        record_type=_to_record_type(descriptor_type),
         descriptors=descriptors,
         record_version=rv,
         description=description,
@@ -253,23 +282,20 @@ def update_record(
             )
         tools = db.query(McpTool).filter(McpTool.server_id == server.id).all()
         descriptors = client.build_mcp_descriptors(server, tools, namespace=ns)
-        name = server.name
+        display_name = server.name
         description = server.description
-        descriptor_type = "MCP"
     else:
         agent_a2a = db.query(A2aAgent).filter(A2aAgent.registry_record_id == record_id).first()
         if agent_a2a:
             descriptors = client.build_a2a_descriptors(agent_a2a)
-            name = agent_a2a.name
+            display_name = agent_a2a.name
             description = agent_a2a.description
-            descriptor_type = "A2A"
         else:
             agent = db.query(Agent).filter(Agent.registry_record_id == record_id).first()
             if agent:
                 descriptors = client.build_agent_descriptors(agent)
-                name = agent.name or agent.runtime_id
+                display_name = agent.name or agent.runtime_id
                 description = agent.description
-                descriptor_type = "A2A"
             else:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -278,8 +304,7 @@ def update_record(
 
     result = client.update_record(
         record_id=record_id,
-        name=name,
-        descriptor_type=descriptor_type,
+        display_name=display_name,
         descriptors=descriptors,
         record_version="1.0",
         description=description,

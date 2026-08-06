@@ -84,14 +84,14 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertIsNone(data["deployment_status"])
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_creates_deploying_record(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
     ):
         """Test POST /api/agents with source='deploy' creates agent with correct initial state."""
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
-        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "my-bucket", "key": "artifacts/agent.zip"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-new",
             "agentRuntimeId": "rt-new",
@@ -120,14 +120,14 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertIsNotNone(agent.execution_role_arn)
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_success_updates_status(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
     ):
         """Test that a successful deployment sets status to 'deployed'."""
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
-        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "my-bucket", "key": "artifacts/agent.zip"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-ok",
             "agentRuntimeId": "rt-ok",
@@ -155,14 +155,14 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertIsNotNone(agent.deployed_at)
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_failure_sets_failed_status(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
     ):
         """Test that deploy failure returns 502 and sets status to 'failed'."""
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
-        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "my-bucket", "key": "artifacts/agent.zip"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.side_effect = Exception("AWS deployment error")
 
         response = self.client.post(
@@ -185,14 +185,14 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.update_runtime")
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_redeploy_agent(
         self, mock_create_role, mock_build_artifact, mock_create_runtime, mock_update_runtime
     ):
         """Test POST /api/agents/{id}/redeploy."""
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
-        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "my-bucket", "key": "artifacts/agent.zip"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-redeploy",
             "agentRuntimeId": "rt-redeploy",
@@ -242,12 +242,12 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertIn("Only deployed agents", response.json()["detail"])
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_get_config(self, mock_create_role, mock_build_artifact, mock_create_runtime):
         """Test GET /api/agents/{id}/config returns config entries."""
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
-        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "my-bucket", "key": "artifacts/agent.zip"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/cfg-test",
             "agentRuntimeId": "cfg-test",
@@ -272,12 +272,12 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertIn("AGENT_CONFIG_JSON", keys)
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_update_config(self, mock_create_role, mock_build_artifact, mock_create_runtime):
         """Test PUT /api/agents/{id}/config updates and adds config entries."""
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
-        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "my-bucket", "key": "artifacts/agent.zip"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/cfg-up",
             "agentRuntimeId": "cfg-up",
@@ -308,14 +308,14 @@ class TestAgentsDeployRouter(unittest.TestCase):
     @patch("app.routers.agents.delete_execution_role")
     @patch("app.routers.agents.delete_runtime")
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_delete_deployed_agent_cleans_up(
         self, mock_create_role, mock_build_artifact, mock_create_runtime, mock_delete_rt, mock_delete_role
     ):
         """Test that deleting a deployed agent calls AWS cleanup."""
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
-        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "my-bucket", "key": "artifacts/agent.zip"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-del",
             "agentRuntimeId": "rt-del",
@@ -340,14 +340,14 @@ class TestAgentsDeployRouter(unittest.TestCase):
     @patch("app.routers.agents.delete_execution_role")
     @patch("app.routers.agents.delete_runtime")
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_delete_deployed_agent_with_cleanup_aws(
         self, mock_create_role, mock_build_artifact, mock_create_runtime, mock_delete_rt, mock_delete_role
     ):
         """Test that deleting a deployed agent with cleanup_aws=true calls AWS cleanup."""
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
-        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "my-bucket", "key": "artifacts/agent.zip"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-del2",
             "agentRuntimeId": "rt-del2",
@@ -432,7 +432,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
     # -------------------------------------------------------------------
     @patch("app.routers.agents.get_runtime")
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_status_endpoint_polls_runtime(
         self, mock_create_role, mock_build_artifact, mock_create_runtime, mock_get_runtime
@@ -472,7 +472,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
     @patch("app.routers.agents.delete_runtime")
     @patch("app.routers.agents.delete_runtime_endpoint")
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_status_returns_404_when_deleting_agent_runtime_gone(
         self, mock_create_role, mock_build_artifact, mock_create_runtime,
@@ -552,7 +552,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
     # MCP server integration tests
     # -------------------------------------------------------------------
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_with_mcp_servers(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
@@ -603,7 +603,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.create_oauth2_credential_provider")
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_with_oauth2_mcp_server(
         self, mock_create_role, mock_build_artifact, mock_create_runtime, mock_create_cp
@@ -684,7 +684,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertIn("MCP server IDs not found", response.json()["detail"])
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_with_mcp_server_auto_grants_access(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
@@ -713,7 +713,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
         # Mock deployment services
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-autogrant-test"
-        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "my-bucket", "key": "artifacts/agent.zip"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-autogrant",
             "agentRuntimeId": "rt-autogrant",
@@ -747,7 +747,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertIsNone(new_access.allowed_tool_names)
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_with_mcp_server_no_existing_rules_no_autogrant(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
@@ -766,7 +766,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
         # Mock deployment services
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-no-autogrant"
-        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "my-bucket", "key": "artifacts/agent.zip"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-no-autogrant",
             "agentRuntimeId": "rt-no-autogrant",
@@ -798,7 +798,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertEqual(access_count, 0)
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_with_a2a_agent_auto_grants_access(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
@@ -828,7 +828,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
         # Mock deployment services
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-a2a-autogrant"
-        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "my-bucket", "key": "artifacts/agent.zip"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-a2a-autogrant",
             "agentRuntimeId": "rt-a2a-autogrant",

@@ -367,7 +367,7 @@ class TestDeployWithTags(unittest.TestCase):
         Base.metadata.create_all(bind=self.engine)
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_with_tags_stored_on_agent(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
@@ -378,7 +378,7 @@ class TestDeployWithTags(unittest.TestCase):
         self.session.commit()
 
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
-        mock_build_artifact.return_value = ("bucket", "key")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "bucket", "key": "key"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-tags",
             "agentRuntimeId": "rt-tags",
@@ -415,14 +415,14 @@ class TestDeployWithTags(unittest.TestCase):
         self.assertIn("loom:group", response.json()["detail"])
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_no_policies_succeeds(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
     ):
         """Test deployment succeeds when no tag policies are configured."""
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
-        mock_build_artifact.return_value = ("bucket", "key")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "bucket", "key": "key"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-notags",
             "agentRuntimeId": "rt-notags",
@@ -442,7 +442,7 @@ class TestDeployWithTags(unittest.TestCase):
         self.assertEqual(agent.get_tags(), {})
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_tags_passed_to_create_runtime(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
@@ -452,7 +452,7 @@ class TestDeployWithTags(unittest.TestCase):
         self.session.commit()
 
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
-        mock_build_artifact.return_value = ("bucket", "key")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "bucket", "key": "key"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-pass",
             "agentRuntimeId": "rt-pass",
@@ -470,7 +470,7 @@ class TestDeployWithTags(unittest.TestCase):
         self.assertEqual(call_kwargs["tags"]["loom:application"], "testapp")
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_tags_in_agent_response(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
@@ -480,7 +480,7 @@ class TestDeployWithTags(unittest.TestCase):
         self.session.commit()
 
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
-        mock_build_artifact.return_value = ("bucket", "key")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "bucket", "key": "key"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-resp",
             "agentRuntimeId": "rt-resp",
@@ -507,7 +507,7 @@ class TestDeployWithTags(unittest.TestCase):
         self.assertIn("tags", agent_data)
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_with_optional_custom_tag(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
@@ -517,7 +517,7 @@ class TestDeployWithTags(unittest.TestCase):
         self.session.commit()
 
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
-        mock_build_artifact.return_value = ("bucket", "key")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "bucket", "key": "key"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-custom",
             "agentRuntimeId": "rt-custom",
@@ -538,7 +538,7 @@ class TestDeployWithTags(unittest.TestCase):
         self.assertEqual(agent.get_tags()["cost-center"], "default-cc")
 
     @patch("app.routers.agents.create_runtime")
-    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.get_bundler")
     @patch("app.routers.agents.create_execution_role")
     def test_deploy_custom_tag_override(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
@@ -548,7 +548,7 @@ class TestDeployWithTags(unittest.TestCase):
         self.session.commit()
 
         mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
-        mock_build_artifact.return_value = ("bucket", "key")
+        mock_bundler = MagicMock(); mock_bundler.build_artifact.return_value = MagicMock(location={"bucket": "bucket", "key": "key"}); mock_build_artifact.return_value = mock_bundler
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-override",
             "agentRuntimeId": "rt-override",

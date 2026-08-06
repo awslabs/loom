@@ -33,8 +33,8 @@ from app.routers.utils import get_agent_or_404
 
 from app.services.agentcore import describe_runtime, list_runtime_endpoints
 from app.services.deployment import (
+    AGENT_SOURCE_DIR,
     _merge_tags,
-    build_agent_artifact,
     create_runtime,
     delete_runtime,
     delete_runtime_endpoint,
@@ -42,6 +42,7 @@ from app.services.deployment import (
     get_runtime_endpoint,
     update_runtime,
 )
+from app.services.platforms import BundleConfig, get_bundler
 from app.services.iam import (
     _iam_tags,
     create_execution_role,
@@ -1295,7 +1296,14 @@ def _deploy_agent_background(
             ci_future = ci_executor.submit(_create_ci_resource)
 
         try:
-            artifact_bucket, artifact_key = build_agent_artifact(region)
+            bundler = get_bundler("agentcore")
+            config = BundleConfig(
+                region=region,
+                source_dir=AGENT_SOURCE_DIR / "src",
+                requirements=AGENT_SOURCE_DIR / "requirements.txt",
+            )
+            result = bundler.build_artifact(config)
+            artifact_bucket, artifact_key = result.location["bucket"], result.location["key"]
         except Exception as e:
             agent.deployment_status = "failed"
             agent.status = "FAILED"
@@ -1738,7 +1746,14 @@ def _update_deploy_agent_background(
         db.commit()
 
         try:
-            artifact_bucket, artifact_key = build_agent_artifact(region)
+            bundler = get_bundler("agentcore")
+            config = BundleConfig(
+                region=region,
+                source_dir=AGENT_SOURCE_DIR / "src",
+                requirements=AGENT_SOURCE_DIR / "requirements.txt",
+            )
+            result = bundler.build_artifact(config)
+            artifact_bucket, artifact_key = result.location["bucket"], result.location["key"]
         except Exception as e:
             agent.deployment_status = "failed"
             agent.status = "FAILED"

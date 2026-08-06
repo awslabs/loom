@@ -4,7 +4,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.services.deployment import (
-    build_agent_artifact,
     create_runtime,
     create_runtime_endpoint,
     get_runtime,
@@ -18,29 +17,39 @@ from app.services.deployment import (
     delete_secret,
     store_large_config,
 )
+from app.services.platforms import get_bundler, BundleConfig
+from app.services.platforms.agentcore import AgentCoreBundler
 
 
 class TestBuildAgentArtifact(unittest.TestCase):
-    """Test cases for build_agent_artifact function."""
+    """Test cases for AgentCoreBundler.build_artifact()."""
 
     @patch.dict(os.environ, {}, clear=True)
     def test_build_agent_artifact_missing_bucket_env(self) -> None:
         """Test that missing LOOM_ARTIFACT_BUCKET raises ValueError."""
         os.environ.pop("LOOM_ARTIFACT_BUCKET", None)
+        from pathlib import Path
+        bundler = get_bundler("agentcore")
+        config = BundleConfig(
+            region="us-east-1",
+            source_dir=Path("/tmp/fake/src"),
+            requirements=Path("/tmp/fake/requirements.txt"),
+        )
         with self.assertRaises(ValueError):
-            build_agent_artifact("us-east-1")
+            bundler.build_artifact(config)
 
-    @patch("app.services.deployment.shutil")
-    @patch("app.services.deployment.subprocess")
     @patch.dict(os.environ, {"LOOM_ARTIFACT_BUCKET": "my-bucket"})
-    def test_build_agent_artifact_missing_source_dir(self, mock_subprocess, mock_shutil) -> None:
+    def test_build_agent_artifact_missing_source_dir(self) -> None:
         """Test that missing agent source directory raises FileNotFoundError."""
-        with patch("app.services.deployment.AGENT_SOURCE_DIR") as mock_dir:
-            mock_src = MagicMock()
-            mock_src.is_dir.return_value = False
-            mock_dir.__truediv__ = MagicMock(return_value=mock_src)
-            with self.assertRaises(FileNotFoundError):
-                build_agent_artifact("us-east-1")
+        from pathlib import Path
+        bundler = get_bundler("agentcore")
+        config = BundleConfig(
+            region="us-east-1",
+            source_dir=Path("/tmp/nonexistent_dir"),
+            requirements=Path("/tmp/fake/requirements.txt"),
+        )
+        with self.assertRaises(FileNotFoundError):
+            bundler.build_artifact(config)
 
 
 class TestCreateRuntime(unittest.TestCase):
@@ -583,7 +592,7 @@ class TestFixConsoleScriptShebangs(unittest.TestCase):
         """Test that macOS shebangs are replaced with portable shebangs."""
         import tempfile
         import shutil
-        from app.services.deployment import _fix_console_script_shebangs
+        from app.services.platforms.agentcore import _fix_console_script_shebangs
 
         tmp = tempfile.mkdtemp()
         try:
@@ -611,7 +620,7 @@ class TestFixConsoleScriptShebangs(unittest.TestCase):
         """Test that missing bin/ directory doesn't raise."""
         import tempfile
         import shutil
-        from app.services.deployment import _fix_console_script_shebangs
+        from app.services.platforms.agentcore import _fix_console_script_shebangs
 
         tmp = tempfile.mkdtemp()
         try:

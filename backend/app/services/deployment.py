@@ -1,19 +1,16 @@
 """
 AgentCore Runtime deployment and configuration management.
 
-This module provides functions to build agent artifacts, deploy and manage
-AgentCore Runtime agents, manage secrets via AWS Secrets Manager, and
-store large configuration values in S3.
+This module provides functions to deploy and manage AgentCore Runtime agents,
+manage secrets via AWS Secrets Manager, and store large configuration values in S3.
+
+Artifact bundling has been moved to the platforms package
+(see app.services.platforms) which provides a provider-agnostic interface.
 """
 
 import logging
 import os
 import re
-import shutil
-import subprocess
-import tempfile
-import zipfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -42,132 +39,6 @@ def _merge_tags(
     if extra:
         tags.update(extra)
     return tags
-
-
-_KNOWN_CONSOLE_SCRIPTS: dict[str, tuple[str, str]] = {
-    "opentelemetry-instrument": (
-        "opentelemetry.instrumentation.auto_instrumentation",
-        "run",
-    ),
-    "opentelemetry-bootstrap": (
-        "opentelemetry.instrumentation.bootstrap",
-        "run",
-    ),
-}
-
-
-def _fix_console_script_shebangs(target_dir: str) -> None:
-    """Rewrite known console scripts with a portable shebang.
-
-    ``pip install --target`` generates scripts whose shebang points to the
-    local Python interpreter (e.g. ``#!/usr/local/bin/python3.12``).  On a
-    Linux-based AgentCore Runtime container this path does not exist, so the
-    script fails to execute.  This function regenerates the known OTEL
-    console scripts with ``#!/usr/bin/env python3``.
-    """
-    bin_dir = os.path.join(target_dir, "bin")
-    if not os.path.isdir(bin_dir):
-        return
-
-    for script_name, (module_path, func_name) in _KNOWN_CONSOLE_SCRIPTS.items():
-        script_path = os.path.join(bin_dir, script_name)
-        if not os.path.exists(script_path):
-            continue
-
-        content = (
-            "#!/usr/bin/env python3\n"
-            "# -*- coding: utf-8 -*-\n"
-            "import re\n"
-            "import sys\n"
-            f"from {module_path} import {func_name}\n"
-            "if __name__ == '__main__':\n"
-            "    sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n"
-            f"    sys.exit({func_name}())\n"
-        )
-        with open(script_path, "w") as f:
-            f.write(content)
-        os.chmod(script_path, 0o755)
-        logger.info("Fixed shebang for %s", script_name)
-
-
-def build_agent_artifact(region: str) -> tuple[str, str]:
-    """
-    Build and upload the strands_agent artifact to S3.
-
-    Copies agents/strands_agent/src/ and pip-installs requirements.txt into
-    a temp directory, zips the contents, and uploads to S3.
-
-    Args:
-        region: AWS region name
-
-    Returns:
-        Tuple of (bucket, s3_key) for the uploaded artifact
-    """
-    import boto3
-
-    bucket = os.environ.get("LOOM_ARTIFACT_BUCKET")
-    if not bucket:
-        raise ValueError("LOOM_ARTIFACT_BUCKET environment variable is not set")
-
-    src_dir = AGENT_SOURCE_DIR / "src"
-    requirements = AGENT_SOURCE_DIR / "requirements.txt"
-
-    if not src_dir.is_dir():
-        raise FileNotFoundError(f"Agent source directory not found: {src_dir}")
-    if not requirements.is_file():
-        raise FileNotFoundError(f"Requirements file not found: {requirements}")
-
-    tmp_dir = tempfile.mkdtemp(prefix="loom-build-")
-    try:
-        # Copy source
-        shutil.copytree(str(src_dir), os.path.join(tmp_dir, "src"))
-
-        # Install dependencies targeting linux/arm64 for AgentCore Runtime
-        subprocess.run(
-            [
-                "pip", "install",
-                "-r", str(requirements),
-                "-t", tmp_dir,
-                "--quiet",
-                "--platform", "manylinux2014_aarch64",
-                "--only-binary=:all:",
-                "--python-version", "3.13",
-                "--implementation", "cp",
-            ],
-            check=True,
-            capture_output=True,
-        )
-
-        # Fix console script shebangs for Linux deployment.
-        # pip generates scripts with the local Python path (e.g.
-        # #!/Library/Frameworks/.../python3.12) which won't work on
-        # the Linux-based AgentCore Runtime.  Rewrite known OTEL
-        # scripts with a portable #!/usr/bin/env python3 shebang.
-        _fix_console_script_shebangs(tmp_dir)
-
-        # Create zip
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        zip_path = os.path.join(tmp_dir, "agent.zip")
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, _dirs, files in os.walk(tmp_dir):
-                for fname in files:
-                    if fname == "agent.zip":
-                        continue
-                    full_path = os.path.join(root, fname)
-                    arcname = os.path.relpath(full_path, tmp_dir)
-                    if arcname.endswith(".pyc") or "__pycache__" in arcname:
-                        continue
-                    zf.write(full_path, arcname)
-
-        # Upload to S3
-        s3_key = f"loom-artifacts/strands_agent/{timestamp}/agent.zip"
-        s3 = boto3.client("s3", region_name=region)
-        s3.upload_file(zip_path, bucket, s3_key)
-        logger.info("Uploaded artifact to s3://%s/%s", bucket, s3_key)
-
-        return (bucket, s3_key)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def create_runtime(

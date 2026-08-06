@@ -57,7 +57,7 @@ Parameters:
     Default: ""
   pRegistryId:
     Type: String
-    Description: Agent Registry ID (from bedrock-agentcore-control list-registries)
+    Description: Agent Registry ID (from agent-registry-control list-registries)
     Default: ""
   pLitellmProxyBaseUrl:
     Type: String
@@ -288,25 +288,37 @@ Resources:
                 Action:
                   - bedrock-agentcore:*
                 Resource: !Sub "arn:aws:bedrock-agentcore:*:${AWS::AccountId}:*"
+        - PolicyName: AgentRegistryPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # AWS Agent Registry (GA, 2026-08-06) — moved out of the
+              # bedrock-agentcore namespace into its own dedicated
+              # agent-registry namespace. Action prefix and resource ARN now
+              # consistently use "agent-registry" (no more control-plane/
+              # data-plane namespace mismatch as under the preview namespace).
+              - Effect: Allow
+                Action:
+                  - agent-registry:GetRegistry
+                  - agent-registry:CreateRegistryRecord
+                  - agent-registry:GetRegistryRecord
+                  - agent-registry:ListRegistryRecords
+                  - agent-registry:SubmitRegistryRecordForApproval
+                  - agent-registry:UpdateRegistryRecordStatus
+                  - agent-registry:UpdateRegistryRecord
+                  - agent-registry:DeleteRegistryRecord
+                  - agent-registry:SearchDiscoverableRegistryRecords
+                Resource: !Sub "arn:aws:agent-registry:*:${AWS::AccountId}:registry/*"
         - PolicyName: BedrockAgentCoreControlPolicy
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Effect: Allow
-                Action:
-                  - bedrock-agentcore-control:GetRegistry
-                  - bedrock-agentcore-control:CreateRegistryRecord
-                  - bedrock-agentcore-control:GetRegistryRecord
-                  - bedrock-agentcore-control:ListRegistryRecords
-                  - bedrock-agentcore-control:SubmitRegistryRecordForApproval
-                  - bedrock-agentcore-control:UpdateRegistryRecordStatus
-                  - bedrock-agentcore-control:UpdateRegistryRecord
-                  - bedrock-agentcore-control:DeleteRegistryRecord
-                Resource: !Sub "arn:aws:bedrock-agentcore-control:*:${AWS::AccountId}:registry/*"
               # Agent runtime lifecycle management — resource ARNs use the base
               # "bedrock-agentcore" namespace even though these actions are
               # under "bedrock-agentcore-control" (see backend/SPECIFICATIONS.md
-              # runtime ARN format).
+              # runtime ARN format). Unaffected by the Agent Registry GA
+              # namespace migration — AgentCore Runtime stays on
+              # "bedrock-agentcore".
               - Effect: Allow
                 Action:
                   - bedrock-agentcore-control:CreateAgentRuntime

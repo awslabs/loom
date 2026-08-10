@@ -13,6 +13,7 @@ from uuid import uuid4
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func
+from sqlalchemy import update as sqlalchemy_update
 from sqlalchemy.orm import Session
 
 from app.db import get_db, SessionLocal
@@ -2758,6 +2759,74 @@ def _is_permanent_error(e: Exception) -> bool:
     return False
 
 
+def _claim_registry_registration(agent_id: int, db: Session) -> bool:
+    """Atomically claim the right to auto-register this agent in the AWS Agent
+    Registry, returning True iff this call won the claim.
+
+    The status-polling endpoint is hit every ~2s by the frontend while an agent
+    is deploying, and CreateRegistryRecord + the record's CREATING settle time
+    can take several seconds. Without an atomic claim, two overlapping polls can
+    each observe `registry_record_id IS NULL` and both call create_record(),
+    producing duplicate records in AWS with only one ever linked back to the
+    agent row. The UPDATE...WHERE below only succeeds for the request that
+    transitions registry_status from NULL to "REGISTERING" first; the loser's
+    UPDATE matches zero rows.
+    """
+    result = db.execute(
+        sqlalchemy_update(Agent)
+        .where(Agent.id == agent_id, Agent.registry_record_id.is_(None), Agent.registry_status.is_(None))
+        .values(registry_status="REGISTERING")
+    )
+    db.commit()
+    return result.rowcount > 0
+
+
+def _register_agent_in_registry_background(agent_id: int) -> None:
+    """Background task: build descriptors and create the registry record for an
+    agent that just reached deployment_status=READY. Runs off the request thread
+    since create_record() + wait_for_record() can block for several seconds
+    while AWS settles the record out of CREATING.
+    """
+    from app.services.registry import get_registry_client
+
+    db = SessionLocal()
+    try:
+        agent = db.query(Agent).filter(Agent.id == agent_id).first()
+        if not agent:
+            return
+        try:
+            reg_client = get_registry_client()
+            if not reg_client.registry_id:
+                agent.registry_status = None
+                db.commit()
+                return
+            descriptors = reg_client.build_agent_descriptors(agent)
+            agent_display_name = agent.name or agent.runtime_id or agent.harness_id
+            reg_result = reg_client.create_record(
+                name=agent_display_name,
+                display_name=agent_display_name,
+                record_type="AGENT",
+                descriptors=descriptors,
+                record_version="1",
+                description=agent.description,
+            )
+            reg_record_id = reg_result.get("recordId", "")
+            if reg_record_id:
+                rec = reg_client.wait_for_record(reg_record_id)
+                agent.registry_record_id = reg_record_id
+                agent.registry_status = rec.get("status", "DRAFT")
+                logger.info("Auto-registered agent %s in registry: %s", agent.id, reg_record_id)
+            else:
+                agent.registry_status = None
+            db.commit()
+        except Exception as reg_err:
+            logger.warning("Failed to auto-register agent %s in registry: %s", agent_id, reg_err)
+            agent.registry_status = None
+            db.commit()
+    finally:
+        db.close()
+
+
 def _cleanup_role(role_arn: str) -> None:
     """Best-effort cleanup of an IAM role on deploy failure."""
     try:
@@ -2856,7 +2925,12 @@ def get_agent(agent_id: int, user: UserInfo = Depends(require_scopes("agent:read
 
 
 @router.get("/{agent_id}/status", response_model=AgentResponse)
-def get_agent_status(agent_id: int, user: UserInfo = Depends(require_scopes("agent:read")), db: Session = Depends(get_db)) -> AgentResponse:
+def get_agent_status(
+    agent_id: int,
+    background_tasks: BackgroundTasks,
+    user: UserInfo = Depends(require_scopes("agent:read")),
+    db: Session = Depends(get_db),
+) -> AgentResponse:
     """Poll AWS for current runtime and endpoint status, update local DB.
 
     If the runtime is READY and no endpoint exists yet, creates one automatically.
@@ -2914,30 +2988,14 @@ def get_agent_status(agent_id: int, user: UserInfo = Depends(require_scopes("age
                 db.refresh(agent)
                 return _agent_response(agent, db)
 
-        # Auto-register in Agent Registry once harness is fully READY
-        if agent.deployment_status == "READY" and not agent.registry_record_id:
-            try:
-                from app.services.registry import get_registry_client
-                reg_client = get_registry_client()
-                if reg_client.registry_id:
-                    descriptors = reg_client.build_agent_descriptors(agent)
-                    reg_result = reg_client.create_record(
-                        name=agent.name or agent.harness_id,
-                        descriptor_type="A2A",
-                        descriptors=descriptors,
-                        record_version="1",
-                        description=agent.description,
-                    )
-                    reg_record_id = reg_result.get("recordId", "")
-                    if reg_record_id:
-                        rec = reg_client.wait_for_record(reg_record_id)
-                        agent.registry_record_id = reg_record_id
-                        agent.registry_status = rec.get("status", "DRAFT")
-                        logger.info("Auto-registered harness agent %s in registry: %s", agent.id, reg_record_id)
-            except Exception as reg_err:
-                logger.warning("Failed to auto-register harness agent %s in registry: %s", agent.id, reg_err)
-
         db.commit()
+
+        # Auto-register in Agent Registry once harness is fully READY. Only the
+        # request that wins the atomic claim schedules the background task, so
+        # overlapping polls can't each fire create_record() for the same agent.
+        if agent.deployment_status == "READY" and _claim_registry_registration(agent.id, db):
+            background_tasks.add_task(_register_agent_in_registry_background, agent.id)
+
         db.refresh(agent)
         return _agent_response(agent, db)
 
@@ -2981,28 +3039,13 @@ def get_agent_status(agent_id: int, user: UserInfo = Depends(require_scopes("age
             except Exception as e:
                 logger.warning("Failed to poll endpoint status for %s: %s", agent.endpoint_name, e)
 
-        # Auto-register in Agent Registry once deployment is fully READY
-        if agent.deployment_status == "READY" and not agent.registry_record_id:
-            try:
-                from app.services.registry import get_registry_client
-                reg_client = get_registry_client()
-                if reg_client.registry_id:
-                    descriptors = reg_client.build_agent_descriptors(agent)
-                    reg_result = reg_client.create_record(
-                        name=agent.name or agent.runtime_id,
-                        descriptor_type="A2A",
-                        descriptors=descriptors,
-                        record_version="1",
-                        description=agent.description,
-                    )
-                    reg_record_id = reg_result.get("recordId", "")
-                    if reg_record_id:
-                        rec = reg_client.wait_for_record(reg_record_id)
-                        agent.registry_record_id = reg_record_id
-                        agent.registry_status = rec.get("status", "DRAFT")
-                        logger.info("Auto-registered agent %s in registry: %s", agent.id, reg_record_id)
-            except Exception as reg_err:
-                logger.warning("Failed to auto-register agent %s in registry: %s", agent.id, reg_err)
+        db.commit()
+
+        # Auto-register in Agent Registry once deployment is fully READY. Only
+        # the request that wins the atomic claim schedules the background task,
+        # so overlapping polls can't each fire create_record() for the same agent.
+        if agent.deployment_status == "READY" and _claim_registry_registration(agent.id, db):
+            background_tasks.add_task(_register_agent_in_registry_background, agent.id)
 
     ci_status: str | None = None
     if agent.code_interpreter_id and agent.status != "DELETING":

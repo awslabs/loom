@@ -1,7 +1,9 @@
 """Registry management endpoints for AWS Agent Registry integration."""
 import logging
+from typing import Callable, TypeVar
 from typing import Optional
 
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -57,6 +59,40 @@ class SearchResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+_AWS_ERROR_STATUS: dict[str, int] = {
+    "ValidationException": status.HTTP_400_BAD_REQUEST,
+    "ResourceNotFoundException": status.HTTP_404_NOT_FOUND,
+    "ConflictException": status.HTTP_409_CONFLICT,
+    "AccessDeniedException": status.HTTP_403_FORBIDDEN,
+    "ThrottlingException": status.HTTP_429_TOO_MANY_REQUESTS,
+    "ServiceQuotaExceededException": status.HTTP_429_TOO_MANY_REQUESTS,
+}
+
+T = TypeVar("T")
+
+
+def _call_registry(fn: Callable[[], T]) -> T:
+    """Invoke a RegistryClient call, translating AWS errors into HTTPException
+    instead of letting them propagate as an unhandled 500.
+
+    AWS Agent Registry validates payloads server-side (schema compliance,
+    dedup-key conflicts, quotas, etc.) and reports failures as botocore
+    ClientError with a named error code; without this translation those
+    errors crash the request instead of surfacing the actual cause to the user.
+    """
+    try:
+        return fn()
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        message = e.response.get("Error", {}).get("Message", str(e))
+        http_status = _AWS_ERROR_STATUS.get(error_code, status.HTTP_502_BAD_GATEWAY)
+        logger.warning("Registry API call failed (%s): %s", error_code, message)
+        raise HTTPException(status_code=http_status, detail=message) from e
+    except BotoCoreError as e:
+        logger.warning("Registry API call failed: %s", e)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+
+
 def _find_resource_by_record_id(record_id: str, db: Session) -> McpServer | A2aAgent | Agent | None:
     """Look up an McpServer, A2aAgent, or Agent by its registry_record_id."""
     server = db.query(McpServer).filter(McpServer.registry_record_id == record_id).first()
@@ -69,15 +105,6 @@ def _find_resource_by_record_id(record_id: str, db: Session) -> McpServer | A2aA
     return agent
 
 
-def _dedup_name(resource_type: str, resource_id: int) -> str:
-    """Build the required unique `name` (dedup key) for a registry record.
-
-    AWS Agent Registry requires a `name` unique within the registry at
-    creation time. Loom's own (resource_type, resource_id) pair is already
-    unique, so it's used directly rather than slugifying the display name
-    (which users can freely edit and isn't guaranteed unique).
-    """
-    return f"loom-{resource_type}-{resource_id}"
 
 
 def _to_record_type(descriptor_type: str) -> str:
@@ -146,7 +173,7 @@ def list_records(
 ) -> list[RegistryRecordResponse]:
     """List all registry records, optionally filtered by status or descriptor type."""
     client = get_registry_client()
-    response = client.list_records()
+    response = _call_registry(client.list_records)
     records = response.get("registryRecords", [])
 
     results: list[RegistryRecordResponse] = []
@@ -166,7 +193,7 @@ def get_record(
 ) -> RegistryRecordDetailResponse:
     """Get full detail for a single registry record."""
     client = get_registry_client()
-    rec = client.get_record(record_id)
+    rec = _call_registry(lambda: client.get_record(record_id))
     if not rec:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -237,18 +264,18 @@ def create_record(
         )
 
     rv = "1.0"
-    result = client.create_record(
-        name=_dedup_name(request.resource_type, request.resource_id),
+    result = _call_registry(lambda: client.create_record(
+        name=display_name,
         display_name=display_name,
         record_type=_to_record_type(descriptor_type),
         descriptors=descriptors,
         record_version=rv,
         description=description,
-    )
+    ))
 
     record_id = result.get("recordId", "")
     if record_id:
-        rec = client.wait_for_record(record_id)
+        rec = _call_registry(lambda: client.wait_for_record(record_id))
         resource.registry_record_id = record_id
         resource.registry_status = rec.get("status", "DRAFT")
         db.commit()
@@ -302,14 +329,14 @@ def update_record(
                     detail=f"No Loom resource found linked to registry record {record_id}",
                 )
 
-    result = client.update_record(
+    result = _call_registry(lambda: client.update_record(
         record_id=record_id,
         display_name=display_name,
         descriptors=descriptors,
         record_version="1.0",
         description=description,
-    )
-    rec = client.get_record(record_id)
+    ))
+    rec = _call_registry(lambda: client.get_record(record_id))
     return _record_to_detail_response(rec) if rec else _record_to_detail_response(result)
 
 
@@ -321,7 +348,7 @@ def submit_for_approval(
 ) -> RegistryRecordResponse:
     """Submit a registry record for approval."""
     client = get_registry_client()
-    result = client.submit_for_approval(record_id)
+    result = _call_registry(lambda: client.submit_for_approval(record_id))
 
     resource = _find_resource_by_record_id(record_id, db)
     if resource:
@@ -342,7 +369,7 @@ def approve_record(
 ) -> RegistryRecordResponse:
     """Approve a registry record."""
     client = get_registry_client()
-    result = client.approve_record(record_id, reason=body.reason)
+    result = _call_registry(lambda: client.approve_record(record_id, reason=body.reason))
 
     resource = _find_resource_by_record_id(record_id, db)
     if resource:
@@ -363,7 +390,7 @@ def reject_record(
 ) -> RegistryRecordResponse:
     """Reject a registry record with a reason."""
     client = get_registry_client()
-    result = client.reject_record(record_id, reason=body.reason)
+    result = _call_registry(lambda: client.reject_record(record_id, reason=body.reason))
 
     resource = _find_resource_by_record_id(record_id, db)
     if resource:
@@ -383,7 +410,7 @@ def delete_record(
 ) -> dict:
     """Delete a registry record and clear the Loom resource link."""
     client = get_registry_client()
-    client.delete_record(record_id)
+    _call_registry(lambda: client.delete_record(record_id))
 
     resource = _find_resource_by_record_id(record_id, db)
     if resource:
@@ -402,5 +429,5 @@ def search_records(
 ) -> SearchResponse:
     """Semantic search over registry records."""
     client = get_registry_client()
-    result = client.search_records(query=q, max_results=max_results)
+    result = _call_registry(lambda: client.search_records(query=q, max_results=max_results))
     return SearchResponse(results=result.get("results", []))

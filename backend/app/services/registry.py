@@ -5,6 +5,7 @@ import os
 import re
 import time
 from typing import Any
+from urllib.parse import quote
 
 import boto3
 
@@ -72,6 +73,20 @@ def parse_registry_id_from_arn(arn: str) -> str:
     """Extract registry ID from an ARN string. Returns empty string if not parseable."""
     parts = arn.split("/")
     return parts[-1] if len(parts) >= 2 else ""
+
+
+def _agent_invoke_url(agent) -> str:
+    """Build the HTTP invocation URL for a Loom Agent, matching the same
+    bedrock-agentcore data-plane URL shown in the Integration Info panel
+    (see _build_integration_info in app.routers.agents). The A2A AgentCard
+    `url` field must be a callable HTTP endpoint, not the runtime ARN.
+    """
+    region = agent.region or "us-east-1"
+    base_host = f"https://bedrock-agentcore.{region}.amazonaws.com"
+    if agent.source == "harness":
+        return f"{base_host}/harnesses/invoke"
+    encoded_arn = quote(agent.arn or "", safe="")
+    return f"{base_host}/runtimes/{encoded_arn}/invocations"
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +353,7 @@ class RegistryClient:
             "protocolVersion": "0.3",
             "name": agent.name or agent.runtime_id,
             "description": agent.description or "",
-            "url": agent.endpoint_arn or agent.arn,
+            "url": _agent_invoke_url(agent),
             "version": "1.0.0",
             "capabilities": {"streaming": False},
             "skills": [

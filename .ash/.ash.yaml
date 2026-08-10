@@ -116,6 +116,12 @@ global_settings:
     - path: frontend/src/components/AgentRegistrationForm.tsx
       rule_id: SECRET-SECRET-KEYWORD
       reason: Variable/field name ("api_key") used while parsing a user-supplied provider manifest, not a secret value.
+    - path: backend/tests/test_mcp_ssrf.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using a placeholder OAuth2 client secret to exercise SSRF-prevention logic.
+    - path: backend/tests/test_invocations.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Field name ("api_key_header_name") configuring which HTTP header carries an API key, not a secret value.
 fail_on_findings: true
 ash_plugin_modules: []
 external_reports_to_include: []

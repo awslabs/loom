@@ -603,7 +603,7 @@ class TestFixConsoleScriptShebangs(unittest.TestCase):
                 content = f.read()
             self.assertTrue(content.startswith("#!/usr/bin/env python3\n"))
             self.assertIn("from opentelemetry.instrumentation.auto_instrumentation import run", content)
-            self.assertEqual(os.stat(script_path).st_mode & 0o777, 0o755)
+            self.assertEqual(os.stat(script_path).st_mode & 0o777, 0o700)
         finally:
             shutil.rmtree(tmp)
 

@@ -2,6 +2,7 @@
 import json
 import unittest
 from unittest.mock import patch, MagicMock
+from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -12,6 +13,11 @@ from app.db import Base, get_db
 from app.models.agent import Agent
 from app.models.mcp import McpServer, McpTool
 from app.models.a2a import A2aAgent
+from app.services.registry import RegistryClient
+
+
+def _client_error(code: str, message: str, operation: str = "CreateRegistryRecord") -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": message}}, operation)
 
 
 def _agent_registry_service_available() -> bool:
@@ -231,6 +237,122 @@ class TestRegistryRouter(unittest.TestCase):
         self.assertEqual(server.registry_record_id, "rec-new")
         self.assertEqual(server.registry_status, "DRAFT")
 
+    # ----- AWS ERROR MAPPING -----
+    @patch("app.routers.registry.get_registry_client")
+    def test_create_record_conflict_returns_409_not_500(self, mock_get_client):
+        """A user hit a 500 registering an agent because AWS's ConflictException
+        (dedup-key already exists — e.g. from an orphaned record left over from
+        the create-race bug) propagated as an unhandled exception. The router
+        must translate ClientError into a clean HTTPException instead of letting
+        FastAPI turn it into a generic 500.
+        """
+        agent = self._create_agent()
+        mock_client = MagicMock()
+        mock_client.create_record.side_effect = _client_error(
+            "ConflictException", "A record with this name already exists in the registry."
+        )
+        mock_client.build_agent_descriptors = MagicMock(return_value={"a2aAgentCard": {"data": "{}"}})
+        mock_get_client.return_value = mock_client
+
+        response = self.client.post("/api/registry/records", json={
+            "resource_type": "agent",
+            "resource_id": agent.id,
+        })
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("already exists", response.json()["detail"])
+
+    @patch("app.routers.registry.get_registry_client")
+    def test_create_record_validation_exception_returns_400_not_500(self, mock_get_client):
+        agent = self._create_agent()
+        mock_client = MagicMock()
+        mock_client.create_record.side_effect = _client_error(
+            "ValidationException", "Schema validation failed for descriptor type 'a2a'."
+        )
+        mock_client.build_agent_descriptors = MagicMock(return_value={"a2aAgentCard": {"data": "{}"}})
+        mock_get_client.return_value = mock_client
+
+        response = self.client.post("/api/registry/records", json={
+            "resource_type": "agent",
+            "resource_id": agent.id,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Schema validation failed", response.json()["detail"])
+
+    @patch("app.routers.registry.get_registry_client")
+    def test_create_record_throttling_returns_429_not_500(self, mock_get_client):
+        agent = self._create_agent()
+        mock_client = MagicMock()
+        mock_client.create_record.side_effect = _client_error("ThrottlingException", "Rate exceeded")
+        mock_client.build_agent_descriptors = MagicMock(return_value={"a2aAgentCard": {"data": "{}"}})
+        mock_get_client.return_value = mock_client
+
+        response = self.client.post("/api/registry/records", json={
+            "resource_type": "agent",
+            "resource_id": agent.id,
+        })
+        self.assertEqual(response.status_code, 429)
+
+    # ----- CREATE -> UPDATE -> DELETE LIFECYCLE -----
+    @patch("app.routers.registry.get_registry_client")
+    def test_record_create_update_delete_lifecycle(self, mock_get_client):
+        """Exercise the full create -> update -> delete round trip through the
+        real /api/registry endpoints. The mock is built with spec=RegistryClient
+        so that calling create_record/update_record/delete_record with stale
+        kwargs (e.g. a removed `descriptor_type` param) raises a TypeError
+        instead of silently succeeding, as a bare MagicMock() would.
+        """
+        server = self._create_mcp_server()
+        mock_client = MagicMock(spec=RegistryClient)
+        mock_client.build_mcp_descriptors.return_value = {
+            "mcpServer": {"data": "{}", "additionalData": {"tools": {"data": "[]"}}}
+        }
+        mock_client.create_record.return_value = {"recordId": "rec-lifecycle"}
+        mock_client.wait_for_record.return_value = {
+            **SAMPLE_REGISTRY_RECORD,
+            "recordId": "rec-lifecycle",
+            "status": "DRAFT",
+        }
+        mock_get_client.return_value = mock_client
+
+        # CREATE
+        create_response = self.client.post("/api/registry/records", json={
+            "resource_type": "mcp",
+            "resource_id": server.id,
+        })
+        self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(create_response.json()["record_id"], "rec-lifecycle")
+        mock_client.create_record.assert_called_once()
+        self.session.refresh(server)
+        self.assertEqual(server.registry_record_id, "rec-lifecycle")
+        self.assertEqual(server.registry_status, "DRAFT")
+
+        # UPDATE
+        mock_client.update_record.return_value = {
+            **SAMPLE_REGISTRY_RECORD,
+            "recordId": "rec-lifecycle",
+            "status": "DRAFT",
+        }
+        mock_client.get_record.return_value = {
+            **SAMPLE_REGISTRY_RECORD,
+            "recordId": "rec-lifecycle",
+            "status": "DRAFT",
+        }
+        update_response = self.client.put(f"/api/registry/records/rec-lifecycle")
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(update_response.json()["record_id"], "rec-lifecycle")
+        mock_client.update_record.assert_called_once()
+
+        # DELETE
+        mock_client.delete_record.return_value = {}
+        delete_response = self.client.delete("/api/registry/records/rec-lifecycle")
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertTrue(delete_response.json()["deleted"])
+        mock_client.delete_record.assert_called_once_with("rec-lifecycle")
+
+        self.session.refresh(server)
+        self.assertIsNone(server.registry_record_id)
+        self.assertIsNone(server.registry_status)
+
     @patch("app.routers.registry.get_registry_client")
     def test_create_record_mcp_invalid_namespace(self, mock_get_client):
         server = self._create_mcp_server()
@@ -267,6 +389,30 @@ class TestRegistryRouter(unittest.TestCase):
         self.session.refresh(agent)
         self.assertEqual(agent.registry_record_id, "rec-a2a")
         self.assertEqual(agent.registry_status, "DRAFT")
+
+    @patch("app.routers.registry.get_registry_client")
+    def test_create_record_uses_resource_name_not_synthetic_dedup_key(self, mock_get_client):
+        """The registry's `name` (dedup key) must be the resource's actual
+        display name, not a synthetic "loom-{type}-{id}" string — the id-based
+        key was unreadable in the AWS console/registry UI.
+        """
+        agent = self._create_a2a_agent(name="my-readable-agent")
+        mock_client = MagicMock()
+        mock_client.create_record.return_value = {"recordId": "rec-name-check"}
+        mock_client.wait_for_record.return_value = {**SAMPLE_REGISTRY_RECORD, "recordId": "rec-name-check"}
+        mock_client.build_a2a_descriptors = MagicMock(return_value={"a2aAgentCard": {"data": "{}"}})
+        mock_get_client.return_value = mock_client
+
+        response = self.client.post("/api/registry/records", json={
+            "resource_type": "a2a",
+            "resource_id": agent.id,
+        })
+        self.assertEqual(response.status_code, 201)
+
+        call_kwargs = mock_client.create_record.call_args.kwargs
+        self.assertEqual(call_kwargs["name"], "my-readable-agent")
+        self.assertEqual(call_kwargs["display_name"], "my-readable-agent")
+        self.assertNotIn("loom-a2a-", call_kwargs["name"])
 
     def test_create_record_invalid_resource_type(self):
         response = self.client.post("/api/registry/records", json={
@@ -583,6 +729,7 @@ class TestRegistryService(unittest.TestCase):
             account_id="123456789012",
             protocol="HTTP",
             network_mode="PUBLIC",
+            source="deploy",
         )
 
         descriptors = RegistryClient.build_agent_descriptors(agent)
@@ -596,6 +743,29 @@ class TestRegistryService(unittest.TestCase):
         self.assertEqual(card["protocolVersion"], "0.3")
         self.assertIn("capabilities", card)
         self.assertIn("skills", card)
+        # url must be a callable HTTP invocation endpoint, not the runtime ARN
+        # (AWS's schema validation rejects an ARN in this field).
+        self.assertTrue(card["url"].startswith("https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/"))
+        self.assertTrue(card["url"].endswith("/invocations"))
+        self.assertNotIn("arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test-runtime", card["url"])
+
+    def test_build_agent_descriptors_harness_source_uses_harness_invoke_url(self):
+        from app.services.registry import RegistryClient
+
+        agent = Agent(
+            arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:harness/h-test",
+            runtime_id="h-test",
+            harness_id="h-test",
+            name="Harness Agent",
+            status="READY",
+            region="us-east-1",
+            account_id="123456789012",
+            source="harness",
+        )
+
+        descriptors = RegistryClient.build_agent_descriptors(agent)
+        card = json.loads(descriptors["a2aAgentCard"]["data"])
+        self.assertEqual(card["url"], "https://bedrock-agentcore.us-east-1.amazonaws.com/harnesses/invoke")
         self.assertEqual(len(card["skills"]), 1)
         self.assertEqual(card["skills"][0]["id"], "default")
         self.assertIn("defaultInputModes", card)
@@ -758,6 +928,7 @@ class TestRegistryConfigEndpoints(unittest.TestCase):
         self.assertEqual(data["registry_id"], "")
         self.assertFalse(data["enabled"])
 
+    @_SKIP_NO_AGENT_REGISTRY_SDK
     def test_update_registry_config_valid(self):
         arn = "arn:aws:agent-registry:us-east-1:123456789012:registry/loom-prod"
         response = self.client.put("/api/settings/registry", json={"registry_arn": arn})
@@ -778,6 +949,7 @@ class TestRegistryConfigEndpoints(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Invalid registry ARN", response.json()["detail"])
 
+    @_SKIP_NO_AGENT_REGISTRY_SDK
     def test_update_registry_config_disable(self):
         # First enable
         arn = "arn:aws:agent-registry:us-east-1:123456789012:registry/loom-prod"

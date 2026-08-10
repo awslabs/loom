@@ -12,6 +12,7 @@ from app.models.agent import Agent
 from app.models.config_entry import ConfigEntry
 from app.models.mcp import McpServer, McpServerAccess
 from app.models.a2a import A2aAgent, A2aAgentAccess
+from app.services.registry import RegistryClient
 
 
 class TestAgentsDeployRouter(unittest.TestCase):
@@ -860,6 +861,105 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertIsNotNone(new_access)
         self.assertEqual(new_access.access_level, "all_skills")
         self.assertIsNone(new_access.allowed_skill_ids)
+
+    @patch("app.routers.agents.get_runtime")
+    @patch("app.routers.agents.create_runtime")
+    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.create_execution_role")
+    @patch("app.services.registry.get_registry_client")
+    def test_status_endpoint_auto_registers_agent_in_registry(
+        self, mock_get_reg_client, mock_create_role, mock_build_artifact,
+        mock_create_runtime, mock_get_runtime,
+    ):
+        """Auto-registration on the status poll must call RegistryClient.create_record
+        with its real signature (name, display_name, record_type, descriptors,
+        record_version, description). Using spec=RegistryClient here means a stale
+        kwarg (e.g. the old `descriptor_type` param) raises instead of being
+        silently swallowed by the router's broad except, which is what let this
+        regress after the AWS Agent Registry GA namespace migration.
+        """
+        mock_create_role.return_value = "arn:aws:iam::123:role/r"
+        mock_build_artifact.return_value = ("b", "k")
+        mock_create_runtime.return_value = {
+            "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/rt-reg",
+            "agentRuntimeId": "rt-reg",
+            "status": "CREATING",
+        }
+        mock_get_runtime.return_value = {
+            "status": "READY",
+            "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/rt-reg",
+        }
+
+        mock_reg_client = MagicMock(spec=RegistryClient)
+        mock_reg_client.registry_id = "reg-123"
+        mock_reg_client.build_agent_descriptors.return_value = {"a2aAgentCard": {"data": "{}"}}
+        mock_reg_client.create_record.return_value = {"recordId": "rec-auto"}
+        mock_reg_client.wait_for_record.return_value = {"status": "DRAFT"}
+        mock_get_reg_client.return_value = mock_reg_client
+
+        create_resp = self.client.post(
+            "/api/agents",
+            json={
+                "source": "deploy",
+                "name": "registry_agent",
+                "model_id": "us.anthropic.claude-sonnet-4-6-v1",
+            },
+        )
+        agent_id = create_resp.json()["id"]
+
+        with patch("app.routers.agents.get_runtime_endpoint") as mock_get_ep:
+            mock_get_ep.return_value = {"status": "READY", "agentRuntimeEndpointArn": "arn:ep"}
+            response = self.client.get(f"/api/agents/{agent_id}/status")
+
+        self.assertEqual(response.status_code, 200)
+        mock_reg_client.create_record.assert_called_once()
+        call_kwargs = mock_reg_client.create_record.call_args.kwargs
+        self.assertEqual(call_kwargs["record_type"], "AGENT")
+        self.assertIn("display_name", call_kwargs)
+        # `name` (the registry's dedup key) must be the agent's actual name,
+        # not a synthetic "loom-agent-{id}" string that's unreadable in AWS.
+        self.assertEqual(call_kwargs["name"], "registry_agent")
+        self.assertEqual(call_kwargs["display_name"], "registry_agent")
+
+        # Registration runs in a background task scheduled by this request (see
+        # _register_agent_in_registry_background); TestClient executes background
+        # tasks before returning, but the response body was already serialized
+        # from the pre-registration agent state, and the background task commits
+        # via its own SessionLocal(), so re-query to see the committed result.
+        self.session.expire_all()
+        agent = self.session.query(Agent).filter(Agent.id == agent_id).first()
+        self.assertEqual(agent.registry_record_id, "rec-auto")
+        self.assertEqual(agent.registry_status, "DRAFT")
+
+    def test_claim_registry_registration_is_atomic_against_overlapping_polls(self):
+        """The frontend polls GET /{id}/status every ~2s while an agent deploys,
+        and create_record()+wait_for_record() can take several seconds to settle
+        in AWS. Two overlapping polls both observing registry_record_id=NULL and
+        each calling create_record() is exactly what produced duplicate registry
+        records for demo agents in practice. _claim_registry_registration must
+        let only the first caller proceed; a second call for the same agent
+        (simulating an overlapping poll) must lose the claim.
+        """
+        from app.routers.agents import _claim_registry_registration
+
+        agent = Agent(
+            arn="arn:aws:bedrock-agentcore:us-east-1:123:runtime/rt-race",
+            runtime_id="rt-race",
+            name="race_agent",
+            status="READY",
+            deployment_status="READY",
+            region="us-east-1",
+            account_id="123456789012",
+            source="deploy",
+        )
+        self.session.add(agent)
+        self.session.commit()
+
+        first = _claim_registry_registration(agent.id, self.session)
+        second = _claim_registry_registration(agent.id, self.session)
+
+        self.assertTrue(first)
+        self.assertFalse(second)
 
 
 if __name__ == "__main__":

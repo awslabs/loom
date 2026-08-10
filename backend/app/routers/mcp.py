@@ -454,8 +454,7 @@ def refresh_mcp_tools(
             descriptors = reg_client.build_mcp_descriptors(server, tools_for_registry)
             reg_client.update_record(
                 record_id=server.registry_record_id,
-                name=server.name,
-                descriptor_type="MCP",
+                display_name=server.name,
                 descriptors=descriptors,
                 record_version="1.0",
                 description=server.description,

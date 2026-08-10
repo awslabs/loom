@@ -5,6 +5,7 @@ import os
 import re
 import time
 from typing import Any
+from urllib.parse import quote
 
 import boto3
 
@@ -13,9 +14,9 @@ from app.models.mcp import McpServer, McpTool
 
 logger = logging.getLogger(__name__)
 
-# ARN pattern: arn:aws:bedrock-agentcore:{region}:{account}:registry/{id}
+# ARN pattern: arn:aws:agent-registry:{region}:{account}:registry/{id}
 _REGISTRY_ARN_PATTERN = re.compile(
-    r"^arn:aws:bedrock-agentcore:[a-z0-9-]+:\d{12}:registry/[a-zA-Z0-9_-]+$"
+    r"^arn:aws:agent-registry:[a-z0-9-]+:\d{12}:registry/[a-zA-Z0-9_-]+$"
 )
 
 # ---------------------------------------------------------------------------
@@ -63,7 +64,7 @@ def validate_registry_arn(arn: str) -> str:
     if not _REGISTRY_ARN_PATTERN.match(arn):
         raise ValueError(
             f"Invalid registry ARN: {arn}. "
-            "Expected format: arn:aws:bedrock-agentcore:<region>:<account>:registry/<id>"
+            "Expected format: arn:aws:agent-registry:<region>:<account>:registry/<id>"
         )
     return parse_registry_id_from_arn(arn)
 
@@ -74,11 +75,25 @@ def parse_registry_id_from_arn(arn: str) -> str:
     return parts[-1] if len(parts) >= 2 else ""
 
 
+def _agent_invoke_url(agent) -> str:
+    """Build the HTTP invocation URL for a Loom Agent, matching the same
+    bedrock-agentcore data-plane URL shown in the Integration Info panel
+    (see _build_integration_info in app.routers.agents). The A2A AgentCard
+    `url` field must be a callable HTTP endpoint, not the runtime ARN.
+    """
+    region = agent.region or "us-east-1"
+    base_host = f"https://bedrock-agentcore.{region}.amazonaws.com"
+    if agent.source == "harness":
+        return f"{base_host}/harnesses/invoke"
+    encoded_arn = quote(agent.arn or "", safe="")
+    return f"{base_host}/runtimes/{encoded_arn}/invocations"
+
+
 # ---------------------------------------------------------------------------
 # RegistryClient
 # ---------------------------------------------------------------------------
 class RegistryClient:
-    """Thin wrapper around the Bedrock AgentCore registry APIs."""
+    """Thin wrapper around the AWS Agent Registry APIs."""
 
     def __init__(self, registry_id: str, region: str) -> None:
         self.registry_id = registry_id
@@ -86,8 +101,8 @@ class RegistryClient:
 
         if self.registry_id:
             session = boto3.Session(region_name=region)
-            self.control = session.client("bedrock-agentcore-control")
-            self.data = session.client("bedrock-agentcore")
+            self.control = session.client("agent-registry-control")
+            self.data = session.client("agent-registry")
         else:
             self.control = None
             self.data = None
@@ -110,17 +125,22 @@ class RegistryClient:
     def create_record(
         self,
         name: str,
-        descriptor_type: str,
+        display_name: str,
+        record_type: str,
         descriptors: dict[str, Any],
         record_version: str,
         description: str | None = None,
     ) -> dict[str, Any]:
+        """Create a registry record. `name` is the required unique dedup key;
+        `display_name` is the human-readable label shown in the UI.
+        """
         if not self._require_registry():
             return {}
         kwargs: dict[str, Any] = dict(
             registryId=self.registry_id,
             name=name,
-            descriptorType=descriptor_type,
+            displayName=display_name,
+            recordType=record_type,
             descriptors=descriptors,
             recordVersion=record_version,
         )
@@ -202,20 +222,23 @@ class RegistryClient:
     def update_record(
         self,
         record_id: str,
-        name: str,
-        descriptor_type: str,
+        display_name: str,
         descriptors: dict[str, Any],
         record_version: str,
         description: str | None = None,
     ) -> dict[str, Any]:
+        """Update a registry record. `recordType` and the record's `name` dedup
+        key are immutable after creation and are not part of the update payload;
+        only `displayName`, `descriptors`, `recordVersion`, and `description`
+        are mutable fields here.
+        """
         if not self._require_registry():
             return {}
         update_descriptors = self._wrap_descriptors_for_update(descriptors)
         kwargs: dict[str, Any] = dict(
             registryId=self.registry_id,
             recordId=record_id,
-            name=name,
-            descriptorType=descriptor_type,
+            displayName=display_name,
             descriptors=update_descriptors,
             recordVersion=record_version,
         )
@@ -226,13 +249,31 @@ class RegistryClient:
 
     @staticmethod
     def _wrap_descriptors_for_update(descriptors: dict[str, Any]) -> dict[str, Any]:
-        """Wrap create-style descriptors in the optionalValue structure required by UpdateRegistryRecord."""
+        """Wrap create-style flattened descriptors in the optionalValue structure
+        required by UpdateRegistryRecord. Each top-level key is a primary
+        descriptor type (e.g. "mcpServer", "a2aAgentCard", "custom"); its
+        fields (including nested "additionalData" children) are wrapped
+        individually so unspecified fields are left unmodified server-side.
+        """
         inner = {}
-        for dtype, fields in descriptors.items():
+        for primary_key, fields in descriptors.items():
             wrapped_fields = {}
             for field_name, field_value in fields.items():
-                wrapped_fields[field_name] = {"optionalValue": field_value}
-            inner[dtype] = {"optionalValue": wrapped_fields}
+                if field_name == "additionalData" and isinstance(field_value, dict):
+                    wrapped_fields[field_name] = {
+                        "optionalValue": {
+                            child_key: {
+                                "optionalValue": {
+                                    cfield: {"optionalValue": cvalue}
+                                    for cfield, cvalue in child_fields.items()
+                                }
+                            }
+                            for child_key, child_fields in field_value.items()
+                        }
+                    }
+                else:
+                    wrapped_fields[field_name] = {"optionalValue": field_value}
+            inner[primary_key] = {"optionalValue": wrapped_fields}
         return {"optionalValue": inner}
 
     def delete_record(self, record_id: str) -> dict[str, Any]:
@@ -247,7 +288,7 @@ class RegistryClient:
     def search_records(self, query: str, max_results: int = 10) -> dict[str, Any]:
         if not self._require_registry():
             return {"results": []}
-        return self.data.search_registry_records(
+        return self.data.search_discoverable_registry_records(
             registryIds=[self.registry_id],
             searchQuery=query,
             maxResults=max_results,
@@ -295,12 +336,12 @@ class RegistryClient:
             tool_definitions.append(tool_def)
 
         return {
-            "mcp": {
-                "server": {
-                    "inlineContent": json.dumps(server_info),
-                },
-                "tools": {
-                    "inlineContent": json.dumps({"tools": tool_definitions}),
+            "mcpServer": {
+                "data": json.dumps(server_info),
+                "additionalData": {
+                    "tools": {
+                        "data": json.dumps({"tools": tool_definitions}),
+                    },
                 },
             }
         }
@@ -312,7 +353,7 @@ class RegistryClient:
             "protocolVersion": "0.3",
             "name": agent.name or agent.runtime_id,
             "description": agent.description or "",
-            "url": agent.endpoint_arn or agent.arn,
+            "url": _agent_invoke_url(agent),
             "version": "1.0.0",
             "capabilities": {"streaming": False},
             "skills": [
@@ -327,11 +368,9 @@ class RegistryClient:
             "defaultOutputModes": ["text/plain"],
         }
         return {
-            "a2a": {
-                "agentCard": {
-                    "schemaVersion": "0.3",
-                    "inlineContent": json.dumps(agent_card),
-                },
+            "a2aAgentCard": {
+                "dataSchemaVersion": "0.3",
+                "data": json.dumps(agent_card),
             }
         }
 
@@ -375,10 +414,8 @@ class RegistryClient:
         logger.info("build_a2a_descriptors card: %s", json.dumps(card, indent=2))
 
         return {
-            "a2a": {
-                "agentCard": {
-                    "schemaVersion": "0.3",
-                    "inlineContent": json.dumps(card),
-                },
+            "a2aAgentCard": {
+                "dataSchemaVersion": "0.3",
+                "data": json.dumps(card),
             }
         }

@@ -172,10 +172,9 @@ function DescriptorView({ descriptors, descriptorType, metadataSlot }: { descrip
     return <p className="text-xs text-muted-foreground">No descriptors available.</p>;
   }
 
-  if (descriptorType === "A2A" || descriptors.a2a) {
-    const a2a = descriptors.a2a as Record<string, unknown> | undefined;
-    const cardRaw = a2a?.agentCard as Record<string, unknown> | undefined;
-    const card = tryParseJson(cardRaw?.inlineContent ?? cardRaw) as Record<string, unknown> | null;
+  if (descriptorType === "A2A" || descriptors.a2aAgentCard) {
+    const cardRaw = descriptors.a2aAgentCard as Record<string, unknown> | undefined;
+    const card = tryParseJson(cardRaw?.data ?? cardRaw) as Record<string, unknown> | null;
     if (!card || typeof card !== "object") {
       return <p className="text-xs text-muted-foreground">No agent card available.</p>;
     }
@@ -264,10 +263,11 @@ function DescriptorView({ descriptors, descriptorType, metadataSlot }: { descrip
     );
   }
 
-  if (descriptorType === "MCP" || descriptors.mcp) {
-    const mcp = descriptors.mcp as Record<string, unknown> | undefined;
-    const serverRaw = (mcp?.server as Record<string, unknown>)?.inlineContent;
-    const toolsRaw = (mcp?.tools as Record<string, unknown>)?.inlineContent;
+  if (descriptorType === "MCP" || descriptors.mcpServer) {
+    const mcpServer = descriptors.mcpServer as Record<string, unknown> | undefined;
+    const additionalData = mcpServer?.additionalData as Record<string, unknown> | undefined;
+    const serverRaw = mcpServer?.data;
+    const toolsRaw = (additionalData?.tools as Record<string, unknown>)?.data;
     const server = tryParseJson(serverRaw) as Record<string, unknown> | null;
     const toolsParsed = tryParseJson(toolsRaw);
     const tools = (Array.isArray(toolsParsed) ? toolsParsed : Array.isArray((toolsParsed as Record<string, unknown>)?.tools) ? (toolsParsed as Record<string, unknown>).tools : null) as Array<Record<string, unknown>> | null;
@@ -313,7 +313,7 @@ function DescriptorView({ descriptors, descriptorType, metadataSlot }: { descrip
   }
 
   // Fallback for CUSTOM or unknown types
-  const customRaw = (descriptors.custom as Record<string, unknown>)?.inlineContent;
+  const customRaw = (descriptors.custom as Record<string, unknown>)?.data;
   const custom = tryParseJson(customRaw ?? descriptors) as Record<string, unknown> | null;
 
   if (custom && typeof custom === "object") {

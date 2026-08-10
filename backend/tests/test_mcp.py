@@ -1,6 +1,6 @@
 """Tests for MCP server management endpoints."""
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 from app.main import app
 from app.db import Base, get_db
 from app.models.mcp import McpServer, McpTool, McpServerAccess
+from app.services.registry import RegistryClient
 
 
 class TestMcpRouter(unittest.TestCase):
@@ -237,6 +238,37 @@ class TestMcpRouter(unittest.TestCase):
     def test_get_tools_server_not_found(self):
         response = self.client.get("/api/mcp/servers/999/tools")
         self.assertEqual(response.status_code, 404)
+
+    @patch("app.services.registry.get_registry_client")
+    @patch("app.routers.mcp.svc_fetch_tools")
+    def test_refresh_tools_updates_linked_registry_record(self, mock_fetch, mock_get_reg_client):
+        """Refreshing tools on a server already linked to a registry record must
+        call RegistryClient.update_record with its real signature (record_id,
+        display_name, descriptors, record_version, description). spec=RegistryClient
+        means a stale kwarg (e.g. the old `name`/`descriptor_type` params) raises
+        instead of being silently swallowed by the router's broad except.
+        """
+        mock_fetch.return_value = [{"name": "tool_a", "description": "Does A"}]
+        created = self._create_server()
+        server = self.session.query(McpServer).filter(McpServer.id == created["id"]).first()
+        server.registry_record_id = "rec-mcp-1"
+        self.session.commit()
+
+        mock_reg_client = MagicMock(spec=RegistryClient)
+        mock_reg_client.build_mcp_descriptors.return_value = {
+            "mcpServer": {"data": "{}", "additionalData": {"tools": {"data": "[]"}}}
+        }
+        mock_reg_client.update_record.return_value = {"recordId": "rec-mcp-1"}
+        mock_get_reg_client.return_value = mock_reg_client
+
+        response = self.client.post(f"/api/mcp/servers/{created['id']}/tools/refresh")
+        self.assertEqual(response.status_code, 200)
+
+        mock_reg_client.update_record.assert_called_once()
+        call_kwargs = mock_reg_client.update_record.call_args.kwargs
+        self.assertEqual(call_kwargs["record_id"], "rec-mcp-1")
+        self.assertIn("display_name", call_kwargs)
+        self.assertNotIn("descriptor_type", call_kwargs)
 
     # ----- ACCESS RULES -----
     def test_get_access_rules_empty(self):

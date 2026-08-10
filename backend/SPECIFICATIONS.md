@@ -1298,8 +1298,8 @@ Wraps `boto3.client('agent-registry-control')` (control plane) and `boto3.client
 - `RegistryClient(registry_id, region)` — lazy singleton via `get_registry_client()`. Gracefully returns empty results when `LOOM_REGISTRY_ID` is not set.
 - `list_records() -> dict` — lists all records in the registry.
 - `get_record(record_id) -> dict` — gets full record detail including descriptors.
-- `create_record(name, display_name, record_type, descriptors, record_version, description) -> dict` — creates a new registry record. `name` is the required registry-unique dedup key (Loom derives it from `resource_type`/`resource_id`, e.g. `loom-mcp-42`); `display_name` is the human-readable label shown in the UI.
-- `wait_for_record(record_id) -> dict` — polls until the record leaves the CREATING state.
+- `create_record(name, display_name, record_type, descriptors, record_version, description) -> dict` — creates a new registry record. `name` is the required registry-unique dedup key; Loom passes the resource's own display name (agent/server/A2A agent name) as both `name` and `display_name` — a collision (two resources sharing a name) surfaces as an AWS `ConflictException`, mapped to HTTP 409 by the router, rather than silently succeeding under an unreadable synthetic key.
+- `wait_for_record(record_id) -> dict` — polls until the record leaves the CREATING state. Blocking (`time.sleep` loop), so callers on a request thread must not call this inline from a frequently-polled endpoint — see the auto-registration note below.
 - `submit_for_approval(record_id) -> dict` — submits a record for approval review.
 - `approve_record(record_id) -> dict` — approves a record (sets status to APPROVED).
 - `reject_record(record_id, reason) -> dict` — rejects a record with a reason.
@@ -1308,7 +1308,11 @@ Wraps `boto3.client('agent-registry-control')` (control plane) and `boto3.client
 - `search_records(query, max_results) -> dict` — semantic search over registry records via `SearchDiscoverableRegistryRecords` (data plane).
 - `build_mcp_descriptors(server, tools) -> dict` — builds a flattened `mcpServer` descriptor from a Loom McpServer and its tools (server manifest as `data`, tool definitions nested under `additionalData.tools`).
 - `build_a2a_descriptors(agent) -> dict` — builds a flattened `a2aAgentCard` descriptor from a Loom A2aAgent (agent card as `data`).
-- `build_agent_descriptors(agent) -> dict` — builds a flattened `a2aAgentCard` descriptor from a Loom Agent (agent manifest with name, ARN, runtime ID, region, protocol, network mode). Maps to `recordType: "AGENT"` — AWS has no distinct A2A record type.
+- `build_agent_descriptors(agent) -> dict` — builds a flattened `a2aAgentCard` descriptor from a Loom Agent (agent manifest with name, HTTP invocation `url`, region, protocol, network mode). Maps to `recordType: "AGENT"` — AWS has no distinct A2A record type. The card's `url` is the callable `https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{url-encoded-arn}/invocations` endpoint (or `/harnesses/invoke` for harness-sourced agents) via `_agent_invoke_url()` — never the runtime ARN itself, which AWS's A2A AgentCard schema validation rejects as an invalid `url`.
+
+**Error mapping:** `routers/registry.py` wraps every `RegistryClient` call through `_call_registry()`, which catches `botocore.exceptions.ClientError`/`BotoCoreError` and translates named AWS error codes into the corresponding HTTP status (`ValidationException`→400, `ResourceNotFoundException`→404, `ConflictException`→409, `AccessDeniedException`→403, `ThrottlingException`/`ServiceQuotaExceededException`→429, anything else→502) with the AWS error message as the response detail. Without this, any AWS-side rejection (schema validation, dedup-key conflict, throttling) surfaced as an unhandled exception and a generic 500.
+
+**Auto-registration concurrency:** Agents are auto-registered once `deployment_status` reaches `READY`, checked on every `GET /api/agents/{id}/status` poll (the frontend polls this endpoint every ~2s while an agent deploys). Because `create_record()` + `wait_for_record()` can block for several seconds, the actual AWS call runs in a `BackgroundTasks`-scheduled function (`_register_agent_in_registry_background` in `routers/agents.py`), and only the request that wins an atomic DB claim (`_claim_registry_registration`: `UPDATE agents SET registry_status='REGISTERING' WHERE id=? AND registry_record_id IS NULL AND registry_status IS NULL`) schedules it. This prevents overlapping polls from each independently calling `create_record()` for the same agent and producing duplicate orphaned registry records.
 
 ### `services/observability.py`
 

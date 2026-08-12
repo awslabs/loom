@@ -231,6 +231,7 @@ When deletion is confirmed with "Also delete in AgentCore" checked, the agent tr
 
 Full deployment form with sections:
 - **Deployment Type Selector**: Radio buttons for "Custom Agent" (code-based, full configuration) or "Managed Agent" (AgentCore Harness, no code required). Defaults to Custom. Controls which form sections are visible.
+- **Agent Framework Selector** (custom only): Radio buttons for "Strands Agent" (default) or "Google ADK". Selects `agent_framework` sent as part of the deploy request; omitted from JSON export when left at the default "strands". Not shown for managed (harness) agents, which have no framework concept.
 - **JSON Import/Export**: Collapsible section (ChevronDown/ChevronRight toggle) via the shared `JsonConfigSection` component. Import maps `name`, `description`, `persona` (→ agent description), `instructions` (→ behavioral guidelines), `behavior` (→ output expectations), `model`, `role`, `network_mode`, `authorizer`, `tags` (tag profile name). Export serializes the current form state to JSON using human-readable identifiers (model ID, role name, authorizer name, tag profile name); empty/default fields are omitted. Apply/Export/Cancel buttons. Invalid JSON shows inline error without clearing existing fields.
 - **Agent Identity**: name (1/3 width) and description (2/3 width)
 - **System Prompt**: agent description, behavioral guidelines, output expectations — each with placeholder examples

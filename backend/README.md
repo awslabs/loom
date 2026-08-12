@@ -519,7 +519,7 @@ Cold-start latency is computed automatically during the invoke flow:
 
 ## Agent Deployment
 
-Deploy creates a Strands Agent runtime on AgentCore with background deployment and progressive status updates. The deployment flow includes:
+Deploy creates a custom-code agent runtime on AgentCore with background deployment and progressive status updates. Custom-code agents support two frameworks, selectable via `agent_framework` (`"strands"`, default, or `"adk"` for Google's Agent Development Kit) — both share the same config schema, streaming event contract, and telemetry span structure, so the rest of the deployment flow below is identical regardless of framework. The deployment flow includes:
 
 1. **OAuth2 credential provider creation** — MCP server and A2A agent integrations with OAuth2 are provisioned as AgentCore credential providers with exponential backoff retry (4 retries, delays 2s/4s/8s/16s). If a provider already exists (e.g., redeployment), it is automatically updated with the latest configuration. Deployment fails with `credential_creation_failed` status if all retries are exhausted.
 2. **IAM role creation** — Execution role provisioning (if creating new role)
@@ -566,7 +566,7 @@ The ECS task role includes policies for Bedrock, AgentCore, S3, CloudWatch Logs,
 
 Optional `pLitellmProxyBaseUrl`/`pLitellmDiscoveryBaseUrl`/`pLitellmProxyApiKeySecretArn`/`pLitellmProxyApiKeySecretKmsKeyArn` parameters on the `loom-ecs-backend` stack seed the LiteLLM proxy connection's env-var fallback tier (see Alternate LLM Providers above); when a secret ARN is supplied, the task execution role is granted `secretsmanager:GetSecretValue` on it (and `kms:Decrypt` on its KMS key, if customer-managed). The stack also grants the task role the AgentCore runtime lifecycle actions (`Create`/`Update`/`DeleteAgentRuntime(Endpoint)`), `iam:CreateServiceLinkedRole` for VPC-mode runtimes, and CloudWatch Logs delivery-pipeline permissions needed by `services/observability.py` for vended log routing.
 
-The backend Docker image is built with the repository root as the build context (via `-f backend/Dockerfile ..` from `shared/makefile`) so it can include both `backend/app/` and `agents/strands_agent/` source. The agent source is required by `build_agent_artifact` to package and upload agent code to S3 during deployment.
+The backend Docker image is built with the repository root as the build context (via `-f backend/Dockerfile ..` from `shared/makefile`) so it can include both `backend/app/` and the agent blueprint sources (`agents/strands_agent/`, `agents/adk_agent/`). The agent source is required by `build_agent_artifact` to package and upload agent code to S3 during deployment.
 
 Deploy with `make rds`, `make ec2`, and `make ecs` from the backend directory. Use `make tunnel` to start an SSM port-forwarding session to the RDS instance.
 

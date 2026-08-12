@@ -13,6 +13,8 @@ COPY backend/etc/models.json backend/etc/runtime_pricing.json backend/etc/provid
 # Agent source for build_agent_artifact (deployment.py resolves via parents[3] -> /)
 COPY agents/strands_agent/src/ /agents/strands_agent/src/
 COPY agents/strands_agent/requirements.txt /agents/strands_agent/requirements.txt
+COPY agents/adk_agent/src/ /agents/adk_agent/src/
+COPY agents/adk_agent/requirements.txt /agents/adk_agent/requirements.txt
 
 EXPOSE 8000
 

@@ -35,10 +35,12 @@ class TestBuildAgentArtifact(unittest.TestCase):
     @patch.dict(os.environ, {"LOOM_ARTIFACT_BUCKET": "my-bucket"})
     def test_build_agent_artifact_missing_source_dir(self, mock_subprocess, mock_shutil) -> None:
         """Test that missing agent source directory raises FileNotFoundError."""
-        with patch("app.services.deployment.AGENT_SOURCE_DIR") as mock_dir:
+        with patch("app.services.deployment.AGENT_SOURCE_DIRS") as mock_dirs:
+            mock_agent_dir = MagicMock()
             mock_src = MagicMock()
             mock_src.is_dir.return_value = False
-            mock_dir.__truediv__ = MagicMock(return_value=mock_src)
+            mock_agent_dir.__truediv__ = MagicMock(return_value=mock_src)
+            mock_dirs.get.return_value = mock_agent_dir
             with self.assertRaises(FileNotFoundError):
                 build_agent_artifact("us-east-1")
 

@@ -19,7 +19,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-AGENT_SOURCE_DIR = Path(__file__).resolve().parents[3] / "agents" / "strands_agent"
+_AGENTS_DIR = Path(__file__).resolve().parents[3] / "agents"
+AGENT_SOURCE_DIR = _AGENTS_DIR / "strands_agent"  # kept for existing imports/tests; strands is the default framework
+AGENT_SOURCE_DIRS: dict[str, Path] = {
+    "strands": _AGENTS_DIR / "strands_agent",
+    "adk": _AGENTS_DIR / "adk_agent",
+}
 
 
 def _merge_tags(
@@ -90,15 +95,18 @@ def _fix_console_script_shebangs(target_dir: str) -> None:
         logger.info("Fixed shebang for %s", script_name)
 
 
-def build_agent_artifact(region: str) -> tuple[str, str]:
+def build_agent_artifact(region: str, agent_framework: str = "strands") -> tuple[str, str]:
     """
-    Build and upload the strands_agent artifact to S3.
+    Build and upload the custom-code agent artifact to S3.
 
-    Copies agents/strands_agent/src/ and pip-installs requirements.txt into
-    a temp directory, zips the contents, and uploads to S3.
+    Copies agents/{strands_agent,adk_agent}/src/ (selected by agent_framework)
+    and pip-installs requirements.txt into a temp directory, zips the
+    contents, and uploads to S3.
 
     Args:
         region: AWS region name
+        agent_framework: Which custom-code framework built this agent
+            ('strands' or 'adk'); selects the source directory and S3 prefix.
 
     Returns:
         Tuple of (bucket, s3_key) for the uploaded artifact
@@ -109,8 +117,9 @@ def build_agent_artifact(region: str) -> tuple[str, str]:
     if not bucket:
         raise ValueError("LOOM_ARTIFACT_BUCKET environment variable is not set")
 
-    src_dir = AGENT_SOURCE_DIR / "src"
-    requirements = AGENT_SOURCE_DIR / "requirements.txt"
+    agent_source_dir = AGENT_SOURCE_DIRS.get(agent_framework, AGENT_SOURCE_DIRS["strands"])
+    src_dir = agent_source_dir / "src"
+    requirements = agent_source_dir / "requirements.txt"
 
     if not src_dir.is_dir():
         raise FileNotFoundError(f"Agent source directory not found: {src_dir}")
@@ -160,7 +169,7 @@ def build_agent_artifact(region: str) -> tuple[str, str]:
                     zf.write(full_path, arcname)
 
         # Upload to S3
-        s3_key = f"loom-artifacts/strands_agent/{timestamp}/agent.zip"
+        s3_key = f"loom-artifacts/{agent_source_dir.name}/{timestamp}/agent.zip"
         s3 = boto3.client("s3", region_name=region)
         s3.upload_file(zip_path, bucket, s3_key)
         logger.info("Uploaded artifact to s3://%s/%s", bucket, s3_key)
@@ -204,6 +213,13 @@ def create_runtime(
         artifact_prefix: S3 key/prefix for the artifact
         tags: Additional tags to merge with defaults
         region: AWS region name
+
+    Note:
+        The entryPoint/runtime below is the same regardless of which
+        custom-code framework (strands or adk) built the artifact at
+        artifact_bucket/artifact_prefix — both frameworks' handler.py
+        implement the same BedrockAgentCoreApp entrypoint contract at
+        src/handler.py, so no agent_framework parameter is needed here.
 
     Returns:
         create_agent_runtime API response

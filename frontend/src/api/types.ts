@@ -22,6 +22,7 @@ export interface AgentResponse {
   endpoint_status: string | null;
   protocol: string | null;
   network_mode: string | null;
+  agent_framework: string | null;
   authorizer_config: { type?: string; name?: string; pool_id?: string; discovery_url?: string; allowed_audience?: string[]; allowed_clients?: string[]; allowed_scopes?: string[] } | null;
   model_id: string | null;
   allowed_model_ids: string[];
@@ -106,6 +107,7 @@ export interface AgentDeployRequest {
   role_arn: string | null;
   protocol: string;
   network_mode: string;
+  agent_framework?: string;
   vpc_config_id: number | null;
   idle_timeout: number | null;
   max_lifetime: number | null;

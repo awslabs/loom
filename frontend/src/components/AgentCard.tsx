@@ -66,6 +66,11 @@ function deploymentTypeLabel(agent: AgentResponse): string | null {
   return null;
 }
 
+function frameworkLabel(agent: AgentResponse): string | null {
+  if (agent.source !== "deploy" || !agent.agent_framework || agent.agent_framework === "strands") return null;
+  return agent.agent_framework.toUpperCase();
+}
+
 function existsInAgentCore(agent: AgentResponse): boolean {
   return !!agent.runtime_id;
 }
@@ -239,11 +244,16 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, showOnC
             <div>Registered: {formatTimestamp(agent.registered_at, timezone)}</div>
           )}
         </div>
-        {!creating && (deploymentTypeLabel(agent) || (agent.cost_summary && agent.cost_summary.total_cost > 0)) && (
+        {!creating && (deploymentTypeLabel(agent) || frameworkLabel(agent) || (agent.cost_summary && agent.cost_summary.total_cost > 0)) && (
           <div className="flex flex-wrap gap-1">
             {deploymentTypeLabel(agent) && (
               <Badge variant="outline" className="text-[10px] px-1.5 py-0">
                 {deploymentTypeLabel(agent)}
+              </Badge>
+            )}
+            {frameworkLabel(agent) && (
+              <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                {frameworkLabel(agent)}
               </Badge>
             )}
             {agent.cost_summary && agent.cost_summary.total_cost > 0 && (

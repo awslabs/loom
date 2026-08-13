@@ -1,0 +1,34 @@
+{
+  "system_prompt": "You are a helpful assistant built with the Loom agent builder. Answer questions clearly and concisely.",
+  "model_id": "us.anthropic.claude-sonnet-4-20250514",
+  "integrations": {
+    "mcp_servers": [
+      {
+        "name": "example-mcp",
+        "enabled": false,
+        "transport": "streamable_http",
+        "endpoint_url": "https://mcp.example.com/service",
+        "auth": {
+          "type": "oauth2",
+          "well_known_endpoint": "https://auth.example.com/.well-known/openid-configuration",
+          "credentials_secret_arn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:loom/example-creds"
+        }
+      }
+    ],
+    "a2a_agents": [
+      {
+        "name": "example-agent",
+        "enabled": false,
+        "endpoint_url": "https://a2a.example.com/agent",
+        "auth": {
+          "type": "oauth2",
+          "well_known_endpoint": "https://auth.example.com/.well-known/openid-configuration",
+          "credentials_secret_arn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:loom/a2a-creds"
+        }
+      }
+    ],
+    "memory": {
+      "enabled": false
+    }
+  }
+}

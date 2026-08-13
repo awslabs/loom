@@ -32,14 +32,19 @@ The frontend is organized around persona-based workflows, accessible via a sideb
 ```
 loom/
 ├── agents/                     # Agent blueprint source code
-│   └── strands_agent/          # Strands Agent blueprint
-│       ├── handler.py          # Agent handler / entry point (trace_invocation wrapped)
-│       ├── config.py           # Agent configuration
-│       ├── integrations/       # Tool and service integrations
-│       │   ├── mcp_client.py   # MCP tool client vending
-│       │   ├── a2a_client.py   # A2A agent client vending
-│       │   └── memory.py       # AgentCore Memory hooks (MemoryHook)
-│       └── telemetry.py        # OTEL setup, ADOT auto-instrumentation, TelemetryHook
+│   ├── strands_agent/          # Strands Agent blueprint (default custom-code framework)
+│   │   ├── handler.py          # Agent handler / entry point (trace_invocation wrapped)
+│   │   ├── config.py           # Agent configuration
+│   │   ├── integrations/       # Tool and service integrations
+│   │   │   ├── mcp_client.py   # MCP tool client vending
+│   │   │   ├── a2a_client.py   # A2A agent client vending
+│   │   │   └── memory.py       # AgentCore Memory hooks (MemoryHook)
+│   │   └── telemetry.py        # OTEL setup, ADOT auto-instrumentation, TelemetryHook
+│   └── adk_agent/               # Google ADK blueprint (alternate custom-code framework, agent_framework="adk")
+│       ├── handler.py          # AgentCore Runtime entry point (BedrockAgentCoreApp, same event contract as Strands)
+│       ├── config.py           # Agent configuration (identical schema to strands_agent)
+│       ├── integrations/       # Tool and service integrations (MCP, A2A, memory, approval, code interpreter)
+│       └── telemetry.py        # OTEL setup via ADK BasePlugin (TelemetryPlugin), same span names as Strands
 ├── backend/                    # Backend API (see backend/SPECIFICATIONS.md)
 │   ├── app/
 │   │   ├── main.py             # FastAPI app (docs at /api/docs, /api/redoc, /api/openapi.json)

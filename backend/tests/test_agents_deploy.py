@@ -123,6 +123,72 @@ class TestAgentsDeployRouter(unittest.TestCase):
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
     @patch("app.routers.agents.create_execution_role")
+    def test_deploy_agent_defaults_to_strands_framework(
+        self, mock_create_role, mock_build_artifact, mock_create_runtime
+    ):
+        """agent_framework defaults to 'strands' when omitted, preserving
+        existing behavior for callers that don't know about the new field."""
+        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-2"
+        mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
+        mock_create_runtime.return_value = {
+            "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-strands",
+            "agentRuntimeId": "rt-strands",
+            "status": "CREATING",
+        }
+
+        response = self.client.post(
+            "/api/agents",
+            json={
+                "source": "deploy",
+                "name": "default_framework_agent",
+                "model_id": "us.anthropic.claude-sonnet-4-6-v1",
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["agent_framework"], "strands")
+
+        agent = self.session.query(Agent).filter(Agent.name == "default_framework_agent").first()
+        self.assertEqual(agent.agent_framework, "strands")
+        mock_build_artifact.assert_called_once_with(agent.region, agent_framework="strands")
+
+    @patch("app.routers.agents.create_runtime")
+    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.create_execution_role")
+    def test_deploy_agent_with_adk_framework(
+        self, mock_create_role, mock_build_artifact, mock_create_runtime
+    ):
+        """Selecting agent_framework='adk' persists it on the Agent row and
+        is passed through to build_agent_artifact so the ADK source
+        directory/artifact is built instead of Strands'."""
+        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-3"
+        mock_build_artifact.return_value = ("my-bucket", "artifacts/adk-agent.zip")
+        mock_create_runtime.return_value = {
+            "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-adk",
+            "agentRuntimeId": "rt-adk",
+            "status": "CREATING",
+        }
+
+        response = self.client.post(
+            "/api/agents",
+            json={
+                "source": "deploy",
+                "name": "adk_agent_test",
+                "model_id": "us.anthropic.claude-sonnet-4-6-v1",
+                "agent_framework": "adk",
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["agent_framework"], "adk")
+
+        agent = self.session.query(Agent).filter(Agent.name == "adk_agent_test").first()
+        self.assertEqual(agent.agent_framework, "adk")
+        mock_build_artifact.assert_called_once_with(agent.region, agent_framework="adk")
+
+    @patch("app.routers.agents.create_runtime")
+    @patch("app.routers.agents.build_agent_artifact")
+    @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_success_updates_status(
         self, mock_create_role, mock_build_artifact, mock_create_runtime
     ):

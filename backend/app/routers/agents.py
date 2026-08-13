@@ -166,6 +166,7 @@ class AgentCreateRequest(BaseModel):
     role_arn: str | None = Field(None, description="Existing IAM role ARN or null to create new")
     protocol: str = Field(default="HTTP", description="HTTP, MCP, or A2A")
     network_mode: str = Field(default="PUBLIC", description="PUBLIC or VPC")
+    agent_framework: str = Field(default="strands", description="Custom-code agent framework: 'strands' or 'adk'. Only used for source='deploy'.")
     vpc_config_id: int | None = Field(None, description="VPC configuration ID (required when network_mode is VPC)")
     idle_timeout: int | None = Field(None, description="Idle runtime session timeout (seconds)")
     max_lifetime: int | None = Field(None, description="Max lifetime (seconds)")
@@ -213,6 +214,7 @@ class AgentResponse(BaseModel):
     endpoint_status: str | None = None
     protocol: str | None = None
     network_mode: str | None = None
+    agent_framework: str | None = None
     vpc_config_id: int | None = None
     tags: dict[str, str] = {}
     authorizer_config: dict | None = None
@@ -971,6 +973,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
         deployment_status="initializing",
         protocol=request.protocol,
         network_mode=request.network_mode,
+        agent_framework=request.agent_framework,
         registered_at=datetime.utcnow(),
     )
     agent.set_allowed_model_ids(effective_allowed)
@@ -1296,7 +1299,7 @@ def _deploy_agent_background(
             ci_future = ci_executor.submit(_create_ci_resource)
 
         try:
-            artifact_bucket, artifact_key = build_agent_artifact(region)
+            artifact_bucket, artifact_key = build_agent_artifact(region, agent_framework=request.agent_framework)
         except Exception as e:
             agent.deployment_status = "failed"
             agent.status = "FAILED"
@@ -1739,7 +1742,9 @@ def _update_deploy_agent_background(
         db.commit()
 
         try:
-            artifact_bucket, artifact_key = build_agent_artifact(region)
+            artifact_bucket, artifact_key = build_agent_artifact(
+                region, agent_framework=agent.agent_framework or "strands"
+            )
         except Exception as e:
             agent.deployment_status = "failed"
             agent.status = "FAILED"
@@ -3898,6 +3903,8 @@ def export_agent(agent_id: int, user: UserInfo = Depends(require_scopes("admin:w
 
     # Order matches form layout
     data["deployment_type"] = "managed" if agent.source == "harness" else "custom"
+    if agent.source == "deploy" and agent.agent_framework:
+        data["agent_framework"] = agent.agent_framework
     data["name"] = agent.name
     if agent.description:
         data["description"] = agent.description

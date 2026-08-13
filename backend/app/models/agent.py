@@ -41,6 +41,7 @@ class Agent(Base):
     endpoint_status = Column(String, nullable=True)
     protocol = Column(String, nullable=True)  # HTTP, MCP, A2A
     network_mode = Column(String, nullable=True)  # PUBLIC or VPC
+    agent_framework = Column(String, nullable=True)  # 'strands' or 'adk' (source='deploy' only)
     authorizer_config = Column(Text, nullable=True)  # JSON: {type, pool_id, discovery_url, client_id, client_secret}
     description = Column(Text, nullable=True)  # Human-readable description of the agent
     tags = Column(Text, nullable=True)  # JSON dict of resolved tags
@@ -176,6 +177,7 @@ class Agent(Base):
             "endpoint_status": self.endpoint_status,
             "protocol": self.protocol,
             "network_mode": self.network_mode,
+            "agent_framework": self.agent_framework,
             "tags": self.get_tags(),
             "authorizer_config": self.get_authorizer_config(),
             "deployed_at": (self.deployed_at.isoformat() + "Z") if self.deployed_at else None,

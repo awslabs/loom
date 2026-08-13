@@ -13,6 +13,7 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 - Deploy managed agents via AgentCore Harness (no code required) with configurable model parameters, built-in tools (code interpreter, browser), and MCP server integration
 - **VPC-enabled agents:** deploy both custom and managed agents with VPC egress — configure subnets and security groups via named VPC config profiles for private access to VPC-internal resources
 - **PrivateLink ingress:** IaC template (`shared/iac/privatelink.yaml`) provisions an NLB and VPC Endpoint Service for invoking agents from within a VPC
+- Custom-code agent framework selection: Strands Agents (default) or Google Agent Development Kit (ADK), selectable per agent at deploy time with equivalent config schema, streaming event shapes, telemetry, and integration support
 - SSE streaming invocation with real-time response display
 - Progressive deployment status tracking and async deletion
 - Cold-start latency measurement via CloudWatch log parsing
@@ -99,7 +100,7 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 
 ```
 loom/
-├── agents/            # Agent blueprint source code (Strands Agent)
+├── agents/            # Agent blueprint source code (Strands Agent, Google ADK)
 ├── backend/           # FastAPI backend (Python, SQLAlchemy, boto3)
 │   ├── etc/           # Backend environment config (app + ECS backend service)
 │   └── iac/           # Backend infrastructure (RDS, EC2 bastion, ECS backend service)

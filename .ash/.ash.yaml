@@ -101,6 +101,18 @@ global_settings:
     - path: agents/strands_agent/tests/test_agent.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using placeholder API keys/secret ARNs to exercise model-provider construction logic.
+    - path: agents/adk_agent/etc/config.json
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Example Secrets Manager ARN in sample config, not a real secret value.
+    - path: agents/adk_agent/tests/test_mcp_client.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder secret-like strings to exercise MCP client auth logic.
+    - path: agents/adk_agent/tests/test_config.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder secret-like strings to exercise config validation logic.
+    - path: agents/adk_agent/tests/test_agent.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder API keys/secret ARNs to exercise model-provider construction logic.
     - path: backend/app/services/litellm.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Secrets Manager path prefix constant ("loom/settings/litellm-master-key") used to store a secret, not the secret value itself.

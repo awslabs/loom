@@ -205,6 +205,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   const [selectedRoleId, setSelectedRoleId] = useState<string>("");
   const [protocol] = useState("HTTP");
   const [networkMode, setNetworkMode] = useState("PUBLIC");
+  const [agentFramework, setAgentFramework] = useState<string>("strands");
   const [vpcConfigId, setVpcConfigId] = useState<string>("");
   const [vpcConfigs, setVpcConfigs] = useState<VpcConfig[]>([]);
 
@@ -288,6 +289,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       if (parsed.deployment_type === "custom" || parsed.deployment_type === "managed") {
         setDeploymentType(parsed.deployment_type as DeploymentType);
       }
+      if (typeof parsed.agent_framework === "string") setAgentFramework(parsed.agent_framework);
       if (parsed.name) setName(parsed.name as string);
       if (parsed.description) setDescription(parsed.description as string);
       if (parsed.system_prompt) setSystemPrompt(parsed.system_prompt as string);
@@ -589,6 +591,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
         role_arn: roleArn,
         protocol,
         network_mode: networkMode,
+        agent_framework: agentFramework,
         vpc_config_id: networkMode === "VPC" && vpcConfigId ? parseInt(vpcConfigId, 10) : null,
         idle_timeout: idleTimeout ? parseInt(idleTimeout, 10) : defaults.idle_timeout_seconds,
         max_lifetime: maxLifetime ? parseInt(maxLifetime, 10) : defaults.max_lifetime_seconds,
@@ -623,6 +626,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       setProviderBaseUrl("");
       setSelectedRoleId("");
       setNetworkMode("PUBLIC");
+      setAgentFramework("strands");
       setSelectedAuthConfigId("");
       setIdleTimeout("");
       setMaxLifetime("");
@@ -690,6 +694,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                     if (parsed.deployment_type === "custom" || parsed.deployment_type === "managed") {
                       setDeploymentType(parsed.deployment_type);
                     }
+                    if (typeof parsed.agent_framework === "string") setAgentFramework(parsed.agent_framework);
                     if (parsed.name) setName(parsed.name);
                     if (parsed.description) setDescription(parsed.description);
                     if (parsed.system_prompt) setSystemPrompt(parsed.system_prompt);
@@ -805,6 +810,9 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                   }
                   const result: Record<string, unknown> = {};
                   result.deployment_type = deploymentType;
+                  if (deploymentType === "custom" && agentFramework !== "strands") {
+                    result.agent_framework = agentFramework;
+                  }
                   if (name) result.name = name;
                   if (description) result.description = description;
                   if (systemPrompt) result.system_prompt = systemPrompt;
@@ -909,6 +917,37 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                   </label>
                 </div>
               </section>
+
+              {/* Agent Framework Selector (custom-code path only) */}
+              {deploymentType === "custom" && (
+                <section className="space-y-2">
+                  <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Agent Framework</h4>
+                  <div className="flex gap-3">
+                    <label className="flex items-center gap-2 text-sm cursor-pointer">
+                      <input
+                        type="radio"
+                        name="agentFramework"
+                        value="strands"
+                        checked={agentFramework === "strands"}
+                        onChange={() => setAgentFramework("strands")}
+                        className="h-3.5 w-3.5"
+                      />
+                      <span>Strands Agent</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-sm cursor-pointer">
+                      <input
+                        type="radio"
+                        name="agentFramework"
+                        value="adk"
+                        checked={agentFramework === "adk"}
+                        onChange={() => setAgentFramework("adk")}
+                        className="h-3.5 w-3.5"
+                      />
+                      <span>Google ADK</span>
+                    </label>
+                  </div>
+                </section>
+              )}
 
               {/* Agent Identity */}
               <section className="space-y-3">
@@ -1565,6 +1604,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                     setProviderBaseUrl("");
                     setSelectedRoleId("");
                     setNetworkMode("PUBLIC");
+                    setAgentFramework("strands");
                     setSelectedAuthConfigId("");
                     setIdleTimeout("");
                     setMaxLifetime("");

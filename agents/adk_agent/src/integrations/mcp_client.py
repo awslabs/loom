@@ -1,4 +1,25 @@
-"""Dynamic MCP tool client creation from agent configuration."""
+"""Dynamic MCP tool client creation from agent configuration.
+
+Ports the OAuth2/OBO token-exchange and API-key auth logic from
+``agents/strands_agent/src/integrations/mcp_client.py`` verbatim (same token
+cache, same JWT-claims decode, same AgentCore Identity API calls) but
+reshapes the auth-injection point: Strands attaches an ``httpx.Auth``
+subclass to a raw ``streamablehttp_client`` transport; ADK's ``McpToolset``
+takes a ``header_provider`` callable (``ReadonlyContext -> dict[str, str]``)
+that is invoked on every tool call and at session-creation time, which is
+ADK's own first-class per-request dynamic-header mechanism.
+
+Known parity gap: Strands' ``_install_logging_callback`` monkeypatches the
+MCP client's background-thread session to capture out-of-band MCP
+``logging/message`` notifications (used by some servers to push
+``token_info`` when a result-embedded ``__TOKEN_INFO__`` marker isn't
+suitable). ADK's ``MCPSessionManager`` doesn't expose the underlying
+``ClientSession`` or a logging-callback hook, so that specific channel is not
+wired here — only the result-embedded ``__TOKEN_INFO__`` marker path
+(``extract_token_info_from_tool_result``) works for ADK-built agents. Servers
+that only push token_info via MCP logging notifications (rather than
+embedding it in the tool result) will not surface that data for ADK agents.
+"""
 
 import base64
 import hashlib
@@ -7,15 +28,14 @@ import logging
 import os
 import threading
 import time
-from functools import partial
-from typing import Any, Generator, Optional
+from typing import Any, Awaitable, Optional
 
 import boto3
-import httpx
-from mcp.client.streamable_http import streamablehttp_client
-from strands.hooks import HookProvider, HookRegistry
-from strands.hooks.events import AfterToolCallEvent
-from strands.tools.mcp import MCPClient
+
+from google.adk.agents.readonly_context import ReadonlyContext
+from google.adk.tools.base_tool import BaseTool
+from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
+from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 
 from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
 from bedrock_agentcore.services.identity import IdentityClient
@@ -48,12 +68,12 @@ def get_user_access_token() -> str | None:
     with _user_access_token_lock:
         return _user_access_token
 
+
 # Token info events emitted when OBO tokens are acquired.
 # The handler drains this list and yields events to the stream.
 _token_info_events: list[dict[str, Any]] = []
 _token_info_emitted: set[str] = set()
 _token_info_lock = threading.Lock()
-
 
 
 def drain_token_info_events() -> list[dict[str, Any]]:
@@ -73,43 +93,39 @@ def reset_token_info_state() -> None:
 _TOKEN_INFO_PREFIX = "__TOKEN_INFO__:"  # nosec B105 — protocol prefix string, not a password
 
 
-class TokenInfoHook(HookProvider):
-    """Strands hook that extracts __TOKEN_INFO__ markers from MCP tool results.
+def extract_token_info_from_tool_result(tool: BaseTool, result: dict[str, Any]) -> dict[str, Any]:
+    """Strip ``__TOKEN_INFO__`` markers from an MCP tool result's content blocks.
 
-    When an MCP server embeds token info in tool result content blocks
-    (because server-initiated notifications can't traverse the AgentCore proxy),
-    this hook strips those blocks from the result before the model sees them
-    and pushes the data into the token_info event queue.
+    Ports Strands' ``TokenInfoHook._extract_token_info``; called from a
+    ``BasePlugin.after_tool_callback`` in ``agent.py`` (ADK has no equivalent
+    of Strands' ``AfterToolCallEvent`` hook registered per-tool, so this is a
+    plain function the plugin calls for every tool result rather than a
+    dedicated hook class).
     """
+    if not result or "content" not in result:
+        return result
 
-    def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
-        registry.add_callback(AfterToolCallEvent, self._extract_token_info)
+    clean_content = []
+    for block in result["content"]:
+        text = block.get("text", "") if isinstance(block, dict) else ""
+        if text.startswith(_TOKEN_INFO_PREFIX):
+            try:
+                payload = _json.loads(text[len(_TOKEN_INFO_PREFIX):])
+                with _token_info_lock:
+                    _token_info_events.append(payload)
+                logger.info(
+                    "Extracted token_info from tool result: type=%s provider=%s",
+                    payload.get("token_type"),
+                    payload.get("credential_provider"),
+                )
+            except Exception as e:
+                logger.warning("Failed to parse __TOKEN_INFO__ block: %s", e)
+        else:
+            clean_content.append(block)
 
-    def _extract_token_info(self, event: AfterToolCallEvent) -> None:
-        result = event.result
-        if not result or "content" not in result:
-            return
-
-        clean_content = []
-        for block in result["content"]:
-            text = block.get("text", "")
-            if text.startswith(_TOKEN_INFO_PREFIX):
-                try:
-                    payload = _json.loads(text[len(_TOKEN_INFO_PREFIX):])
-                    with _token_info_lock:
-                        _token_info_events.append(payload)
-                    logger.info(
-                        "Extracted token_info from tool result: type=%s provider=%s",
-                        payload.get("token_type"),
-                        payload.get("credential_provider"),
-                    )
-                except Exception as e:
-                    logger.warning("Failed to parse __TOKEN_INFO__ block: %s", e)
-            else:
-                clean_content.append(block)
-
-        if len(clean_content) != len(result["content"]):
-            event.result = {**result, "content": clean_content}
+    if len(clean_content) != len(result["content"]):
+        return {**result, "content": clean_content}
+    return result
 
 
 def _token_fingerprint(token: str) -> str:
@@ -129,19 +145,23 @@ def _decode_jwt_claims(token: str) -> dict[str, Any] | None:
         return None
 
 
-class _OAuth2Auth(httpx.Auth):
-    """httpx Auth that injects a Bearer token from the AgentCore Identity service.
+class _OAuth2TokenFetcher:
+    """Fetches downstream OAuth2 access tokens via the AgentCore Identity
+    service, shared by the MCP ``header_provider`` (this module) and the A2A
+    ``httpx.Auth`` handler (``a2a_client.py``) — the token-fetch mechanics are
+    identical for both; only the injection point (HTTP header vs httpx auth
+    flow) differs by transport.
 
-    On each outbound HTTP request the auth handler:
-      1. Uses the workload access token (captured at construction time from
-         ``BedrockAgentCoreContext`` or resolved lazily from the env/context).
+    On each call the fetcher:
+      1. Uses the workload access token (resolved from
+         ``BedrockAgentCoreContext``, a ContextVar set by the AgentCore
+         Runtime request handler independent of any agent framework).
       2. Exchanges it for a downstream OAuth2 access token via the
          AgentCore ``get_resource_oauth2_token`` API.
-      3. Sets the ``Authorization: Bearer <token>`` header.
 
     The delegation_mode determines the oauth2Flow parameter:
       - "m2m" → M2M (machine-to-machine)
-      - "obo" → USER_FEDERATION (on-behalf-of user)
+      - "obo" → ON_BEHALF_OF_TOKEN_EXCHANGE (on-behalf-of user)
     """
 
     def __init__(
@@ -159,20 +179,16 @@ class _OAuth2Auth(httpx.Auth):
         self._oauth2_flow = "ON_BEHALF_OF_TOKEN_EXCHANGE" if self._delegation_mode == "obo" else "M2M"
         self._obo_grant_type = obo_grant_type
         self._audience = audience
-        # Capture the workload token eagerly — auth_flow runs in the MCP
-        # client's background thread where ContextVar is not propagated.
-        self._workload_token = BedrockAgentCoreContext.get_workload_access_token()
 
-
-    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
-        workload_token = self._workload_token or BedrockAgentCoreContext.get_workload_access_token()
+    def fetch_bearer_token(self) -> Optional[str]:
+        """Return a bearer token string for the current request, or None."""
+        workload_token = BedrockAgentCoreContext.get_workload_access_token()
         if not workload_token:
             logger.warning(
                 "No workload access token available for '%s'; sending unauthenticated",
                 self._credential_provider_name,
             )
-            yield request
-            return
+            return None
         logger.info(
             "Workload token for '%s': fingerprint=%s len=%d",
             self._credential_provider_name, _token_fingerprint(workload_token), len(workload_token),
@@ -180,18 +196,17 @@ class _OAuth2Auth(httpx.Auth):
 
         token = self._fetch_resource_token(workload_token)
         if token:
-            request.headers["Authorization"] = f"Bearer {token}"
             logger.debug(
-                "Injected OAuth2 token for credential provider '%s' (flow=%s)",
+                "Fetched OAuth2 token for credential provider '%s' (flow=%s)",
                 self._credential_provider_name, self._oauth2_flow,
             )
-        else:
-            logger.warning(
-                "No accessToken available for credential provider '%s' (flow=%s); sending unauthenticated",
-                self._credential_provider_name, self._oauth2_flow,
-            )
+            return token
 
-        yield request
+        logger.warning(
+            "No accessToken available for credential provider '%s' (flow=%s); sending unauthenticated",
+            self._credential_provider_name, self._oauth2_flow,
+        )
+        return None
 
     def _emit_token_info(self, token: str) -> None:
         """Decode token claims and emit a token_info event (once per drain cycle)."""
@@ -236,11 +251,6 @@ class _OAuth2Auth(httpx.Auth):
         try:
             identity_client = IdentityClient(self._region)
 
-            # Runtime automatically calls GetWorkloadAccessTokenForJWT when the
-            # invocation includes a user Bearer token. The workload token we
-            # receive already contains the user's identity — no need to call
-            # get_workload_access_token_for_jwt ourselves.
-
             token_kwargs: dict[str, Any] = {
                 'workloadIdentityToken': workload_token,
                 'resourceCredentialProviderName': self._credential_provider_name,
@@ -283,8 +293,22 @@ class _OAuth2Auth(httpx.Auth):
             return None
 
 
-class _ApiKeyAuth(httpx.Auth):
-    """httpx Auth that injects an API key header on each request.
+class _OAuth2HeaderProvider(_OAuth2TokenFetcher):
+    """``header_provider`` callable for ``McpToolset``/``McpTool`` that
+    returns an ``Authorization: Bearer <token>`` header via
+    ``_OAuth2TokenFetcher``.
+    """
+
+    def __call__(self, readonly_context: ReadonlyContext) -> dict[str, str]:
+        token = self.fetch_bearer_token()
+        if token:
+            return {"Authorization": f"Bearer {token}"}
+        return {}
+
+
+class _ApiKeyHeaderProvider:
+    """Injects an API key header on each request, for use as a
+    ``McpToolset``/``McpTool`` ``header_provider``.
 
     The API key is resolved once from AWS Secrets Manager at initialization
     (not per-request) to avoid throttling.
@@ -301,35 +325,24 @@ class _ApiKeyAuth(httpx.Auth):
         resp = client.get_secret_value(SecretId=secret_name)
         return resp["SecretString"]
 
-    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
-        if self._api_key:
-            if self._header_name.lower() == "authorization":
-                request.headers["Authorization"] = f"Bearer {self._api_key}"
-            else:
-                request.headers[self._header_name] = self._api_key
-        else:
+    def __call__(self, readonly_context: ReadonlyContext) -> dict[str, str]:
+        if not self._api_key:
             logger.warning("No API key resolved; sending unauthenticated request")
-        yield request
+            return {}
+        if self._header_name.lower() == "authorization":
+            return {"Authorization": f"Bearer {self._api_key}"}
+        return {self._header_name: self._api_key}
 
 
+def _build_header_provider(config: MCPServerConfig) -> Optional[Any]:
+    """Build a ``header_provider`` callable for the given MCP server configuration.
 
-def _build_transport_callable(config: MCPServerConfig) -> Any:
-    """Build a transport callable for the given MCP server configuration.
-
-    For OAuth2-authenticated servers, attaches an ``_OAuth2Auth`` handler
-    that dynamically fetches tokens from the AgentCore Identity service
-    on each request using the per-invocation workload access token.
-
-    Args:
-        config: MCP server configuration with endpoint and optional auth.
-
-    Returns:
-        A callable that returns an async context manager providing the MCP transport.
+    Returns None for unauthenticated servers (McpToolset accepts header_provider=None).
     """
     if config.auth and config.auth.type == "oauth2" and config.auth.credential_provider_name:
         scope_list = config.auth.scopes.split() if config.auth.scopes else []
         delegation_mode = (config.auth.delegation_mode or "m2m").lower()
-        auth = _OAuth2Auth(
+        provider = _OAuth2HeaderProvider(
             credential_provider_name=config.auth.credential_provider_name,
             scopes=scope_list,
             delegation_mode=delegation_mode,
@@ -344,11 +357,11 @@ def _build_transport_callable(config: MCPServerConfig) -> Any:
             delegation_mode,
             config.auth.obo_grant_type,
         )
-        return partial(streamablehttp_client, url=config.endpoint_url, auth=auth)
+        return provider
 
     if config.auth and config.auth.type == "api_key" and config.auth.credentials_secret_arn:
         try:
-            auth = _ApiKeyAuth(
+            provider = _ApiKeyHeaderProvider(
                 secret_name=config.auth.credentials_secret_arn,
                 header_name=config.auth.api_key_header_name or "x-api-key",
             )
@@ -358,7 +371,7 @@ def _build_transport_callable(config: MCPServerConfig) -> Any:
                 config.auth.credentials_secret_arn,
                 config.auth.api_key_header_name,
             )
-            return partial(streamablehttp_client, url=config.endpoint_url, auth=auth)
+            return provider
         except Exception as e:
             logger.warning(
                 "Failed to resolve API key for server '%s': %s. Falling back to unauthenticated.",
@@ -366,150 +379,53 @@ def _build_transport_callable(config: MCPServerConfig) -> Any:
                 e,
             )
 
-    return partial(streamablehttp_client, url=config.endpoint_url)
+    return None
 
 
-def _make_logging_callback():
-    """Create an async logging callback that captures token_info notifications."""
-    async def _logging_callback(params) -> None:
-        logger.info(
-            "MCP logging notification received: logger=%s level=%s data_type=%s",
-            getattr(params, "logger", None),
-            getattr(params, "level", None),
-            type(getattr(params, "data", None)).__name__,
-        )
-        if getattr(params, "logger", None) == "token_info" and params.data:
-            data = params.data
-            if isinstance(data, dict) and "token_info" in data:
-                with _token_info_lock:
-                    _token_info_events.append(data["token_info"])
-                logger.info(
-                    "Captured token_info from MCP server: type=%s provider=%s",
-                    data["token_info"].get("token_type"),
-                    data["token_info"].get("credential_provider"),
-                )
-            else:
-                logger.warning("token_info logger but unexpected data structure: %s", data)
-    return _logging_callback
+def build_toolset(server: MCPServerConfig) -> Optional[McpToolset]:
+    """Build an ``McpToolset`` for a single enabled MCP server configuration.
 
-
-def _install_logging_callback(client: MCPClient) -> None:
-    """Monkey-patch the MCP client session to capture logging notifications."""
-    session = getattr(client, "_background_thread_session", None)
-    if session is not None:
-        session._logging_callback = _make_logging_callback()
-        logger.info("Installed token_info logging callback on MCP session")
-    else:
-        logger.warning("Cannot install logging callback: no _background_thread_session found")
-
-
-def _try_create_client(server: MCPServerConfig) -> MCPClient | None:
-    """Attempt to create and validate an MCP client for a server.
-
-    Returns the client if successful, or None if the server is unreachable
-    or returns an auth error (e.g. 401/403).  Catches BaseException to
-    handle ExceptionGroup raised by the MCP SDK background thread.
+    Only the ``streamable_http`` transport is supported (matching Strands);
+    other transports log a warning and return None so the caller can skip
+    this server gracefully.
     """
-    transport_callable = _build_transport_callable(server)
-    client = MCPClient(transport_callable)
-
-    # Temporarily suppress the strands MCP client logger during start()
-    # to avoid noisy ERROR tracebacks for expected auth failures.
-    strands_mcp_logger = logging.getLogger("strands.tools.mcp.mcp_client")
-    prev_level = strands_mcp_logger.level
-    strands_mcp_logger.setLevel(logging.CRITICAL)
-    try:
-        client.start()
-        _install_logging_callback(client)
-        logger.info("MCP client for server '%s' started successfully", server.name)
-        return client
-    except BaseException as e:
+    if server.transport != "streamable_http":
         logger.warning(
-            "Failed to start MCP client for server '%s': %s. "
-            "The agent will continue without this server's tools.",
+            "Unsupported transport '%s' for MCP server '%s'; skipping",
+            server.transport,
             server.name,
-            e,
         )
-        try:
-            client.stop()
-        except BaseException:
-            pass
         return None
-    finally:
-        strands_mcp_logger.setLevel(prev_level)
+
+    header_provider = _build_header_provider(server)
+    connection_params = StreamableHTTPConnectionParams(url=server.endpoint_url)
+    toolset = McpToolset(
+        connection_params=connection_params,
+        header_provider=header_provider,
+    )
+    logger.info("Built MCP toolset for server '%s'", server.name)
+    return toolset
 
 
-def create_mcp_clients(servers: list[MCPServerConfig]) -> list[MCPClient]:
-    """Create MCP clients for all enabled server configurations.
-
-    Must be called within an invocation context so that the workload
-    access token is available for OAuth2-authenticated servers.
-
-    Only servers with ``enabled=True`` are instantiated. Currently supports
-    the ``streamable_http`` transport; other transports log a warning and
-    are skipped. Servers that fail to connect (e.g. 401 Unauthorized) are
-    skipped gracefully so the agent can still operate with its remaining tools.
-
-    Args:
-        servers: List of MCP server configurations.
-
-    Returns:
-        List of successfully initialised MCPClient instances.
-    """
-    clients: list[MCPClient] = []
-
-    for server in servers:
-        if not server.enabled:
-            logger.debug("Skipping disabled MCP server '%s'", server.name)
-            continue
-
-        if server.transport == "streamable_http":
-            client = _try_create_client(server)
-            if client is not None:
-                clients.append(client)
-        else:
-            logger.warning(
-                "Unsupported transport '%s' for MCP server '%s'; skipping",
-                server.transport,
-                server.name,
-            )
-
-    logger.info("Initialised %d MCP client(s)", len(clients))
-    return clients
-
-
-def build_mcp_clients(servers: list[MCPServerConfig]) -> list[MCPClient]:
-    """Build MCP clients without starting them.
-
-    Used when clients will be registered via ``agent.tool_registry.process_tools``
-    which handles starting internally.
+def build_toolsets(servers: list[MCPServerConfig]) -> list[McpToolset]:
+    """Build toolsets for all enabled server configurations.
 
     Args:
         servers: List of MCP server configurations.
 
     Returns:
-        List of MCPClient instances (not yet started).
+        List of McpToolset instances for enabled, supported-transport servers.
     """
-    clients: list[MCPClient] = []
-
+    toolsets: list[McpToolset] = []
     for server in servers:
         if not server.enabled:
             logger.debug("Skipping disabled MCP server '%s'", server.name)
             continue
-
-        if server.transport == "streamable_http":
-            transport_callable = _build_transport_callable(server)
-            client = MCPClient(transport_callable)
-            clients.append(client)
-            logger.info("Built MCP client for server '%s' (not yet started)", server.name)
-        else:
-            logger.warning(
-                "Unsupported transport '%s' for MCP server '%s'; skipping",
-                server.transport,
-                server.name,
-            )
-
-    return clients
+        toolset = build_toolset(server)
+        if toolset is not None:
+            toolsets.append(toolset)
+    logger.info("Built %d MCP toolset(s)", len(toolsets))
+    return toolsets
 
 
 def has_oauth2_servers(servers: list[MCPServerConfig]) -> bool:

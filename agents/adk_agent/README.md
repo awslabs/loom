@@ -89,6 +89,8 @@ A2A agents are wrapped using ADK's native `RemoteA2aAgent` + `AgentTool` (`src/i
 
 `src/integrations/code_interpreter.py` is a lean, ADK-native wrapper built directly on `bedrock_agentcore.tools.code_interpreter_client.CodeInterpreter`, avoiding a dependency on the Strands-coupled `strands-agents-tools` package. Exposes the same six tools as `strands_agent` (execute_code, execute_command, write_files, read_files, list_files, remove_files).
 
+The underlying `CodeInterpreter.invoke()` (used by `execute_code`, `execute_command`, `upload_files`, and raw `invoke()` calls) can return a response whose `"stream"` key is a raw `botocore.eventstream.EventStream` rather than a plain dict. ADK serializes tool results via Pydantic and cannot handle that type (`Unable to serialize unknown type: EventStream`). `AgentCoreCodeInterpreterTools._drain_response()` consumes the stream into a plain dict before returning, matching the behavior of Strands' own `AgentCoreCodeInterpreter._create_tool_result`.
+
 ### Human-in-the-Loop / Approval Policies
 
 ADK's HITL primitive (`ToolContext.request_confirmation()` + a `require_confirmation` predicate) is structurally different from Strands' dynamic `event.interrupt()`. `src/integrations/approval.py` translates Loom's existing approval-policy configuration into ADK's model:

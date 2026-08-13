@@ -1211,6 +1211,15 @@ Core authentication and authorization module. Provides:
 
 **View As mode:** Super-admins can switch to view the system as a different user persona (e.g., `demo-admin`, `demo-user`). The frontend sends a `group` parameter to backend endpoints, which filters resources as if the admin belonged to that group. This enables super-admins to validate permission models without switching accounts.
 
+### `services/net_guard.py`
+
+SSRF-safe HTTP fetchers for outbound calls to user-supplied URLs, at two guard levels reflecting different trust models:
+
+- `safe_get(url, headers=None, timeout=10) -> Response`, `safe_post(url, data=None, headers=None, timeout=10) -> Response` — strict, public-addresses-only. Forces HTTPS, resolves the hostname via DNS, and rejects private/loopback/link-local (including the `169.254.169.254` cloud metadata address)/multicast/reserved/unspecified addresses. Used for OAuth2/OIDC discovery ("well-known") documents and the token endpoints they advertise (`mcp.py`/`a2a.py`'s `_get_oauth2_token`/`_get_obo_token`), since both are attacker-influenced (the well-known URL comes from an MCP server/A2A agent registration, and the discovery document supplies the token endpoint) and legitimate identity providers are always public internet-facing services.
+- `guarded_get(url, headers=None, timeout=10, follow_redirects=True) -> Response`, `guarded_post(url, json=None, headers=None, timeout=10, follow_redirects=True) -> Response` — permissive, allows both `http`/`https` and private (RFC 1918/RFC 4193) addresses, but still always blocks cloud metadata, loopback, link-local, multicast, reserved, and unspecified addresses. Used for the actual MCP server `endpoint_url` / A2A agent `base_url` connection targets — unlike OAuth infrastructure, reaching a private/VPC-internal address is a legitimate, supported use case here (the backend ECS service runs in private subnets specifically to support VPC-internal MCP servers and A2A agents).
+- Both levels resolve the hostname once via `socket.getaddrinfo` and pin the outbound connection to that validated IP (rather than letting the HTTP client re-resolve at connect time), preventing DNS-rebinding between the check and the actual connection. `guarded_get`/`guarded_post` additionally re-validate every redirect hop before following it (up to 5 hops, `SSRFBlockedError` beyond that) — an initial target passing validation does not grant a later cross-host redirect target a pass.
+- `SSRFBlockedError(ValueError)` — raised by both levels when a URL is blocked; callers catch it separately from generic connection errors to log/return a distinct "blocked" outcome without ever surfacing the disallowed target's response body.
+
 ### `services/mcp.py`
 
 MCP server connection, tool discovery, and invocation:
@@ -1220,13 +1229,13 @@ MCP server connection, tool discovery, and invocation:
 - `invoke_mcp_tool(server, tool_name, arguments, api_key=None) -> dict` — Calls `tools/call` JSON-RPC method to invoke a specific tool with arguments.
 - `resolve_api_key(server, user_sub=None) -> str | None` — Resolves API key from Secrets Manager. Admin key for admin context (`loom/mcp/{name}/admin-api-key`), user key for user context (`loom/mcp/{name}/api-key/{user_sub}`).
 - `_build_headers(server, api_key=None) -> dict` — Builds request headers with auth injection. For API key auth, uses `api_key_header_name` to set the correct header; `Authorization` headers are prefixed with `Bearer`.
-- `_call_streamable_http()`, `_call_sse()`, `_call_mcp()` — Transport methods accepting optional `api_key` parameter.
+- `_call_streamable_http()`, `_initialize_session()`, `_call_sse()`, `_call_mcp()` — Transport methods accepting optional `api_key` parameter. All POST to `server.endpoint_url` via `net_guard.guarded_post` (SSRF-guarded, private/VPC addresses allowed) rather than a raw `httpx.post`, since `endpoint_url` is user-supplied at MCP server registration; `SSRFBlockedError` is caught and logged as a blocked connection (returns `None`, same as any other connection failure).
 
 ### `services/a2a.py`
 
 A2A Agent Card fetching and connection testing:
 
-- `fetch_agent_card(base_url: str, auth_headers: dict | None) -> dict` — fetches the Agent Card from the well-known endpoint. Standard A2A agents use `/.well-known/agent.json`; AgentCore agents try `/.well-known/agent-card.json` first; Salesforce Agentforce agents use `/v1/card`. Raises on HTTP errors or invalid JSON.
+- `fetch_agent_card(base_url: str, auth_headers: dict | None) -> dict` — fetches the Agent Card from the well-known endpoint via `net_guard.guarded_get` (SSRF-guarded, private/VPC addresses allowed, since `base_url` is user-supplied at A2A agent registration). Standard A2A agents use `/.well-known/agent.json`; AgentCore agents try `/.well-known/agent-card.json` first; Salesforce Agentforce agents use `/v1/card` via `_fetch_salesforce_agent_card`, also guarded. Raises `ValueError` on HTTP errors, invalid JSON, or an `SSRFBlockedError` (mapped to a `ValueError` without echoing any part of the blocked target's response). Error messages for non-2xx statuses use a fixed friendly string rather than the response body, since the connection target is attacker-influenced and echoing response content back to the caller would make the endpoint usable as a blind-SSRF response oracle.
 - `parse_agent_card(card_json: dict) -> dict` — extracts structured fields (name, description, version, provider, capabilities, authentication, skills, etc.) from raw Agent Card JSON.
 - `sync_skills(db: Session, agent_id: int, skills: list[dict])` — synchronizes skills from Agent Card to the database. Adds new skills, removes stale ones.
 - `test_a2a_connection(agent) -> dict` — acquires OAuth2 token if configured and fetches the Agent Card, returning success/failure with details.

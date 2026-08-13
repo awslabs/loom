@@ -4,9 +4,7 @@ import logging
 import os
 from typing import Any
 
-import httpx
-
-from app.services.net_guard import SSRFBlockedError, safe_get, safe_post
+from app.services.net_guard import SSRFBlockedError, guarded_post, safe_get, safe_post
 from app.services.secrets import get_secret
 
 logger = logging.getLogger(__name__)
@@ -230,7 +228,7 @@ def _call_streamable_http(server: Any, method: str, params: dict | None = None, 
                 headers["Mcp-Session-Id"] = session_id
 
         body = _jsonrpc_request(method, params)
-        resp = httpx.post(
+        resp = guarded_post(
             server.endpoint_url,
             json=body,
             headers=headers,
@@ -246,6 +244,9 @@ def _call_streamable_http(server: Any, method: str, params: dict | None = None, 
             return _parse_sse_response(resp.text)
         else:
             return resp.json()
+    except SSRFBlockedError as e:
+        logger.warning("Blocked MCP endpoint %s: %s", server.endpoint_url, e)
+        return None
     except Exception as e:
         logger.error("Streamable HTTP call to %s failed: %s", server.endpoint_url, e)
         return None
@@ -260,7 +261,7 @@ def _initialize_session(server: Any, headers: dict[str, str]) -> str | None:
     })
 
     try:
-        resp = httpx.post(
+        resp = guarded_post(
             server.endpoint_url,
             json=init_body,
             headers=headers,
@@ -287,7 +288,7 @@ def _call_sse(server: Any, method: str, params: dict | None = None, api_key: str
     body = _jsonrpc_request(method, params)
 
     try:
-        resp = httpx.post(
+        resp = guarded_post(
             server.endpoint_url,
             json=body,
             headers=headers,
@@ -300,6 +301,9 @@ def _call_sse(server: Any, method: str, params: dict | None = None, api_key: str
             return _parse_sse_response(resp.text)
         else:
             return resp.json()
+    except SSRFBlockedError as e:
+        logger.warning("Blocked MCP endpoint %s: %s", server.endpoint_url, e)
+        return None
     except Exception as e:
         logger.error("SSE call to %s failed: %s", server.endpoint_url, e)
         return None

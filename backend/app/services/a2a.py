@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from app.services.net_guard import SSRFBlockedError, safe_get, safe_post
+from app.services.net_guard import SSRFBlockedError, guarded_get, safe_get, safe_post
 
 logger = logging.getLogger(__name__)
 
@@ -97,16 +97,18 @@ def _fetch_salesforce_agent_card(base_url: str, headers: dict[str, str]) -> dict
     """
     url = base_url + "/v1/card"
     try:
-        resp = httpx.get(url, headers=headers, timeout=A2A_REQUEST_TIMEOUT, follow_redirects=True)
+        resp = guarded_get(url, headers=headers, timeout=A2A_REQUEST_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
+    except SSRFBlockedError as e:
+        raise ValueError(f"Blocked Salesforce Agent Card URL: {e}") from e
     except httpx.HTTPStatusError as e:
         status_code = e.response.status_code
         friendly = {
             401: "authentication required — check OAuth2 credentials",
             403: "access denied — check OAuth2 credentials and scopes",
         }
-        detail = friendly.get(status_code, e.response.text[:200])
+        detail = friendly.get(status_code, "the remote server returned an error")
         raise ValueError(f"Salesforce Agent Card fetch failed (HTTP {status_code}): {detail}") from e
     except httpx.ConnectError as e:
         raise ValueError(f"Cannot connect to {base_url} — verify the URL is correct") from e
@@ -146,9 +148,11 @@ def fetch_agent_card(base_url: str, auth_headers: dict[str, str] | None = None) 
     for path in paths:
         url = stripped + path
         try:
-            resp = httpx.get(url, headers=headers, timeout=A2A_REQUEST_TIMEOUT, follow_redirects=True)
+            resp = guarded_get(url, headers=headers, timeout=A2A_REQUEST_TIMEOUT)
             resp.raise_for_status()
             break
+        except SSRFBlockedError as e:
+            raise ValueError(f"Blocked Agent Card URL: {e}") from e
         except httpx.HTTPStatusError as e:
             last_error = e
             status = e.response.status_code
@@ -163,7 +167,7 @@ def fetch_agent_card(base_url: str, auth_headers: dict[str, str] | None = None) 
                 502: "bad gateway — the remote server may be down",
                 503: "the remote server is unavailable",
             }
-            detail = friendly.get(status, e.response.text[:200])
+            detail = friendly.get(status, "the remote server returned an error")
             raise ValueError(f"Agent Card fetch failed (HTTP {status}): {detail}") from e
         except httpx.ConnectError as e:
             raise ValueError(f"Cannot connect to {base_url} — verify the URL is correct and the server is running") from e

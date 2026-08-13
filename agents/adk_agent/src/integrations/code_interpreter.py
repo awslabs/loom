@@ -50,6 +50,19 @@ class AgentCoreCodeInterpreterTools:
         self.identifier = identifier or "aws.codeinterpreter.v1"
         self.default_session = f"session-{uuid.uuid4().hex[:12]}"
 
+    @staticmethod
+    def _drain_response(response: dict[str, Any]) -> dict[str, Any]:
+        """Consume ``response["stream"]`` (a ``botocore.eventstream.EventStream``,
+        not JSON/Pydantic serializable) into a plain dict, matching Strands'
+        ``AgentCoreCodeInterpreter._create_tool_result`` behavior.
+        """
+        if "stream" not in response:
+            return response
+        for event in response["stream"]:
+            if "result" in event:
+                return event["result"]
+        return {"content": []}
+
     def _ensure_session(self, session_name: Optional[str]) -> _CodeInterpreterClient:
         """Return a started client for the given (or default) session name,
         creating or reconnecting to it as needed.
@@ -86,19 +99,21 @@ class AgentCoreCodeInterpreterTools:
         ) -> dict[str, Any]:
             """Execute code in a persistent sandboxed session and return its output."""
             client = self._ensure_session(None)
-            return client.execute_code(code=code, language=language, clear_context=clear_context)
+            return self._drain_response(client.execute_code(code=code, language=language, clear_context=clear_context))
 
         def code_interpreter_execute_command(command: str, tool_context: ToolContext) -> dict[str, Any]:
             """Execute a shell command in the sandboxed session and return its output."""
             client = self._ensure_session(None)
-            return client.execute_command(command=command)
+            return self._drain_response(client.execute_command(command=command))
 
         def code_interpreter_write_files(
             files: list[dict[str, str]], tool_context: ToolContext
         ) -> dict[str, Any]:
             """Write one or more files into the sandbox. Each entry needs 'path' and 'content'."""
             client = self._ensure_session(None)
-            return client.upload_files([{"path": f["path"], "content": f["content"]} for f in files])
+            return self._drain_response(
+                client.upload_files([{"path": f["path"], "content": f["content"]} for f in files])
+            )
 
         def code_interpreter_read_files(paths: list[str], tool_context: ToolContext) -> dict[str, Any]:
             """Read one or more files from the sandbox by path."""
@@ -108,12 +123,12 @@ class AgentCoreCodeInterpreterTools:
         def code_interpreter_list_files(path: str, tool_context: ToolContext) -> dict[str, Any]:
             """List files in a sandbox directory."""
             client = self._ensure_session(None)
-            return client.invoke("listFiles", {"path": path})
+            return self._drain_response(client.invoke("listFiles", {"path": path}))
 
         def code_interpreter_remove_files(paths: list[str], tool_context: ToolContext) -> dict[str, Any]:
             """Remove one or more files from the sandbox by path."""
             client = self._ensure_session(None)
-            return client.invoke("removeFiles", {"paths": paths})
+            return self._drain_response(client.invoke("removeFiles", {"paths": paths}))
 
         return [
             FunctionTool(code_interpreter_execute_code),

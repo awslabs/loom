@@ -213,6 +213,28 @@ class TestCodeInterpreterTools(unittest.TestCase):
         list_tool.func(path="/", tool_context=MagicMock())
         mock_client.invoke.assert_called_once_with("listFiles", {"path": "/"})
 
+    @patch("src.integrations.code_interpreter._CodeInterpreterClient")
+    def test_execute_code_tool_drains_event_stream(self, mock_client_cls: MagicMock) -> None:
+        """client.execute_code() (via invoke()) can return a raw botocore
+        EventStream under "stream" — must be drained to a plain dict before
+        it reaches ADK's Pydantic-based tool-result serialization."""
+        mock_client = MagicMock()
+        mock_client.session_id = "s1"
+
+        def _fake_stream():
+            yield {"result": {"content": [{"type": "text", "text": "hi"}]}}
+
+        mock_client.execute_code.return_value = {"stream": _fake_stream()}
+        mock_client_cls.return_value = mock_client
+
+        tools = AgentCoreCodeInterpreterTools(region="us-east-1")
+        function_tools = tools.build_tools()
+        execute_code_tool = next(t for t in function_tools if t.name == "code_interpreter_execute_code")
+
+        result = execute_code_tool.func(code="print(1)", tool_context=MagicMock(), language="python")
+        self.assertEqual(result, {"content": [{"type": "text", "text": "hi"}]})
+        self.assertNotIn("stream", result)
+
 
 if __name__ == "__main__":
     unittest.main()

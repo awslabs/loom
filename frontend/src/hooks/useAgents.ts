@@ -6,6 +6,13 @@ import { toast } from "sonner";
 
 const POLL_INTERVAL_MS = 2000;
 
+// AgentCore can transiently report a runtime as FAILED while it finishes
+// validating an external authorizer's OIDC discovery/JWKS endpoint (e.g.
+// Okta), settling to READY moments later. Require this many consecutive
+// FAILED polls before treating the failure as confirmed, so a single flaky
+// read doesn't surface a false failure to the user.
+const FAILURE_CONFIRM_THRESHOLD = 3;
+
 const DEPLOY_IN_PROGRESS = new Set([
   "initializing",
   "creating_credentials",
@@ -36,6 +43,7 @@ export function useAgents() {
   const [deleteStartTimes, setDeleteStartTimes] = useState<Record<number, number>>({});
   const [updateStartTimes, setUpdateStartTimes] = useState<Record<number, number>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const failureCountsRef = useRef<Record<number, number>>({});
 
   const initialLoadDone = useRef(false);
 
@@ -91,11 +99,32 @@ export function useAgents() {
       for (const agent of toWatch) {
         try {
           const updated = await agentsApi.fetchAgentStatus(agent.id);
+
+          const wasAlreadyFailed = agent.status === "FAILED" || agent.status === "CREATE_FAILED";
+          const looksFailed = updated.status === "FAILED" || updated.status === "CREATE_FAILED";
+
+          let toApply = updated;
+          if (looksFailed && !wasAlreadyFailed) {
+            const count = (failureCountsRef.current[agent.id] ?? 0) + 1;
+            failureCountsRef.current[agent.id] = count;
+            if (count < FAILURE_CONFIRM_THRESHOLD) {
+              // Not confirmed yet — AgentCore can transiently report FAILED
+              // while an external authorizer's discovery/JWKS endpoint is
+              // still being validated. Keep showing the prior in-progress
+              // status and poll again rather than flashing a false failure.
+              toApply = { ...updated, status: agent.status, status_reason: agent.status_reason };
+            } else {
+              delete failureCountsRef.current[agent.id];
+            }
+          } else {
+            delete failureCountsRef.current[agent.id];
+          }
+
           setAgents((prev) =>
-            prev.map((a) => (a.id === updated.id ? updated : a)),
+            prev.map((a) => (a.id === toApply.id ? toApply : a)),
           );
           // Clear update start time once the agent leaves UPDATING
-          if (agent.status === "UPDATING" && updated.status !== "UPDATING") {
+          if (agent.status === "UPDATING" && toApply.status !== "UPDATING") {
             setUpdateStartTimes((prev) => {
               const next = { ...prev };
               delete next[agent.id];

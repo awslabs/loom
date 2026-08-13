@@ -1,6 +1,7 @@
 """Dynamic MCP tool client creation from agent configuration."""
 
 import base64
+import hashlib
 import json as _json
 import logging
 import os
@@ -111,6 +112,11 @@ class TokenInfoHook(HookProvider):
             event.result = {**result, "content": clean_content}
 
 
+def _token_fingerprint(token: str) -> str:
+    """Non-reversible identifier for a token, safe to log (unlike a raw prefix)."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
 def _decode_jwt_claims(token: str) -> dict[str, Any] | None:
     """Decode JWT payload without verification (for inspection only)."""
     try:
@@ -168,8 +174,8 @@ class _OAuth2Auth(httpx.Auth):
             yield request
             return
         logger.info(
-            "Workload token for '%s': prefix=%s len=%d",
-            self._credential_provider_name, workload_token[:50], len(workload_token),
+            "Workload token for '%s': fingerprint=%s len=%d",
+            self._credential_provider_name, _token_fingerprint(workload_token), len(workload_token),
         )
 
         token = self._fetch_resource_token(workload_token)

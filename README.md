@@ -94,7 +94,7 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 - Estimated cost column in agent and memory table views; consistent 5-column layout for MCP and A2A tables
 - Drag-to-reorder cards with persistent ordering
 - JSON import/export on deploy and create forms
-- 10 color themes (5 light, 5 dark) with WCAG AA contrast compliance, and timezone-aware timestamps
+- Two themes (light, dark) with WCAG AA contrast compliance, and timezone-aware timestamps
 
 ## Project Structure
 

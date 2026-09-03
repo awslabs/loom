@@ -8,7 +8,7 @@
 | Build tool | Vite 6 |
 | UI components | shadcn/ui (Radix primitives) |
 | Styling | Tailwind CSS v4 (Vite plugin, no PostCSS) |
-| Theme | 10 themes: 5 light + 5 dark (Ayu Light, Catppuccin Latte, Everforest, Rosé Pine Dawn, Solarized, Ayu Dark, Catppuccin Mocha, Dracula, Nord, Tokyo Night) |
+| Theme | 2 themes: light (cool neutral gray, blue accent) and dark (matching dark neutrals) |
 | HTTP client | Native `fetch` (typed wrappers in `src/api/client.ts`, dynamic `VITE_API_BASE_URL` with nullish coalescing fallback) |
 | SSE streaming | `fetch` + `ReadableStream` (POST-based SSE) |
 | Notifications | Sonner (toast) |
@@ -39,7 +39,7 @@ frontend/
 │   ├── contexts/
 │   │   ├── AuthContext.tsx      # Cognito auth provider (login, logout, token refresh, browserSessionId generation and login audit)
 │   │   ├── TimezoneContext.tsx  # Timezone preference provider + hook
-│   │   └── ThemeContext.tsx     # Theme provider with 10 themes, localStorage persistence, WCAG-compliant contrast
+│   │   └── ThemeContext.tsx     # Theme provider with light/dark themes, localStorage persistence, WCAG-compliant contrast
 │   ├── hooks/
 │   │   ├── useAgents.ts        # Agent list state + CRUD actions
 │   │   ├── useSessions.ts      # Session list state per agent
@@ -99,7 +99,7 @@ frontend/
 │   │   └── errors.ts           # Friendly invoke error message mapping
 │   ├── App.tsx                 # Auth gate + persona-based navigation + sidebar
 │   ├── main.tsx                # Entry point
-│   └── index.css               # Tailwind v4 imports + Catppuccin CSS variables
+│   └── index.css               # Tailwind v4 imports + light/dark theme CSS variables
 ├── index.html
 ├── package.json
 ├── tsconfig.json
@@ -601,18 +601,18 @@ The delete confirmation uses absolute positioning (`absolute inset-x-0 bottom-0`
 Model selection uses `SearchableSelect` with group headers sorted alphabetically by vendor (Anthropic, Amazon, DeepSeek, Google, Meta, MiniMax, Moonshot AI). The `groupModels()` utility in `src/lib/models.ts` groups `ModelOption[]` by `group` field and returns sorted `[string, ModelOption[]][]` tuples. Search matches both display name and model ID value, allowing power users to search by inference profile ID. No default is pre-selected — the user must explicitly choose a model on both register and deploy forms.
 
 ### Theme System
-10 themes organized into Light and Dark groups:
-- **Light:** Ayu Light (white + blue), Catppuccin Latte (cool blue-gray, default), Everforest Light (warm green), Rosé Pine Dawn (warm rose), Solarized Light (warm yellow-blue)
-- **Dark:** Ayu Dark (dark blue), Catppuccin Mocha (deep purple-blue), Dracula (vibrant purple), Nord (arctic blue), Tokyo Night (indigo blue)
+Two themes (issue #37 reduced this from an earlier 10-theme set — Ayu, Catppuccin, Dracula, Everforest, Nord, Rosé Pine, Solarized, Tokyo Night — down to one light and one dark theme, both a cool-neutral-gray palette with a blue accent, closer to the restrained aesthetic of Claude's own product design):
+- **Light:** background `#fafafa`, card `#ffffff`, foreground `#18181b`, accent `#3b82f6`
+- **Dark:** background `#18181b`, card `#27272a`, foreground `#e4e4e7`, accent `#60a5fa`
 
-ThemeContext manages theme state with localStorage persistence. Latte uses `:root` variables (no class); all other themes use CSS class selectors on `<html>`. The `@custom-variant dark` includes all dark theme classes (`dark`, `dracula`, `ayudark`, `nord`, `tokyonight`). Badge `default` and `secondary` variants include `border-border` for visibility across all themes.
+`ThemeContext` manages theme state (`Theme = "light" | "dark"`) with `localStorage` persistence (`loom-theme` key). Light applies via `:root` (no class); dark applies via a `.dark` class on `<html>`, matching Tailwind's default dark-mode convention (`@custom-variant dark (&:is(.dark *))`). A single sun/moon toggle button (in `App.tsx`'s sidebar footer and the equivalent spot in `ChatPage.tsx`) replaces the old grouped Light/Dark theme-picker dropdown, since there's no longer a choice to make within either mode. Badge `default` and `secondary` variants include `border-border` for visibility across both themes.
 
 **WCAG Accessibility Compliance:**
-All themes target WCAG 2.1 AA or better:
+Both themes target WCAG 2.1 AA or better:
 - Text contrast (`--foreground`, `--muted-foreground`): ≥ 4.5:1 against their background surface
 - Border contrast (`--border`): ≥ 3:1 against adjacent surfaces
 
-Light theme card backgrounds are set to significantly darker surface values (e.g., Latte uses Catppuccin `surface0 #ccd0da` as card, vs. the `base #eff1f5` background) so cards are visually distinct from the page. Dark theme `--muted-foreground` and `--border` values are lightened relative to prior values to satisfy contrast thresholds on dark surfaces.
+Card backgrounds are distinct from page background in both themes (light: `#ffffff` card vs. `#fafafa` background; dark: `#27272a` card vs. `#18181b` background) so cards remain visually distinct from the page without needing a separate elevation/shadow system.
 
 ### Drag-to-Reorder Card Grid with Alphabetical Sorting
 `SortableCardGrid` uses @dnd-kit/core + @dnd-kit/sortable for drag-and-drop reordering of cards within grid sections. Order is persisted to localStorage keyed by `storageKey`. Uses `PointerSensor` with 8px activation distance, `rectSortingStrategy`, and `closestCenter` collision detection.

@@ -35,7 +35,7 @@ make preview
 | Build | Vite 6 |
 | UI | shadcn/ui (Radix primitives) |
 | Styling | Tailwind CSS v4 |
-| Theme | 10 themes (5 light + 5 dark) — see Settings |
+| Theme | 2 themes (light, dark) — sun/moon toggle in sidebar footer |
 | Streaming | `fetch` + `ReadableStream` (POST-based SSE) |
 | Notifications | Sonner |
 
@@ -43,12 +43,7 @@ make preview
 
 ### Theme
 
-The app supports 10 color themes, managed by `ThemeContext` with localStorage persistence:
-
-- **Light:** Ayu Light, Catppuccin Latte (default), Everforest Light, Rosé Pine Dawn, Solarized Light
-- **Dark:** Ayu Dark, Catppuccin Mocha, Dracula, Nord, Tokyo Night
-
-Theme and timezone preferences are configured on the Settings page. Colors are mapped to shadcn CSS variables in `src/index.css` using CSS class selectors per theme.
+The app supports two themes — light and dark — managed by `ThemeContext` with `localStorage` persistence (`loom-theme` key). A sun/moon toggle button in the sidebar footer (and the equivalent spot in the end-user `ChatPage` layout) switches between them; timezone preference is configured on the Settings page. Colors are mapped to shadcn CSS variables in `src/index.css`, with the dark theme applied via a `.dark` class on `<html>`.
 
 ### Persona-Based Navigation
 
@@ -96,7 +91,7 @@ src/
 │   ├── identity_providers.ts  # Identity provider CRUD, OIDC discovery, test
 │   └── types.ts       # TypeScript interfaces mirroring backend models
 ├── contexts/     # React contexts (auth, timezone preference)
-│   ├── ThemeContext.tsx   # Theme provider with 10 themes and localStorage persistence
+│   ├── ThemeContext.tsx   # Theme provider (light/dark) with localStorage persistence
 ├── hooks/        # Custom React hooks for data fetching
 │   ├── useA2aAgents.ts   # A2A agent list with auto-fetch, CRUD
 │   ├── useRegistry.ts    # Registry records with filtering and search

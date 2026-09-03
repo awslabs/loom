@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { Send, Plus, Brain, LogOut, Bot, User, X, Loader2, Palette, RefreshCw, ChevronDown, Wrench, Plug, KeyRound, Unplug, Link2, UserCheck, AlertTriangle } from "lucide-react";
+import { Send, Plus, Brain, LogOut, Bot, User, X, Loader2, Sun, Moon, RefreshCw, ChevronDown, Wrench, Plug, KeyRound, Unplug, Link2, UserCheck, AlertTriangle } from "lucide-react";
 import { ApprovalRequestBubble } from "@/components/ApprovalDialog";
 import { ElicitationRequestBubble } from "@/components/ElicitationDialog";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,7 @@ import { listMemories, getMemoryRecords } from "@/api/memories";
 import { trackAction } from "@/api/audit";
 import { useInvoke, clearInvokeState, sendElicitationResponse, type StreamSegment } from "@/hooks/useInvoke";
 import { useAuth } from "@/contexts/AuthContext";
-import { useTheme, isLightTheme, THEME_LABELS, type Theme } from "@/contexts/ThemeContext";
+import { useTheme, isLightTheme } from "@/contexts/ThemeContext";
 import { listConnectors, setUserApiKey, deleteUserApiKey } from "@/api/mcp";
 import { listAuthorizerConfigs, checkAuthorizerLinkStatus, getAuthorizerLinkAuthorizeUrl, submitAuthorizerLinkCallback, deleteAuthorizerLink } from "@/api/security";
 import { Input } from "@/components/ui/input";
@@ -39,7 +39,7 @@ interface ChatPageProps {
 
 export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: ChatPageProps) {
   const { user, browserSessionId, authConfig: loginAuthConfig } = useAuth();
-  const { theme, setTheme } = useTheme();
+  const { theme, toggleTheme } = useTheme();
 
   const userGroupNames = userGroups
     .filter((g) => g.startsWith("g-users-"))
@@ -58,19 +58,6 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
   // Agent list search/sort
   const [agentSearch, setAgentSearch] = useState("");
   const [agentSort, setAgentSort] = useState<"asc" | "desc">("asc");
-  const [showThemePicker, setShowThemePicker] = useState(false);
-  const themePickerRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!showThemePicker) return;
-    function handleClickOutside(e: MouseEvent) {
-      if (themePickerRef.current && !themePickerRef.current.contains(e.target as Node)) {
-        setShowThemePicker(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [showThemePicker]);
-
   // Session state
   const [sessions, setSessions] = useState<SessionResponse[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -951,53 +938,13 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
                 </span>
               </div>
               <div className="flex items-center gap-1">
-                <div className="relative" ref={themePickerRef}>
-                  <button
-                    onClick={() => setShowThemePicker((v) => !v)}
-                    className="text-muted-foreground hover:text-foreground transition-colors"
-                    title="Change theme"
-                  >
-                    <Palette className="h-3.5 w-3.5" />
-                  </button>
-                  {showThemePicker && (
-                    <div className="absolute bottom-6 right-0 z-50 w-44 rounded border bg-white shadow-md py-1">
-                      <div className="px-3 py-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Light</div>
-                      {(Object.entries(THEME_LABELS) as [Theme, string][])
-                        .filter(([k]) => isLightTheme(k as Theme))
-                        .map(([k, v]) => (
-                          <button
-                            key={k}
-                            onClick={() => {
-                              setTheme(k);
-                              setShowThemePicker(false);
-                            }}
-                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors hover:bg-gray-100 text-gray-700 ${
-                              theme === k ? "font-bold" : ""
-                            }`}
-                          >
-                            {v}
-                          </button>
-                        ))}
-                      <div className="px-3 py-1 mt-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-t border-gray-100">Dark</div>
-                      {(Object.entries(THEME_LABELS) as [Theme, string][])
-                        .filter(([k]) => !isLightTheme(k as Theme))
-                        .map(([k, v]) => (
-                          <button
-                            key={k}
-                            onClick={() => {
-                              setTheme(k);
-                              setShowThemePicker(false);
-                            }}
-                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors hover:bg-gray-100 text-gray-700 ${
-                              theme === k ? "font-bold" : ""
-                            }`}
-                          >
-                            {v}
-                          </button>
-                        ))}
-                    </div>
-                  )}
-                </div>
+                <button
+                  onClick={toggleTheme}
+                  className="text-muted-foreground hover:text-foreground transition-colors"
+                  title="Change theme"
+                >
+                  {theme === "light" ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
+                </button>
                 <button
                   onClick={onLogout}
                   className="text-muted-foreground hover:text-foreground transition-colors"

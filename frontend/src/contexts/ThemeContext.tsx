@@ -1,61 +1,33 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
 
-export type Theme = "ayu" | "latte" | "dracula" | "everforest" | "ayudark" | "mocha" | "nord" | "rosepine" | "solarized" | "tokyonight";
+export type Theme = "light" | "dark";
 
 export const THEME_LABELS: Record<Theme, string> = {
-  ayu: "Ayu Light",
-  latte: "Catppuccin Latte",
-  everforest: "Everforest Light",
-  rosepine: "Rosé Pine Dawn",
-  solarized: "Solarized Light",
-  ayudark: "Ayu Dark",
-  mocha: "Catppuccin Mocha",
-  dracula: "Dracula",
-  nord: "Nord",
-  tokyonight: "Tokyo Night",
-};
-
-const THEME_CLASSES: Record<Theme, string | null> = {
-  ayu: "ayu",
-  latte: null,
-  dracula: "dracula",
-  everforest: "everforest",
-  ayudark: "ayudark",
-  mocha: "dark",
-  nord: "nord",
-  rosepine: "rosepine",
-  solarized: "solarized",
-  tokyonight: "tokyonight",
+  light: "Light",
+  dark: "Dark",
 };
 
 export function isLightTheme(theme: Theme): boolean {
-  return theme === "ayu" || theme === "latte" || theme === "rosepine" || theme === "everforest" || theme === "solarized";
+  return theme === "light";
 }
 
 interface ThemeContextValue {
   theme: Theme;
   setTheme: (t: Theme) => void;
+  toggleTheme: () => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue>({
-  theme: "ayu",
+  theme: "light",
   setTheme: () => {},
+  toggleTheme: () => {},
 });
 
 function detectInitialTheme(): Theme {
-  const stored = localStorage.getItem("loom-theme") as Theme | null;
-  if (stored && stored in THEME_CLASSES) return stored;
-  const el = document.documentElement;
-  if (el.classList.contains("ayu")) return "ayu";
-  if (el.classList.contains("dark")) return "mocha";
-  if (el.classList.contains("dracula")) return "dracula";
-  if (el.classList.contains("everforest")) return "everforest";
-  if (el.classList.contains("ayudark")) return "ayudark";
-  if (el.classList.contains("nord")) return "nord";
-  if (el.classList.contains("rosepine")) return "rosepine";
-  if (el.classList.contains("solarized")) return "solarized";
-  if (el.classList.contains("tokyonight")) return "tokyonight";
-  return "ayu";
+  const stored = localStorage.getItem("loom-theme");
+  if (stored === "light" || stored === "dark") return stored;
+  if (document.documentElement.classList.contains("dark")) return "dark";
+  return "light";
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
@@ -63,14 +35,14 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const el = document.documentElement;
-    el.classList.remove("ayu", "dark", "dracula", "everforest", "ayudark", "nord", "rosepine", "solarized", "tokyonight");
-    const cls = THEME_CLASSES[theme];
-    if (cls) el.classList.add(cls);
+    el.classList.toggle("dark", theme === "dark");
     localStorage.setItem("loom-theme", theme);
   }, [theme]);
 
+  const toggleTheme = () => setThemeState((t) => (t === "light" ? "dark" : "light"));
+
   return (
-    <ThemeContext.Provider value={{ theme, setTheme: setThemeState }}>
+    <ThemeContext.Provider value={{ theme, setTheme: setThemeState, toggleTheme }}>
       {children}
     </ThemeContext.Provider>
   );

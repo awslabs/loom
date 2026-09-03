@@ -167,7 +167,7 @@ export function RoleManagementPanel({ readOnly }: { readOnly?: boolean }) {
                   >
                     {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                     {label}
-                    <span className="ml-1 inline-flex items-center justify-center rounded-full bg-white text-foreground border text-[10px] font-normal px-1.5 min-w-[1.25rem] h-4">
+                    <span className="ml-1 inline-flex items-center justify-center rounded-full bg-background text-foreground border text-[10px] font-normal px-1.5 min-w-[1.25rem] h-4">
                       {group.length}
                     </span>
                   </button>

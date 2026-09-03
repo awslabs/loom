@@ -463,14 +463,14 @@ export function TraceGraph({ trace, loading }: TraceGraphProps) {
                       )}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <Badge variant="outline" className="text-[9px] px-1.5 py-0 shrink-0 bg-white dark:bg-zinc-900">
+                          <Badge variant="outline" className="text-[9px] px-1.5 py-0 shrink-0 bg-white dark:bg-card">
                             Event {fe.globalIndex + 1}
                           </Badge>
                           <span className="text-xs text-foreground truncate">{summary}</span>
                           <span className={`ml-auto shrink-0 text-[10px] font-mono px-1.5 py-0 rounded border ${
                             isSlowest
                               ? "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-700"
-                              : "bg-white dark:bg-zinc-900 text-muted-foreground border-border"
+                              : "bg-white dark:bg-card text-muted-foreground border-border"
                           }`}>
                             {formatDuration(fe.duration_ms)}
                           </span>

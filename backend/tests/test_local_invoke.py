@@ -19,6 +19,7 @@ from app.services.local_agents import (
 )
 from app.services.local_invoke import (
     build_chat_messages,
+    enrich_mcp_servers_for_runtime,
     extract_completion_text,
     parse_openai_sse_line,
     resolve_local_model_id,
@@ -82,6 +83,21 @@ class TestLocalInvokeHelpers(unittest.TestCase):
         )
         agent.config_entries = []
         self.assertEqual(resolve_local_model_id(agent, "cursor-local"), "cursor-local")
+
+    def test_enrich_injects_mcp_runtime_token(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"MCP_RUNTIME_TOKEN": "svc-token"},
+            clear=False,
+        ):
+            out = enrich_mcp_servers_for_runtime([
+                {
+                    "name": "ado",
+                    "endpoint_url": "http://mcp-runtime:8787/v1/servers/ado/mcp",
+                    "auth": {"type": "service_bearer"},
+                }
+            ])
+        self.assertEqual(out[0]["auth"]["token"], "svc-token")
 
 
 class TestLocalDemoAgentSeed(unittest.TestCase):
@@ -185,9 +201,9 @@ class TestLocalInvokeEndpoint(unittest.TestCase):
 
     def test_local_invoke_streams_litellm_chunks(self) -> None:
         async def fake_stream(**kwargs):
-            yield "Olá, sou o Orientador Acadêmico"
+            yield "Ola, sou o Orientador Academico"
 
-        with patch(
+        with patch.dict("os.environ", {"AGENT_RUNTIME_URL": ""}, clear=False), patch(
             "app.services.local_invoke.get_litellm_proxy_config",
             return_value=("http://litellm:4000", "sk-test"),
         ), patch(
@@ -202,11 +218,11 @@ class TestLocalInvokeEndpoint(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("event: session_start", response.text)
         self.assertIn("event: chunk", response.text)
-        self.assertIn("Orientador Acadêmico", response.text)
+        self.assertIn("Orientador Academico", response.text)
         self.assertIn("event: session_end", response.text)
 
     def test_local_invoke_errors_when_proxy_missing(self) -> None:
-        with patch(
+        with patch.dict("os.environ", {"AGENT_RUNTIME_URL": ""}, clear=False), patch(
             "app.services.local_invoke.get_litellm_proxy_config",
             return_value=None,
         ):
@@ -218,3 +234,31 @@ class TestLocalInvokeEndpoint(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("event: error", response.text)
         self.assertIn("LiteLLM proxy is not configured", response.text)
+
+    def test_local_invoke_proxies_agent_runtime_sse(self) -> None:
+        async def fake_proxy(*, payload):
+            self.assertEqual(payload["contract_version"], "2026-09-local-1")
+            self.assertEqual(payload["prompt"], "oi")
+            yield "event: session_start\ndata: {\"session_id\":\"s\"}\n\n"
+            yield "event: chunk\ndata: {\"text\":\"via runtime\"}\n\n"
+            yield "event: session_end\ndata: {\"session_id\":\"s\"}\n\n"
+
+        with patch.dict(
+            "os.environ",
+            {
+                "AGENT_RUNTIME_URL": "http://agent-runtime:8766",
+                "AGENT_RUNTIME_TOKEN": "tok",
+            },
+            clear=False,
+        ), patch(
+            "app.services.local_invoke._proxy_agent_runtime_sse",
+            new=fake_proxy,
+        ):
+            response = self.client.post(
+                f"/api/agents/{self.agent.id}/invoke",
+                json={"prompt": "oi", "qualifier": "DEFAULT"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("via runtime", response.text)
+        self.assertIn("event: session_end", response.text)

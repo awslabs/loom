@@ -14,7 +14,7 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
         <h1 className="text-2xl font-semibold tracking-tight">Local runtime</h1>
         <p className="text-sm text-muted-foreground mt-1">
           Extension plugin (ADR 0006). UI runs inside the Loom shell; compute runs in
-          apart backends under <code className="text-xs">local-runtime/services/</code>.
+          separate backends under <code className="text-xs">local-runtime/services/</code>.
         </p>
       </div>
 
@@ -30,8 +30,9 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
             (:8765).
           </li>
           <li>
-            <strong className="text-foreground">agent-runtime</strong> — deferred (ADR 0005).
-            Local invoke still uses the Loom LiteLLM shortcut until this ships.
+            <strong className="text-foreground">agent-runtime</strong> — local tool loop
+            (:8766). Chat <code className="text-xs">source=local</code> invokes via
+            <code className="text-xs"> AGENT_RUNTIME_URL</code> (BFF in Loom).
           </li>
         </ul>
       </section>
@@ -40,9 +41,10 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
         <h2 className="font-medium">What to use where</h2>
         <p className="text-muted-foreground">
           Register and refresh Azure DevOps (and other stdio) MCP servers under{" "}
-          <strong className="text-foreground">Integrations → MCP</strong>. That catalog
-          still lives in Loom for now; this page is the extension home and will grow
-          ops/forms as they move out of core.
+          <strong className="text-foreground">Integrations → MCP</strong>, grant{" "}
+          <code className="text-xs">McpServerAccess</code> to Orientador, enable the
+          connector in Chat, then prompt. The agent-runtime loads tools over the
+          mcp-runtime HTTP facade.
         </p>
         <p className="text-muted-foreground">
           Access: {canRead ? "mcp:read" : "no mcp:read"}

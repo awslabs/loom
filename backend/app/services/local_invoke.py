@@ -1,12 +1,17 @@
-"""Local-dev invoke path: Loom backend → LiteLLM proxy (not AgentCore).
+"""Local-dev invoke path: Loom backend → agent-runtime (or LiteLLM fallback).
 
 Only agents with source='local' use this. Deployed/harness/register agents
 keep the existing AgentCore runtime path.
+
+When AGENT_RUNTIME_URL is set, the backend is a BFF: it authorizes, mounts the
+spec-011 payload, and proxies SSE from agent-runtime. Otherwise it keeps the
+legacy in-process LiteLLM shortcut (no MCP tools).
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from typing import Any, AsyncGenerator
 
@@ -20,9 +25,11 @@ from app.services.litellm import get_litellm_proxy_config
 
 logger = logging.getLogger(__name__)
 
+CONTRACT_VERSION = "2026-09-local-1"
+
 
 class LocalInvokeError(Exception):
-    """LiteLLM proxy is missing or rejected the completion request."""
+    """LiteLLM proxy / agent-runtime is missing or rejected the request."""
 
 
 def format_sse_event(event: str, data: dict) -> str:
@@ -31,6 +38,18 @@ def format_sse_event(event: str, data: dict) -> str:
 
 def is_local_agent(agent: Agent) -> bool:
     return (agent.source or "") == "local"
+
+
+def agent_runtime_base_url() -> str:
+    return os.getenv("AGENT_RUNTIME_URL", "").strip().rstrip("/")
+
+
+def agent_runtime_token() -> str:
+    return os.getenv("AGENT_RUNTIME_TOKEN", "").strip()
+
+
+def mcp_runtime_token() -> str:
+    return os.getenv("MCP_RUNTIME_TOKEN", "").strip()
 
 
 def _agent_config(agent: Agent) -> dict[str, Any]:
@@ -103,6 +122,27 @@ def extract_completion_text(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def enrich_mcp_servers_for_runtime(servers: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Attach service bearer for mcp-runtime facades; never send user JWT."""
+    token = mcp_runtime_token()
+    enriched: list[dict[str, Any]] = []
+    for server in servers or []:
+        entry = dict(server)
+        auth = dict(entry.get("auth") or {})
+        url = str(entry.get("endpoint_url") or "")
+        auth_type = (auth.get("type") or "").lower()
+        needs_runtime_token = (
+            "mcp-runtime" in url
+            or auth_type in ("service_bearer", "loom")
+        )
+        if needs_runtime_token and token:
+            entry["auth"] = {"type": "service_bearer", "token": token}
+        elif auth:
+            entry["auth"] = auth
+        enriched.append(entry)
+    return enriched
+
+
 async def stream_litellm_text(
     *,
     base_url: str,
@@ -159,6 +199,35 @@ async def stream_litellm_text(
         yield text
 
 
+async def _proxy_agent_runtime_sse(
+    *,
+    payload: dict[str, Any],
+) -> AsyncGenerator[str, None]:
+    base = agent_runtime_base_url()
+    token = agent_runtime_token()
+    if not base:
+        raise LocalInvokeError("AGENT_RUNTIME_URL is not configured")
+    if not token:
+        raise LocalInvokeError("AGENT_RUNTIME_TOKEN is not configured")
+    url = f"{base}/v1/invoke"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+    timeout = httpx.Timeout(float((payload.get("options") or {}).get("timeout_s") or 300) + 30.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, headers=headers, json=payload) as response:
+            if response.status_code >= 400:
+                body = (await response.aread()).decode("utf-8", errors="replace")
+                raise LocalInvokeError(
+                    f"agent-runtime HTTP {response.status_code}: {body[:500]}"
+                )
+            async for line in response.aiter_lines():
+                # Re-emit SSE lines; blank line ends an event.
+                yield line + "\n"
+
+
 async def invoke_local_agent_stream(
     agent: Agent,
     session: InvocationSession,
@@ -167,8 +236,10 @@ async def invoke_local_agent_stream(
     client_invoke_time: float,
     prompt: str,
     runtime_model_id: str | None = None,
+    dynamic_mcp_servers: list[dict[str, Any]] | None = None,
+    subject: str | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Yield the same SSE events as AgentCore invoke: session_start, chunk, session_end."""
+    """Yield SSE events: session_start, chunk, session_end (or error)."""
     session_id = session.session_id
     invocation_id = invocation.invocation_id
     invocation.client_invoke_time = client_invoke_time
@@ -176,6 +247,81 @@ async def invoke_local_agent_stream(
     session.status = "streaming"
     db.commit()
 
+    # Prefer agent-runtime BFF when configured (ADR 0005).
+    if agent_runtime_base_url():
+        config = _agent_config(agent)
+        try:
+            model_id = resolve_local_model_id(agent, runtime_model_id)
+            system_prompt = config.get("system_prompt")
+            payload = {
+                "contract_version": CONTRACT_VERSION,
+                "prompt": prompt,
+                "session_id": session_id,
+                "invocation_id": invocation_id,
+                "agent": {
+                    "id": agent.id,
+                    "name": agent.name,
+                    "system_prompt": system_prompt if isinstance(system_prompt, str) else None,
+                },
+                "model_id": model_id,
+                "mcp_servers": enrich_mcp_servers_for_runtime(dynamic_mcp_servers),
+                "identity": {
+                    "subject": subject or session.user_id or "",
+                    "agent_id": str(agent.id),
+                    "session_id": session_id,
+                },
+                "approval_policies": [],
+                "options": {"timeout_s": 300, "max_tool_rounds": 20},
+            }
+            buffer = ""
+            saw_end = False
+            async for piece in _proxy_agent_runtime_sse(payload=payload):
+                buffer += piece
+                while "\n\n" in buffer:
+                    event_block, buffer = buffer.split("\n\n", 1)
+                    text = event_block + "\n\n"
+                    yield text
+                    if "event: session_end" in text:
+                        saw_end = True
+                    if "event: error" in text and "event: session_start" not in text:
+                        # Keep streaming; runtime may still close.
+                        pass
+            if buffer.strip():
+                yield buffer if buffer.endswith("\n\n") else buffer + "\n\n"
+
+            client_done_time = time.time()
+            invocation.client_done_time = client_done_time
+            invocation.client_duration_ms = round((client_done_time - client_invoke_time) * 1000, 3)
+            if saw_end:
+                invocation.status = "complete"
+                session.status = "complete"
+            else:
+                invocation.status = "error"
+                invocation.error_message = "agent-runtime stream ended without session_end"
+                session.status = "error"
+            db.commit()
+        except Exception as exc:
+            error_detail = str(exc)
+            logger.error("Local agent-runtime invoke failed for agent %s: %s", agent.id, error_detail)
+            invocation.status = "error"
+            invocation.error_message = error_detail
+            session.status = "error"
+            db.commit()
+            yield format_sse_event("session_start", {
+                "session_id": session_id,
+                "invocation_id": invocation_id,
+                "client_invoke_time": client_invoke_time,
+                "user_id": session.user_id,
+                "token_source": "local-agent-runtime",
+                "delegation_mode": "m2m",
+            })
+            yield format_sse_event("error", {
+                "message": f"Invocation failed: {error_detail}",
+                "code": "internal",
+            })
+        return
+
+    # Legacy in-process LiteLLM path (no MCP tools).
     yield format_sse_event("session_start", {
         "session_id": session_id,
         "invocation_id": invocation_id,

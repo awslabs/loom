@@ -1,13 +1,13 @@
-# Agent runtime (ADR 0005) — deferred
+"""Local agent runtime (ADR 0005).
 
-This service is intentionally **not** implemented yet so the migration to
-`local-runtime` (ADR 0006) can finish first: sidecars, compose overlay, and
-the UI plugin.
+Separate process from Loom FastAPI. Implements the invoke contract in
+`docs/specs/011-local-agent-runtime-contract.md`:
 
-When ready:
+- `POST /v1/invoke` → SSE (`session_start` / `chunk` / `session_end` / `error`)
+- LiteLLM for completions; MCP HTTP (incl. mcp-runtime facade) for tools
+- `AGENT_RUNTIME_TOKEN` required for `/v1/*`
 
-1. Implement `agent_runtime/` per specs 011–014.
-2. Add the service to `compose/overlay.yml`.
-3. Set `AGENT_RUNTIME_URL` on the Loom backend (BFF invoke for `source=local`).
-
-Until then, `source=local` keeps using the in-process LiteLLM shortcut in Loom.
+```text
+make local.agent-runtime.test
+```
+"""

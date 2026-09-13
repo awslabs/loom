@@ -1616,7 +1616,10 @@ async def invoke_agent_endpoint(
             selected = allowed_tool_names(rule)
             if selected is not None:
                 entry["allowed_tools"] = selected
-            if server.auth_type == "api_key":
+            if server.transport_type == "stdio" or server.auth_type == "loom":
+                # Service token is injected by local_invoke.enrich_mcp_servers_for_runtime
+                entry["auth"] = {"type": "service_bearer"}
+            elif server.auth_type == "api_key":
                 # Per-user keys are stored by the immutable IdP subject.  The
                 # actor_id is a separately formatted value used by AgentCore
                 # sessions and does not identify the Secrets Manager entry.
@@ -1694,11 +1697,13 @@ async def invoke_agent_endpoint(
     if active_policies:
         approval_policies_payload = [p.to_dict() for p in active_policies]
 
-    # Dispatch to harness, local LiteLLM, or standard AgentCore invoke path
+    # Dispatch to harness, local agent-runtime / LiteLLM, or AgentCore
     if is_local_agent(agent):
         stream_gen = invoke_local_agent_stream(
             agent, session, invocation, db, client_invoke_time,
             request_body.prompt, runtime_model_id,
+            dynamic_mcp_servers=dynamic_mcp_servers,
+            subject=user.sub,
         )
     elif agent.source == "harness" and agent.harness_id:
         # Convert dynamic MCP connectors to harness tool format

@@ -7,7 +7,8 @@ services:
     environment:
       MCP_RUNTIME_URL: http://mcp-runtime:8787
       MCP_RUNTIME_TOKEN: ${MCP_RUNTIME_TOKEN:-loom-mcp-runtime-local}
-      # AGENT_RUNTIME_URL left unset until agent-runtime ships (ADR 0005).
+      AGENT_RUNTIME_URL: http://agent-runtime:8766
+      AGENT_RUNTIME_TOKEN: ${AGENT_RUNTIME_TOKEN:-loom-agent-runtime-local}
 
   cursor-adapter:
     build:
@@ -57,6 +58,38 @@ services:
           "python",
           "-c",
           "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  agent-runtime:
+    build:
+      context: ./local-runtime/services/agent-runtime
+    restart: unless-stopped
+    depends_on:
+      litellm:
+        condition: service_healthy
+      mcp-runtime:
+        condition: service_healthy
+    environment:
+      AGENT_RUNTIME_HOST: 0.0.0.0
+      AGENT_RUNTIME_PORT: "8766"
+      AGENT_RUNTIME_TOKEN: ${AGENT_RUNTIME_TOKEN:-loom-agent-runtime-local}
+      AGENT_RUNTIME_MAX_SESSIONS: ${AGENT_RUNTIME_MAX_SESSIONS:-4}
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-loom-local-dev}
+      MCP_RUNTIME_TOKEN: ${MCP_RUNTIME_TOKEN:-loom-mcp-runtime-local}
+    ports:
+      - "127.0.0.1:8766:8766"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8766/health', timeout=3).status==200 else 1)",
         ]
       interval: 5s
       timeout: 3s

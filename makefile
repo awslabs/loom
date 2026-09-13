@@ -1,4 +1,4 @@
-.PHONY: help local.up local.down local.reset local.logs local.ps local.build local.keycloak.export local.cursor-adapter local.cursor-adapter.test local.mcp-runtime.test extension.install
+.PHONY: help local.up local.down local.reset local.logs local.ps local.build local.keycloak.export local.cursor-adapter local.cursor-adapter.test local.mcp-runtime.test local.agent-runtime.test extension.install
 
 COMPOSE := docker compose -f docker-compose.yml -f local-runtime/compose/overlay.yml
 
@@ -15,6 +15,7 @@ help:
 	@echo "  local.cursor-adapter   Rebuild/start the cursor-adapter compose service"
 	@echo "  local.cursor-adapter.test  Unit tests for the Cursor adapter (no API key)"
 	@echo "  local.mcp-runtime.test Unit tests for the local MCP runtime (no Azure PAT)"
+	@echo "  local.agent-runtime.test Unit tests for the local agent runtime"
 	@echo "  extension.install      Link UI plugin paths (dev hint; Vite alias resolves automatically)"
 	@echo ""
 	@echo "  Frontend: http://localhost:5173   Backend: http://localhost:8000/docs"
@@ -61,6 +62,9 @@ local.cursor-adapter.test:
 
 local.mcp-runtime.test:
 	cd local-runtime/services/mcp-runtime && python -m unittest discover -s tests -v
+
+local.agent-runtime.test:
+	cd local-runtime/services/agent-runtime && python -m unittest discover -s tests -v
 
 extension.install:
 	@echo "UI plugin resolves via Vite alias @loom-ext/local-runtime → local-runtime/plugin"

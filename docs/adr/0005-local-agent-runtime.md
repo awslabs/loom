@@ -1,6 +1,6 @@
 # 5. Runtime de agente local com paridade de invoke ao AgentCore
 
-- **Status:** Proposta (não implementar até validar specs de acompanhamento)
+- **Status:** Aceita (implementação inicial em `local-runtime/services/agent-runtime`)
 - **Data:** 2026-09-13
 - **Decisores:** Mantenedores da plataforma
 - **Relacionada a:**

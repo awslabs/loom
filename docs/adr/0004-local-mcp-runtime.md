@@ -3,7 +3,7 @@
 - **Status:** Proposta (não implementar até validar com as specs 006–010)
 - **Data:** 2026-09-12
 - **Decisores:** Mantenedores da plataforma
-- **Relacionada a:** [Spec 005 — análise MCP](../specs/005-existing-mcp-architecture.md), [ADR 0001 — IdP](0001-keycloak-as-identity-provider.md)
+- **Relacionada a:** [Spec 005 — análise MCP](../specs/005-existing-mcp-architecture.md), [ADR 0001 — IdP](0001-keycloak-as-identity-provider.md), [ADR 0005 — Local Agent Runtime](0005-local-agent-runtime.md), [ADR 0006 — Extensão local-runtime](0006-local-runtime-extension-repo.md)
 
 ## Problema
 

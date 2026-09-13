@@ -3,7 +3,7 @@
 - **Status:** Aceita
 - **Data:** 2026-09-12
 - **Decisores:** Mantenedores da plataforma
-- **Relacionada a:** [ADR 0002 — PostgreSQL](0002-postgresql-as-relational-datastore.md), [Spec 002 — stack local](../specs/002-local-docker-compose-stack.md)
+- **Relacionada a:** [ADR 0002 — PostgreSQL](0002-postgresql-as-relational-datastore.md), [ADR 0005 — Local Agent Runtime](0005-local-agent-runtime.md), [Spec 002 — stack local](../specs/002-local-docker-compose-stack.md)
 
 ## Contexto
 

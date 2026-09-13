@@ -1,7 +1,8 @@
 # Spec 013 — Observabilidade do Local Agent Runtime
 
-- **Status:** Rascunho
+- **Status:** Parcial (logs INFO básicos no agent-runtime / cursor-adapter; redactor/arquivo rotativo ainda N/A)
 - **Data:** 2026-09-13
+- **Atualizado:** 2026-09-13
 - **Implementa:** [ADR 0005](../adr/0005-local-agent-runtime.md)
 - **Depende de:** [011 — contrato](011-local-agent-runtime-contract.md), [010 — obs MCP](010-local-mcp-observability.md)
 

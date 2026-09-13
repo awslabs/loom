@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from cursor_adapter.errors import AdapterError, auth_missing, invalid_workspace, run_failed, from_sdk_error
+from cursor_adapter.planner import (
+    completion_from_planner_text,
+    extract_tools_from_messages,
+    planner_system_prompt,
+)
 from cursor_adapter.sessions import SessionManager
 from cursor_adapter.translation import translate_messages
 
@@ -41,20 +46,31 @@ def run_prompt(
     default_workspace: str | None = None,
     api_key: str | None = None,
     model: str = "composer-2.5",
+    tools: list[dict[str, Any]] | None = None,
     launch: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Execute one Cursor turn. ``launch`` is injected in tests.
 
-    Returns an OpenAI-shaped completion dict. Distinguishes startup failures
-    (raised AdapterError) from a run that started and failed (502 + run_id).
+    When ``tools`` is non-empty, runs in planner mode: Cursor must return
+    OpenAI-shaped tool_calls/content JSON; Loom agent-runtime executes MCP.
     """
     key = require_api_key(api_key)
     cwd = resolve_workspace(workspace, default_workspace)
-    translated = translate_messages(messages)
+    embedded_tools, stripped_messages = extract_tools_from_messages(list(messages))
+    body_tools = [t for t in (tools or []) if isinstance(t, dict)]
+    planner_tools = body_tools or embedded_tools
+    working_messages = list(stripped_messages)
+    if planner_tools:
+        working_messages = [
+            {"role": "system", "content": planner_system_prompt(planner_tools)},
+            *working_messages,
+        ]
+
+    translated = translate_messages(working_messages)
     logger.info(
-        "cursor_request model=%s workspace=%s session=%s agent=%s turns=%s unsupported=%s",
+        "cursor_request model=%s workspace=%s session=%s agent=%s turns=%s planner_tools=%s unsupported=%s",
         model, str(cwd), session_id or "-", agent_id or "-",
-        translated["turn_count"], translated["unsupported_parts"],
+        translated["turn_count"], len(planner_tools), translated["unsupported_parts"],
     )
 
     if launch is None:
@@ -75,6 +91,7 @@ def run_prompt(
             model=model,
             cwd=str(cwd),
             previous_agent_id=previous_id,
+            planner_mode=bool(planner_tools),
         )
     except AdapterError:
         raise
@@ -91,6 +108,27 @@ def run_prompt(
         raise run_failed(run_id)
 
     content = result.get("text") or ""
+    logger.info(
+        "cursor_result status=%s run=%s planner=%s text_len=%s preview=%s",
+        status,
+        run_id or "-",
+        bool(planner_tools),
+        len(content),
+        content[:120].replace("\n", " "),
+    )
+    if planner_tools:
+        completion = completion_from_planner_text(content, model="cursor-local")
+        completion["id"] = run_id or completion["id"]
+        completion["x_cursor"] = {
+            "agent_id": agent_id_out,
+            "run_id": run_id,
+            "workspace": str(cwd),
+            "unsupported_parts": translated["unsupported_parts"],
+            "planner_mode": True,
+            "planner_tool_count": len(planner_tools),
+        }
+        return completion
+
     return {
         "id": run_id or "chatcmpl-cursor-local",
         "object": "chat.completion",
@@ -101,6 +139,7 @@ def run_prompt(
             "run_id": run_id,
             "workspace": str(cwd),
             "unsupported_parts": translated["unsupported_parts"],
+            "planner_mode": False,
         },
     }
 
@@ -112,14 +151,16 @@ def _launch_real(
     model: str,
     cwd: str,
     previous_agent_id: str | None,
+    planner_mode: bool = False,
 ) -> dict[str, Any]:
-    """Local runtime, explicit cwd, explicit api_key. Bridge for async servers.
-
-    Uses the sync one-shot API when there is no prior agent (disposes for us).
-    Follow-ups resume the stored id. MCP inline is not persisted across resume.
+    """Local runtime. Planner mode relies on the prompt contract (JSON tool_calls),
+    not Cursor-owned MCP — agent-runtime executes Loom tools (ADR 0005).
     """
     from cursor_sdk import Agent, AgentOptions, CursorAgentError, LocalAgentOptions
 
+    # Do not pass disallowed_tools: some SDK builds return empty text when the
+    # agent cannot use shell/mcp. The planner prompt already forbids those paths.
+    _ = planner_mode
     options = AgentOptions(
         api_key=api_key,
         model=model,

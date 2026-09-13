@@ -194,11 +194,14 @@ a mesma interface.
 
 - Estender `transport_type` e o formulário MCP; MCPs HTTP atuais não mudam.
 - `endpoint_url` deixa de ser obrigatório na criação stdio (o runtime preenche).
-- Precisamos de allowlist de templates versionada no repo (`etc/mcp-templates/`).
+- Precisamos de allowlist de templates versionada no repo
+  (`local-runtime/templates/`; legado `etc/mcp-templates/` movido).
 - `McpServerAccess` deixa de ser só UI.
 - `secrets.py` ganha uma interface; o caminho AWS permanece para produção.
-- Agentes `source=local` passam a poder listar conectores stdio via a mesma
-  fachada (hoje `local_invoke` não tem MCP).
+- Agentes `source=local` usam conectores stdio via a mesma fachada
+  (`mcp-runtime`); o **agent-runtime** (ADR 0005) faz o tool loop. O backend
+  chama `ensure_stdio_ready` no invoke para re-provisionar após recreate.
+  Templates vivem em `local-runtime/templates/` (overlay ADR 0006).
 
 ## O que não fazer
 

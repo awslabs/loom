@@ -140,6 +140,18 @@ def ensure_stdio(server: Any) -> str:
     return provision(int(server.id), str(template_id), params or {}, refs or [])
 
 
+def ensure_stdio_ready(server: Any) -> str:
+    """No-op when the child is already READY; otherwise register+start."""
+    try:
+        status = health(int(server.id))
+        state = str(status.get("state") or "")
+        if state in ("READY", "RUNNING"):
+            return state
+    except McpRuntimeError:
+        pass
+    return ensure_stdio(server)
+
+
 def stdio_user_message(exc: Exception) -> str:
     text = str(exc)
     if "secret" in text.lower() or "secret_unresolved" in text:

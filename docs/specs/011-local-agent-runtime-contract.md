@@ -1,7 +1,8 @@
 # Spec 011 — Contrato de invoke do Local Agent Runtime
 
-- **Status:** Rascunho
+- **Status:** Implementado (contrato `2026-09-local-1`)
 - **Data:** 2026-09-13
+- **Atualizado:** 2026-09-13 — path `local-runtime/services/agent-runtime`; BFF; ensure_stdio
 - **Implementa:** [ADR 0005](../adr/0005-local-agent-runtime.md)
 - **Depende de:** [ADR 0003](../adr/0003-litellm-as-llm-gateway.md), [ADR 0004](../adr/0004-local-mcp-runtime.md), [012 — segurança](012-local-agent-runtime-security.md)
 
@@ -22,14 +23,19 @@ POST http://agent-runtime:8766/v1/invoke
 Authorization: Bearer <AGENT_RUNTIME_TOKEN>
 Accept: text/event-stream
 Content-Type: application/json
+
+GET  /health          (público)
+GET  /v1/health       (Bearer)
+POST /v1/sessions/{id}/cancel  (Bearer)
 ```
 
-Host bind: `127.0.0.1` / rede Docker. Pacote sugerido:
-`etc/docker/agent-runtime/` (espelho de `mcp-runtime` e `cursor-adapter`).
+Host bind: `127.0.0.1` no host / rede Docker. Código:
+`local-runtime/services/agent-runtime/` (overlay
+`local-runtime/compose/overlay.yml`).
 
-O FastAPI **não** chama LiteLLM no caminho `source=local` após M1.
-`invoke_local_agent_stream` vira cliente deste contrato (ou some a favor
-de um `AgentRuntimeClient` compartilhado).
+O FastAPI **não** chama LiteLLM no caminho `source=local` quando
+`AGENT_RUNTIME_URL` está setado. `invoke_local_agent_stream` é o BFF
+deste contrato (`backend/app/services/local_invoke.py`).
 
 ## 3. Request (JSON)
 
@@ -76,76 +82,37 @@ Regras:
    `allowed_tools: null` = todas as tools que o MCP listar; lista = allowlist.
 2. Stdio no catálogo chega aqui como `transport=streamable_http` +
    `endpoint_url=http://mcp-runtime:8787/s/{id}/mcp` (ADR 0004).
-3. `approval_policies` pode ser `[]` em M1; formato = o que
-   `invocations.py` já serializa para AgentCore.
-4. O runtime **não** consulta Postgres nem o IdP.
+3. Antes do BFF, para cada connector stdio o backend chama
+   `ensure_stdio_ready` (evita `404 unknown_server` após recreate do
+   mcp-runtime). Enrichment injeta `service_bearer` + token de serviço
+   (`enrich_mcp_servers_for_runtime`); **nunca** o JWT do usuário.
+4. `approval_policies` pode ser `[]` em M1.
+5. `model_id=cursor-local`: o LiteLLM/CustomLLM + cursor-adapter operam
+   em **planner mode** (spec 004 §9). O agent-runtime ainda é quem chama
+   MCP; o Cursor só devolve `tool_calls` / `content`.
 
 ## 4. Response (SSE)
 
-Mesmos eventos que o Chat já consome no path AgentCore:
+Mesmos eventos do Chat: `session_start`, `chunk`, `session_end`, `error`.
+`token_source=local-agent-runtime`.
 
-| Evento | Quando |
-| --- | --- |
-| `session_start` | início; inclui `session_id`, `invocation_id`, `token_source=local-agent-runtime` |
-| `chunk` | texto parcial `{ "text": "..." }` |
-| `tool_call` / `tool_result` | opcional M2 se a UI já souber renderizar; senão embutir resumo em chunk |
-| `session_end` | sucesso; métricas mínimas (`input_tokens`, `output_tokens` estimados ok na v1) |
-| `error` | falha; `{ "message": "...", "code": "..." }` sem secret |
+## 5. Tool loop (runtime)
 
-Proxy: o backend reencaminha bytes SSE ao browser **sem** reinterpretar o
-tool loop. Pode enriquecer `session_start` com campos de auth Loom já
-usados hoje.
+1. `tools/list` em cada `mcp_servers[].endpoint_url` (headers de identity +
+   allowlist + service bearer).
+2. Nomes OpenAI: `{server}__{tool}` (sanitizados).
+3. `POST LiteLLM /v1/chat/completions` com `tools` (e, para cursor-local,
+   marker `<<<loom_openai_tools>>>` nas messages — workaround CustomLLM).
+4. Se `tool_calls` → `tools/call` no MCP; anexar `role=tool`; repetir até
+   texto final ou `max_tool_rounds`.
+5. Recuperação: se a resposta LiteLLM trouxer JSON `tool_calls` só em
+   `content` (drop do campo estruturado), o runtime reconstrói a lista.
 
-## 5. Cancelamento
+## 6. Critérios de aceite
 
-```text
-POST /v1/sessions/{session_id}/cancel
-Authorization: Bearer <AGENT_RUNTIME_TOKEN>
-```
-
-Runtime mata o processo/sessão e encerra o SSE com `error` código
-`cancelled` ou `session_end` com status cancelado (escolher um na
-implementação e documentar no OpenAPI interno). M1: best-effort; M3:
-garantia de kill + timeout.
-
-## 6. Health
-
-```text
-GET /health → { "status": "ok" }   (público na rede interna)
-GET /v1/health → { "status", "active_sessions", "contract_versions": [...] }
-  (autenticado)
-```
-
-## 7. Erros estáveis (`code`)
-
-| code | HTTP / SSE | Significado |
-| --- | --- | --- |
-| `runtime_auth` | 401 | token de serviço inválido |
-| `unsupported_contract` | 400 | `contract_version` desconhecida |
-| `invalid_payload` | 400 | schema |
-| `model_unreachable` | SSE error | LiteLLM down / 5xx |
-| `model_auth` | SSE error | chave do proxy |
-| `mcp_unreachable` | SSE error | fachada MCP |
-| `mcp_denied` | SSE error | tool fora da allowlist (defesa em profundidade) |
-| `timeout` | SSE error | `options.timeout_s` |
-| `cancelled` | SSE error | cancel |
-| `internal` | 500 / SSE | genérico; sem stack com secret |
-
-## 8. Adapters no control plane
-
-```text
-AgentRuntimeClient
-  ├─ agentcore   → invoke_agent (existente)
-  ├─ harness     → InvokeHarness (existente)
-  └─ local       → POST agent-runtime /v1/invoke (esta spec)
-```
-
-`source=local` ⇒ adapter `local`. Não criar `source=agent-runtime`.
-
-## 9. Fora de escopo desta spec
-
-- Escolha do framework interno (Strands vs ADK vs loop OpenAI-tools) —
-  decisão de implementação na spec de aceite / README do pacote; o
-  contrato HTTP não muda.
-- Memory, A2A, OBO (M3).
-- Implementação do compose (porta final, Dockerfile).
+- [x] `contract_version` obrigatório; versão desconhecida → 400
+- [x] Bearer vazio → fail-closed 401
+- [x] SSE proxy no backend com `AGENT_RUNTIME_URL`
+- [x] Stdio provisionado no invoke (`ensure_stdio_ready`)
+- [x] `make local.agent-runtime.test`
+- [ ] Telemetria estruturada completa (spec 013) — parcial

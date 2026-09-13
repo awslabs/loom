@@ -1,7 +1,8 @@
 # Spec 012 — Segurança do Local Agent Runtime
 
-- **Status:** Rascunho
+- **Status:** Implementado (baseline M1); telemetria/redactor avançados ainda parciais
 - **Data:** 2026-09-13
+- **Atualizado:** 2026-09-13 — BFF + service tokens; ensure_stdio; planner sem MCP no SDK
 - **Implementa:** [ADR 0005](../adr/0005-local-agent-runtime.md)
 - **Depende de:** [011 — contrato](011-local-agent-runtime-contract.md), [008 — segurança MCP](008-local-mcp-security.md)
 
@@ -10,7 +11,8 @@
 ```text
 ┌─ zona Loom (authn/authz) ─────────────────────────────────┐
 │  IdP → UserInfo → FastAPI                                 │
-│    monta payload + McpServerAccess                        │
+│    monta payload + McpServerAccess + ensure_stdio_ready   │
+│    enrich service_bearer (nunca JWT do usuário no MCP)    │
 │    → agent-runtime (Bearer AGENT_RUNTIME_TOKEN)           │
 └───────────────────────────────────────────────────────────┘
               │ só invoke já autorizado + allowlists

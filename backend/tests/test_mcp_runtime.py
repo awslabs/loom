@@ -10,6 +10,7 @@ from app.main import app
 from app.db import Base, get_db
 from app.models.mcp import McpServer, McpServerAccess
 from app.services.mcp import _call_mcp
+from app.services.mcp_runtime_client import McpRuntimeError, ensure_stdio_ready
 
 
 class TestMcpRuntimeRegistration(unittest.TestCase):
@@ -201,3 +202,39 @@ class TestMcpRuntimeRegistration(unittest.TestCase):
         mock_call.assert_called_once()
         self.assertEqual(mock_call.call_args[0][0], 3)
         self.assertEqual(mock_call.call_args[0][1], "tools/list")
+
+
+class TestEnsureStdioReady(unittest.TestCase):
+    @patch("app.services.mcp_runtime_client.ensure_stdio", return_value="READY")
+    @patch("app.services.mcp_runtime_client.health", return_value={"state": "READY"})
+    def test_skips_provision_when_ready(self, mock_health, mock_ensure) -> None:
+        server = McpServer(
+            id=1,
+            name="ado",
+            endpoint_url="http://mcp-runtime:8787/s/1/mcp",
+            transport_type="stdio",
+            status="active",
+            auth_type="loom",
+            template_id="azure-devops",
+        )
+        self.assertEqual(ensure_stdio_ready(server), "READY")
+        mock_health.assert_called_once_with(1)
+        mock_ensure.assert_not_called()
+
+    @patch("app.services.mcp_runtime_client.ensure_stdio", return_value="READY")
+    @patch(
+        "app.services.mcp_runtime_client.health",
+        side_effect=McpRuntimeError("mcp-runtime does not know this server"),
+    )
+    def test_provisions_when_unknown(self, mock_health, mock_ensure) -> None:
+        server = McpServer(
+            id=1,
+            name="ado",
+            endpoint_url="http://mcp-runtime:8787/s/1/mcp",
+            transport_type="stdio",
+            status="active",
+            auth_type="loom",
+            template_id="azure-devops",
+        )
+        self.assertEqual(ensure_stdio_ready(server), "READY")
+        mock_ensure.assert_called_once()

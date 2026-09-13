@@ -1,8 +1,8 @@
 # 6. Extensão `local-runtime` como plugin instalável do Loom
 
-- **Status:** Aceita para Fase 1–2 (co-located sob `local-runtime/` no monorepo; split de repo git opcional depois). Agent-runtime adiado.
+- **Status:** Aceita para Fases 1–2 e 5 (co-located sob `local-runtime/`; agent-runtime + BFF no overlay). Split de repo git opcional depois. Fase 3 (forms stdio só no plugin) ainda aberta.
 - **Data:** 2026-09-13
-- **Atualizado:** 2026-09-13 — sidecars/templates movidos; overlay; Extension Host + plugin UI.
+- **Atualizado:** 2026-09-13 — sidecars; overlay; Extension Host; **agent-runtime** `:8766` + `AGENT_RUNTIME_URL`
 - **Decisores:** Mantenedores da plataforma / extensão local
 - **Relacionada a:**
   [ADR 0003 — LiteLLM](0003-litellm-as-llm-gateway.md),
@@ -12,7 +12,7 @@
 
 ## Problema
 
-O trabalho local (MCP stdio, cursor-adapter, futuro agent-runtime, forms e
+O trabalho local (MCP stdio, cursor-adapter, agent-runtime, forms e
 telas de operação) está **misturado** ao fonte do [awslabs/loom](https://github.com/awslabs/loom).
 Isso impede atualizar o remoto com segurança: cada `git pull` / rebase
 arrasta features de extensão pelo `backend/`, `frontend/` e
@@ -315,11 +315,11 @@ loom/frontend/src/extensions/
 | Fase | Entrega | Critério |
 | --- | --- | --- |
 | **0** | Esta ADR + política plugin | Aceite explícito |
-| **1** | Repo + sidecars/templates + overlay | runtimes sobem; testes isolados |
-| **2** | Extension Host no Loom + `plugin/register` | Telas locais no shell Loom (mesmo bundle) |
+| **1** | Repo + sidecars/templates + overlay | runtimes sobem; testes isolados — **feito** |
+| **2** | Extension Host no Loom + `plugin/register` | Telas locais no shell Loom — **feito** (ops page) |
 | **3** | Forms stdio só no plugin; core sem UI stdio | Operador usa rotas do plugin |
 | **4** | Loom só MCP HTTP no modelo longo prazo | stdio só na extensão |
-| **5** | `agent-runtime` + `AGENT_RUNTIME_URL` | Spec 014 verde |
+| **5** | `agent-runtime` + `AGENT_RUNTIME_URL` | BFF + loop MCP — **feito**; aceite [014](../specs/014-local-agent-orientador-ado-acceptance.md) em validação |
 | **6** | CI extensão + `install-into-loom` / `bump-loom` | Pull awslabs sem rebase de feature |
 
 ### Auth, RBAC e visual
@@ -367,7 +367,7 @@ loom/frontend/src/extensions/
 - Federation na v1 sem necessidade.
 - Copiar o Chat para o plugin.
 - Expor `MCP_RUNTIME_TOKEN` / `AGENT_RUNTIME_TOKEN` ao browser.
-- Implementar Fases 3–5 antes do Host + `register()` (Fase 2) estável.
+- Implementar Fases 3–4 / 6 antes do Host + runtime (Fases 2 e 5) estáveis.
 
 ## Specs / trabalho de acompanhamento
 

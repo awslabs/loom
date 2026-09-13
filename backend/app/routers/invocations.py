@@ -1607,11 +1607,32 @@ async def invoke_agent_endpoint(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Stdio MCP cannot be used with AgentCore agents: {server.name}",
                 )
+            endpoint_url = server.endpoint_url
+            if server.transport_type == "stdio" and is_local_agent(agent):
+                # mcp-runtime is in-memory; after recreate the facade 404s until
+                # register+start. Control plane must provision before agent-runtime.
+                from app.services.mcp_runtime_client import (
+                    McpRuntimeError,
+                    ensure_stdio_ready,
+                    facade_url,
+                    stdio_user_message,
+                )
+                try:
+                    ensure_stdio_ready(server)
+                except McpRuntimeError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=stdio_user_message(exc),
+                    ) from exc
+                endpoint_url = facade_url(int(server.id))
+                if server.endpoint_url != endpoint_url:
+                    server.endpoint_url = endpoint_url
+                    db.commit()
             entry: dict[str, Any] = {
                 "name": server.name,
                 "enabled": True,
                 "transport": "streamable_http" if server.transport_type == "stdio" else server.transport_type,
-                "endpoint_url": server.endpoint_url,
+                "endpoint_url": endpoint_url,
             }
             selected = allowed_tool_names(rule)
             if selected is not None:

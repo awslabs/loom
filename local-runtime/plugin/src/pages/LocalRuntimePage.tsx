@@ -30,9 +30,10 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
             (:8765).
           </li>
           <li>
-            <strong className="text-foreground">agent-runtime</strong> — local tool loop
-            (:8766). Chat <code className="text-xs">source=local</code> invokes via
-            <code className="text-xs"> AGENT_RUNTIME_URL</code> (BFF in Loom).
+            <strong className="text-foreground">agent-runtime</strong> — tool loop
+            (:8766). <code className="text-xs">cursor-local</code> = planner
+            (devolve <code className="text-xs">tool_calls</code>); MCP executa aqui,
+            não no Cursor SDK.
           </li>
         </ul>
       </section>

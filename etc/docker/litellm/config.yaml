@@ -21,7 +21,8 @@ model_list:
       model: cursor_agent/cursor-default
 
 litellm_settings:
-  drop_params: true
+  # Keep tools so cursor-local planner mode receives OpenAI tool schemas.
+  drop_params: false
   custom_provider_map:
     - provider: cursor_agent
       custom_handler: cursor_handler.cursor_llm

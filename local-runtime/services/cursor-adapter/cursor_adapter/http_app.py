@@ -25,6 +25,7 @@ def handle_chat_completions(body: dict[str, Any], headers: dict[str, str]) -> tu
     agent_id = headers.get("X-Loom-Agent-Id") or body.get("agent_id")
     stream = bool(body.get("stream"))
     model = body.get("model") or os.environ.get("CURSOR_MODEL") or "composer-2.5"
+    tools = body.get("tools") if isinstance(body.get("tools"), list) else None
     try:
         completion = run_prompt(
             messages,
@@ -35,6 +36,7 @@ def handle_chat_completions(body: dict[str, Any], headers: dict[str, str]) -> tu
             default_workspace=os.environ.get("CURSOR_WORKSPACE"),
             api_key=os.environ.get("CURSOR_API_KEY"),
             model=os.environ.get("CURSOR_MODEL") or "composer-2.5",
+            tools=tools,
         )
     except AdapterError as exc:
         return exc.status, exc.to_body(), False

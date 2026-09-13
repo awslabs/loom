@@ -118,13 +118,36 @@ Não logar a API key, o Bearer, nem o prompt completo (só `len(messages)` e `mo
 
 ## 9. MCP — decisão
 
-**Alternativa A — Cursor owns MCP** (escolhida no POC).
+**Alternativa A — Cursor owns MCP** (POC original: MCP do IDE/projeto via
+SDK). Válida para experiments no workspace; **não** é o caminho do Chat
+Loom com connectors do catálogo.
 
-O agente Cursor usa os MCP do IDE/projeto (`LocalAgentOptions`; `setting_sources` **não** inclui `"all"` por padrão — só o que o adapter passar inline se configurado). Zero mudança no Loom, no `net_guard`, e nos MCP registrados na UI.
+**Alternativa B — Loom owns MCP via agent-runtime** (**implementada** no Chat).
 
-**Alternativa B — Loom owns MCP** exigiria o adapter reexpor tools do Loom e um segundo orquestrador. Fora desta iteração.
+Para `cursor-local` no Chat com connectors do catálogo:
 
-Quando o mesmo usuário quiser os MCP do Loom *e* o Cursor, isso é um invoke AgentCore com `provider=litellm` apontando para um modelo *não*-Cursor. Não misturar os dois loops.
+1. Backend: ACL `McpServerAccess` + `ensure_stdio_ready` +
+   `enrich_mcp_servers_for_runtime` (service bearer).
+2. `agent-runtime`: `tools/list`, loop OpenAI-tools, `tools/call` no
+   mcp-runtime.
+3. LiteLLM → cursor-adapter: com tools presentes, **planner mode**
+   (`cursor_adapter/planner.py`):
+   - Extrai schemas de `body.tools` **ou** do marker
+     `<<<loom_openai_tools>>>` nas messages (LiteLLM CustomLLM dropa
+     `tools`).
+   - Prompt enxuto; Cursor devolve **somente** JSON
+     `{"tool_calls":[…]}` ou `{"content":"…"}`.
+   - Resposta OpenAI-compatible; `tool_calls` também em `content` JSON
+     se o proxy dropar o campo estruturado.
+   - **Não** passa `mcp_servers` ao Cursor SDK.
+4. `agent-runtime` executa as tools e re-chama o modelo até a resposta
+   final.
+
+Critérios: FastAPI = control plane; agent-runtime = mãos; Cursor = cérebro;
+sem misturar trust boundary (ADR 0005 alternativa 2 rejeitada).
+
+Pacote: `local-runtime/services/cursor-adapter/` (não mais
+`etc/docker/cursor-adapter`).
 
 ## 10. Segurança
 
@@ -140,7 +163,7 @@ Cada request loga (structured): `model`, `loom_session_id`, `cursor_agent_id`, `
 
 ## 12. Testes
 
-Pacote `etc/docker/cursor-adapter` com `unittest`, sem rede e sem `CURSOR_API_KEY`:
+Pacote `local-runtime/services/cursor-adapter` com `unittest`, sem rede e sem `CURSOR_API_KEY`:
 
 1. Tradução: system+user; tool_call/tool; imagem omitida.
 2. SessionManager: create, reuse, lock, expiração, workspace inválido.
@@ -151,7 +174,8 @@ Pacote `etc/docker/cursor-adapter` com `unittest`, sem rede e sem `CURSOR_API_KE
 7. Cursor unavailable: connection refused → 503.
 8. Workspace inválido → 400.
 9. Auth missing → 401.
-10. E2E real contra Cursor: marcados `@unittest.skipUnless(os.getenv("CURSOR_API_KEY"), …)` — nunca na CI sem a chave.
+10. Planner: extract tools marker; parse `tool_calls` / `content`; empty → mensagem não vazia.
+11. E2E real contra Cursor: marcados `@unittest.skipUnless(os.getenv("CURSOR_API_KEY"), …)` — nunca na CI sem a chave.
 
 ## 13. Critérios de aceite
 
@@ -162,10 +186,14 @@ Pacote `etc/docker/cursor-adapter` com `unittest`, sem rede e sem `CURSOR_API_KE
 5. Streaming implementado ou, se o SDK não chunkar, um único delta + `wait()` documentado no log.
 6. Erros da tabela §8 cobertos por teste.
 7. Workspace configurável e obrigatório.
-8. MCP: decisão A documentada (esta spec).
-9. `docker compose up` sobe LiteLLM e `cursor-adapter`. Com `CURSOR_API_KEY` no `.env`, `POST /v1/chat/completions` `model=cursor-local` produz um run Cursor no workspace montado.
+8. MCP: Alternativa B (planner + agent-runtime) documentada e implementada no Chat; Alternativa A só para MCP do IDE fora do catálogo Loom.
+9. `docker compose up` (com overlay) sobe LiteLLM, `cursor-adapter`, `mcp-runtime`, `agent-runtime`. Com `CURSOR_API_KEY` no `.env`, Chat `source=local` + `cursor-local` + connector MCP exerce o planner.
 10. Sem `CURSOR_API_KEY`, o serviço fica healthy e completions `cursor-local` devolvem 401; `mock-echo` / `orientador-academico` continuam 200.
 
 ## 14. Não fazer
 
-Não criar um Agent Runtime no backend do Loom. Não fazer o Loom chamar o Cursor. Não tornar Cursor provider de produção. Não persistir sessão em Postgres. Não colocar o Cursor no container “para ficar mais fácil”.
+Não criar um Agent Runtime **no** processo FastAPI do Loom (o agent-runtime
+é serviço separado — ADR 0005). Não fazer o Loom chamar o Cursor SDK
+direto. Não tornar Cursor provider de produção. Não persistir sessão Cursor
+em Postgres. Não passar MCP do catálogo Loom ao Cursor SDK. Não colocar o
+Cursor Agent “dentro” do container do backend.

@@ -161,7 +161,23 @@ def _mcp_jsonrpc(
     except httpx.HTTPError as exc:
         raise AgentRuntimeError("mcp_unreachable", f"mcp unreachable: {exc}") from exc
     if response.status_code >= 400:
-        raise AgentRuntimeError("mcp_unreachable", f"mcp HTTP {response.status_code}")
+        detail = ""
+        try:
+            err_body = response.json()
+            if isinstance(err_body, dict):
+                err = err_body.get("error")
+                if isinstance(err, dict) and err.get("message"):
+                    detail = f": {err.get('message')}"
+                elif err_body.get("message"):
+                    detail = f": {err_body.get('message')}"
+        except ValueError:
+            detail = ""
+        if response.status_code == 404:
+            raise AgentRuntimeError(
+                "mcp_unreachable",
+                f"mcp HTTP 404{detail} (stdio child not registered — Refresh Tools or retry invoke)",
+            )
+        raise AgentRuntimeError("mcp_unreachable", f"mcp HTTP {response.status_code}{detail}")
     try:
         payload = response.json()
     except ValueError as exc:
@@ -225,9 +241,24 @@ def _chat_completion(
     if not key:
         raise AgentRuntimeError("model_auth", "LITELLM_API_KEY is not set")
     url = f"{litellm_base_url()}/v1/chat/completions"
+    outbound = list(messages)
+    # LiteLLM CustomLLM often drops `tools` before cursor_handler. Embed a
+    # marker the cursor-adapter strips so planner mode still sees schemas.
+    if tools and _is_cursor_model(model_id):
+        outbound = [
+            {
+                "role": "system",
+                "content": (
+                    "<<<loom_openai_tools>>>\n"
+                    f"{json.dumps(tools)}\n"
+                    "<<<end_loom_openai_tools>>>"
+                ),
+            },
+            *outbound,
+        ]
     payload: dict[str, Any] = {
         "model": model_id,
-        "messages": messages,
+        "messages": outbound,
         "stream": False,
     }
     if tools:
@@ -258,12 +289,31 @@ def _chat_completion(
     return body
 
 
+def _is_cursor_model(model_id: str) -> bool:
+    lowered = model_id.strip().lower()
+    return lowered == "cursor-local" or lowered.startswith("cursor_agent/") or lowered.startswith("cursor-")
+
+
 def _assistant_message(completion: dict[str, Any]) -> dict[str, Any]:
     choices = completion.get("choices") or []
     if not choices:
         return {"role": "assistant", "content": ""}
     message = choices[0].get("message") or {}
-    return message if isinstance(message, dict) else {"role": "assistant", "content": ""}
+    if not isinstance(message, dict):
+        return {"role": "assistant", "content": ""}
+    out = dict(message)
+    tool_calls = out.get("tool_calls") or []
+    content = out.get("content")
+    # Recover tool_calls if a proxy dropped the structured field but left JSON in content.
+    if not tool_calls and isinstance(content, str) and "tool_calls" in content:
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get("tool_calls"), list):
+            out["tool_calls"] = parsed["tool_calls"]
+            out["content"] = parsed.get("content") if isinstance(parsed.get("content"), str) else None
+    return out
 
 
 def run_invoke(payload: dict[str, Any]) -> Iterator[bytes]:
@@ -314,10 +364,21 @@ def run_invoke(payload: dict[str, Any]) -> Iterator[bytes]:
                 tool_calls = message.get("tool_calls") or []
                 content = message.get("content")
                 if isinstance(content, str) and content:
-                    text_parts.append(content)
-                    yield _sse("chunk", {"text": content})
+                    # Skip JSON tool_calls fallback so the UI does not show raw protocol.
+                    if not (tool_calls and content.lstrip().startswith("{") and "tool_calls" in content):
+                        text_parts.append(content)
+                        yield _sse("chunk", {"text": content})
 
                 if not tool_calls:
+                    if tools and not text_parts and not (isinstance(content, str) and content.strip()):
+                        yield _sse("error", {
+                            "message": (
+                                "Model returned no text and no tool_calls while MCP tools "
+                                "were available. Retry or use a non-cursor LiteLLM model."
+                            ),
+                            "code": "internal",
+                        })
+                        return
                     break
 
                 messages.append({

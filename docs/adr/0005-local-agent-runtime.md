@@ -1,7 +1,8 @@
 # 5. Runtime de agente local com paridade de invoke ao AgentCore
 
-- **Status:** Aceita (implementação inicial em `local-runtime/services/agent-runtime`)
+- **Status:** Aceita — M1 implementado (`local-runtime/services/agent-runtime` + BFF)
 - **Data:** 2026-09-13
+- **Atualizado:** 2026-09-13 — planner `cursor-local`; `ensure_stdio_ready` no invoke; overlay compose
 - **Decisores:** Mantenedores da plataforma
 - **Relacionada a:**
   [ADR 0003 — LiteLLM](0003-litellm-as-llm-gateway.md),
@@ -16,30 +17,17 @@ AgentCore (`invoke_agent` / `InvokeHarness`). O LiteLLM é só gateway de
 modelo. O ADR 0004 coloca MCP stdio atrás de um runtime separado
 (`mcp-runtime`), não no FastAPI.
 
-O caminho `source=local` (ex.: Orientador Acadêmico) quebra esses
-invariantes na prática:
+Antes desta ADR, o caminho `source=local` (ex.: Orientador Acadêmico)
+quebrava esses invariantes:
 
 ```text
-Chat → Backend (uvicorn) → LiteLLM → texto
+Chat → Backend (uvicorn) → LiteLLM → texto   ← sem MCP, loop no FastAPI
 ```
-
-Consequências observadas:
-
-1. **O backend é o agent runtime.** Crash, timeout ou loop longo competem
-   com a API de catálogo/auth.
-2. **Sem MCP.** O invoke resolve `dynamic_mcp_servers` (incluindo stdio
-   para agentes locais), mas `invoke_local_agent_stream` **descarta** esse
-   payload. O operador marca o connector Azure DevOps e o modelo responde
-   que não tem acesso a tools — corretamente.
-3. **Sem paridade.** Memory, A2A, elicitation, approvals e OBO/M2M existem
-   (ou entram) no path AgentCore/harness; local é um cliente de completion.
-4. **`cursor-local` não é runtime.** É modelo atrás do LiteLLM (ADR 0003).
-   O Cursor Agent do adapter não herda o catálogo MCP do Loom.
 
 Queremos agentes locais que usem **os mesmos recursos do Loom** (conectores
 MCP do catálogo, ACL `McpServerAccess`, sessão/SSE do Chat) **como se**
-estivessem no AgentCore — no compose, sem AWS — sem voltar a hospedar o
-loop do agente no processo do FastAPI.
+estivessem no AgentCore — no compose, sem AWS — sem hospedar o tool loop
+no processo do FastAPI.
 
 Restrições:
 
@@ -157,10 +145,11 @@ sequenceDiagram
     U->>FE: prompt + connector Azure DevOps
     FE->>BE: POST /api/agents/{id}/invoke Bearer
     BE->>BE: JWT → UserInfo, McpServerAccess
-    BE->>BE: monta dynamic_mcp_servers
+    BE->>BE: ensure_stdio_ready (stdio) + monta dynamic_mcp_servers
     BE->>AR: invoke local (prompt, model, mcp[], identity)
+    Note over AR,LT: cursor-local = planner (JSON tool_calls); demais modelos = OpenAI tools nativo
     loop tool loop
-        AR->>LT: chat/completions
+        AR->>LT: chat/completions (+ tools)
         LT-->>AR: message / tool_calls
         alt tool MCP
             AR->>MR: tools/call + service token
@@ -205,13 +194,37 @@ Loopback / rede compose apenas.
 
 **Maturidade interessante** = **M1 + M2**. Não exige clonar a AWS.
 
-### Alcance da v1
+### Alcance da v1 (como implementado)
 
 - Só agentes `source=local` no compose.
 - AgentCore/harness na AWS inalterados; stdio continua proibido no deploy.
-- Um framework de agente allowlisted no `agent-runtime` (Strands **ou** ADK
-  **ou** loop OpenAI-tools — escolher nas specs; não os três na v1).
-- `cursor-local` permanece modelo, não runtime de tools do Loom.
+- Framework do `agent-runtime`: **loop OpenAI-tools** (httpx → LiteLLM + MCP HTTP).
+- Código: `local-runtime/services/agent-runtime/`; overlay
+  `local-runtime/compose/overlay.yml` define `AGENT_RUNTIME_URL` /
+  `AGENT_RUNTIME_TOKEN` no backend e o serviço `:8766`.
+- BFF: `backend/app/services/local_invoke.py` faz proxy SSE quando
+  `AGENT_RUNTIME_URL` está setado (fallback legado LiteLLM in-process se
+  vazio).
+- Antes do invoke local com connector stdio, o backend chama
+  `ensure_stdio_ready` (register+start no mcp-runtime se `unknown_server`).
+- `cursor-local` permanece **modelo** atrás do LiteLLM (ADR 0003), não
+  runtime de tools do Loom. Com tools presentes, o cursor-adapter entra em
+  **modo planner** (JSON `tool_calls` / `content`); o `agent-runtime`
+  executa MCP. **Proibido** injetar catálogo MCP no Cursor SDK.
+
+### Workarounds de transporte (LiteLLM CustomLLM)
+
+O CustomLLM do LiteLLM historicamente **dropa** `tools` na ida e
+`tool_calls` na volta. Mitigações (só no caminho `cursor-local`):
+
+1. agent-runtime embute schemas em system message
+   `<<<loom_openai_tools>>>…<<<end_loom_openai_tools>>>`; o adapter extrai.
+2. planner duplica `tool_calls` em `message.content` JSON; agent-runtime
+   recupera se o campo estruturado sumir.
+3. `drop_params: false` no `etc/docker/litellm/config.yaml` local.
+
+Isso **não** muda o trust boundary: Cursor continua sem token MCP; só
+planeja.
 
 ## Alternativas consideradas
 
@@ -227,16 +240,11 @@ Loopback / rede compose apenas.
 
 ## Consequências
 
-- `invoke_local_agent_stream` deixa de falar com o LiteLLM diretamente;
-  passa a ser cliente HTTP/SSE do `agent-runtime` (ou é substituído por
-  um `AgentRuntimeClient` compartilhado).
-- Novo serviço compose + variáveis (`AGENT_RUNTIME_URL`, token de serviço).
-- Specs novas (contrato, segurança, observabilidade, aceite Orientador+ADO).
-- O Chat deixa de mentir para o usuário: connectors habilitados passam a
-  ter efeito em agentes locais.
-- Custo operacional: mais um container saudável no `make local.up`.
-- Documentação: ADR 0003 ganha nota de que o *atalho* local atual é
-  transitório até este runtime.
+- `invoke_local_agent_stream` é BFF SSE do `agent-runtime` quando
+  `AGENT_RUNTIME_URL` está configurado.
+- Overlay compose + `make local.agent-runtime.test`.
+- Chat com connectors locais passa a ter efeito (MCP real via mcp-runtime).
+- Specs 011–014 descrevem o contrato; 014 é o aceite Orientador+ADO.
 
 ## O que não fazer
 
@@ -245,13 +253,13 @@ Loopback / rede compose apenas.
 - Expor a porta do agent-runtime em `0.0.0.0` sem restrição.
 - Permitir stdio MCP em snapshots de deploy AgentCore “porque local já tem”.
 - Importar `@azure-devops/mcp` ou Cursor SDK no agent-runtime.
-- Implementar antes das specs de acompanhamento serem aceitas.
+- Passar MCP do catálogo Loom como `mcp_servers` do Cursor SDK (mistura
+  trust boundary — alternativa 2).
 
 ## Specs de acompanhamento
-
-Bloqueiam implementação até aceites em rascunho/revisão:
 
 1. [011 — Contrato de invoke](../specs/011-local-agent-runtime-contract.md)
 2. [012 — Segurança](../specs/012-local-agent-runtime-security.md)
 3. [013 — Observabilidade](../specs/013-local-agent-runtime-observability.md)
 4. [014 — Aceite Orientador + ADO](../specs/014-local-agent-orientador-ado-acceptance.md)
+5. [004 — cursor-local / planner](../specs/004-cursor-custom-llm-provider.md) §9

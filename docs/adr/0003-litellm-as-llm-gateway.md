@@ -65,8 +65,9 @@ No compose local, discovery aponta para `http://litellm:4000` (rede Docker) e a 
 
 Nível 2 = **containers**. O LiteLLM é o único gateway de modelo. Cursor não é
 container do Loom: o `cursor-adapter` fala com a API/SDK do Cursor. AgentCore
-continua sendo o runtime de agente implantado; o invoke local (`source=local`)
-é o único caminho em que o **backend** chama o LiteLLM direto.
+continua sendo o runtime de agente implantado na AWS. No compose, o invoke
+`source=local` passa pelo **agent-runtime** (ADR 0005), que é quem chama o
+LiteLLM — o FastAPI só faz BFF SSE.
 
 C4 L2 em Mermaid portátil (`flowchart`; o dialeto `C4Container` quase não
 renderiza no preview).
@@ -78,7 +79,8 @@ flowchart TB
   subgraph loom["Loom - stack local"]
     direction TB
     fe["Frontend<br/>Vite / React"]
-    be["Backend<br/>FastAPI<br/>catalogo, auth, invoke"]
+    be["Backend<br/>FastAPI<br/>catalogo, auth, BFF"]
+    ar["agent-runtime<br/>compose :8766<br/>tool loop local"]
     litellm["LiteLLM<br/>compose :4000<br/>unico LLM gateway"]
     adapter["cursor-adapter<br/>compose :8765<br/>traduz OpenAI para cursor_sdk"]
   end
@@ -93,7 +95,8 @@ flowchart TB
   user --> idp
   fe -->|"HTTPS /api Bearer"| be
   be -->|"valida token"| idp
-  be -->|"source=local<br/>POST /v1/chat/completions"| litellm
+  be -->|"source=local<br/>AGENT_RUNTIME_URL"| ar
+  ar -->|"chat/completions"| litellm
   be -->|"source=deploy/harness<br/>invoke_agent"| ac
   ac -->|"agente provider=litellm"| litellm
   litellm --> mock
@@ -102,13 +105,14 @@ flowchart TB
   litellm -->|"producao"| vendors
 ```
 
-Dois caminhos de invoke (o LiteLLM e o mesmo; quem chama muda):
+Dois caminhos de invoke (o LiteLLM é o mesmo; quem chama muda):
 
 ```mermaid
 sequenceDiagram
     actor U as Usuario
     participant FE as Frontend
     participant BE as Backend
+    participant AR as Agent Runtime
     participant LT as LiteLLM
     participant AD as cursor-adapter
     participant CA as Cursor Agent
@@ -117,12 +121,15 @@ sequenceDiagram
     alt agente source=local
         U->>FE: prompt + model cursor-local
         FE->>BE: POST /api/agents/id/invoke
-        BE->>LT: POST /v1/chat/completions
-        LT->>AD: CustomLLM HTTP
+        BE->>AR: POST /v1/invoke (BFF)
+        AR->>LT: POST /v1/chat/completions
+        LT->>AD: CustomLLM HTTP (planner se tools)
         AD->>CA: cursor_sdk local cwd
-        CA-->>AD: texto
+        CA-->>AD: texto / JSON tool_calls
         AD-->>LT: chat.completion
-        LT-->>BE: chunk
+        LT-->>AR: completion
+        Note over AR: agent-runtime executa MCP se tool_calls
+        AR-->>BE: SSE
         BE-->>FE: SSE
     else agente deploy ou harness
         U->>FE: prompt

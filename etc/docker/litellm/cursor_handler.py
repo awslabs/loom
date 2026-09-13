@@ -39,11 +39,20 @@ def _optional_headers(optional_params: dict[str, Any] | None) -> dict[str, str]:
     return headers
 
 
+def _extract_tools(optional_params: dict[str, Any] | None, kwargs: dict[str, Any]) -> list[dict[str, Any]] | None:
+    for source in (kwargs, optional_params or {}):
+        tools = source.get("tools")
+        if isinstance(tools, list) and tools:
+            return [t for t in tools if isinstance(t, dict)]
+    return None
+
+
 def forward_to_adapter(
     messages: list[dict[str, Any]],
     model: str,
     stream: bool = False,
     optional_params: dict[str, Any] | None = None,
+    tools: list[dict[str, Any]] | None = None,
     timeout: float = 120.0,
 ) -> tuple[int, dict[str, Any] | str]:
     """POST /v1/chat/completions on the host adapter.
@@ -52,7 +61,10 @@ def forward_to_adapter(
     raw error text. Never logs secrets.
     """
     url = f"{adapter_url()}/v1/chat/completions"
-    payload = {"model": model, "messages": messages, "stream": stream}
+    payload: dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
     data = json.dumps(payload).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
@@ -84,8 +96,21 @@ def _fill_model_response(model_response: Any, body: dict[str, Any], model: str) 
     choices = body.get("choices") or []
     if choices:
         message = (choices[0] or {}).get("message") or {}
-        model_response.choices[0].message.content = message.get("content") or ""
-        model_response.choices[0].finish_reason = (choices[0] or {}).get("finish_reason") or "stop"
+        target = model_response.choices[0].message
+        content = message.get("content")
+        tool_calls = message.get("tool_calls")
+        # Prefer structured tool_calls; keep JSON content fallback for proxies.
+        if tool_calls and not content:
+            content = json.dumps({"tool_calls": tool_calls}, ensure_ascii=False)
+        target.content = content
+        if tool_calls:
+            try:
+                target.tool_calls = tool_calls
+            except Exception:
+                setattr(target, "tool_calls", tool_calls)
+            model_response.choices[0].finish_reason = (choices[0] or {}).get("finish_reason") or "tool_calls"
+        else:
+            model_response.choices[0].finish_reason = (choices[0] or {}).get("finish_reason") or "stop"
     else:
         error = (body.get("error") or {}).get("message") or "cursor_adapter_error"
         model_response.choices[0].message.content = ""
@@ -108,7 +133,14 @@ class CursorCustomLLM:
         model: str = kwargs.get("model") or "cursor-default"
         optional_params: dict[str, Any] = kwargs.get("optional_params") or {}
         model_response = kwargs.get("model_response")
-        status, body = forward_to_adapter(messages, model, stream=False, optional_params=optional_params)
+        tools = _extract_tools(optional_params, kwargs)
+        status, body = forward_to_adapter(
+            messages,
+            model,
+            stream=False,
+            optional_params=optional_params,
+            tools=tools,
+        )
         if status >= 400 or not isinstance(body, dict):
             message = body.get("error", {}).get("message") if isinstance(body, dict) else str(body)
             raise RuntimeError(message or f"adapter_http_{status}")
@@ -123,7 +155,14 @@ class CursorCustomLLM:
         messages: list[dict[str, Any]] = kwargs.get("messages") or []
         model: str = kwargs.get("model") or "cursor-default"
         optional_params: dict[str, Any] = kwargs.get("optional_params") or {}
-        status, body = forward_to_adapter(messages, model, stream=True, optional_params=optional_params)
+        tools = _extract_tools(optional_params, kwargs)
+        status, body = forward_to_adapter(
+            messages,
+            model,
+            stream=True,
+            optional_params=optional_params,
+            tools=tools,
+        )
         if status >= 400:
             raise RuntimeError(
                 body.get("error", {}).get("message") if isinstance(body, dict) else str(body)

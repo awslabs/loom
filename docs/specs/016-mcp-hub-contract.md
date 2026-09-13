@@ -19,6 +19,11 @@ Fase 1 = **somente tools MCP**. Sem invoke de agents.
 MCP  http://mcp-hub:8790/mcp     (rede Docker; host 127.0.0.1:8790)
 Auth Authorization: Bearer <hub_session_token>
 
+POST /mcp                        JSON-RPC (tools); respostas application/json
+GET  /mcp                        405 Allow: POST  (sem SSE standalone; exigido pelo
+                                 cliente Streamable HTTP do Cursor — 404 quebra)
+DELETE /mcp                      405 Allow: POST  (sessões Hub são stateless no wire)
+
 GET  /health                     (público)
 GET  /v1/health                  (Bearer Hub session ou token de serviço ops)
 ```

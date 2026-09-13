@@ -15,6 +15,8 @@ services:
       MCP_RUNTIME_TOKEN: ${MCP_RUNTIME_TOKEN:-loom-mcp-runtime-local}
       AGENT_RUNTIME_URL: http://agent-runtime:8766
       AGENT_RUNTIME_TOKEN: ${AGENT_RUNTIME_TOKEN:-loom-agent-runtime-local}
+      MCP_HUB_SERVICE_TOKEN: ${MCP_HUB_SERVICE_TOKEN:-loom-mcp-hub-local}
+      MCP_HUB_PUBLIC_URL: ${MCP_HUB_PUBLIC_URL:-http://127.0.0.1:8790/mcp}
 
   cursor-adapter:
     build:
@@ -111,3 +113,29 @@ services:
       timeout: 3s
       retries: 12
       start_period: 15s
+
+  mcp-hub:
+    build:
+      context: ./local-runtime/services/mcp-hub
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      MCP_HUB_HOST: 0.0.0.0
+      MCP_HUB_PORT: "8790"
+      MCP_HUB_SERVICE_TOKEN: ${MCP_HUB_SERVICE_TOKEN:-loom-mcp-hub-local}
+      LOOM_BACKEND_URL: http://backend:8000
+    ports:
+      - "127.0.0.1:8790:8790"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8790/health', timeout=3).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s

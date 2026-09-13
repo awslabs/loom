@@ -1,0 +1,11 @@
+id: test-echo
+display_name: Test Echo
+hidden: true
+command: python
+args:
+  - "-m"
+  - "mcp_runtime.echo_child"
+params_schema: {}
+secrets: []
+startup_timeout_s: 10
+max_restarts: 1

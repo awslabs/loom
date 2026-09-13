@@ -1,4 +1,4 @@
-.PHONY: help local.up local.down local.reset local.logs local.ps local.build local.keycloak.export local.cursor-adapter local.cursor-adapter.test
+.PHONY: help local.up local.down local.reset local.logs local.ps local.build local.keycloak.export local.cursor-adapter local.cursor-adapter.test local.mcp-runtime.test
 
 COMPOSE := docker compose
 
@@ -14,6 +14,7 @@ help:
 	@echo "  local.keycloak.export  Export the running realm to etc/docker/keycloak-export/"
 	@echo "  local.cursor-adapter   Rebuild/start the cursor-adapter compose service"
 	@echo "  local.cursor-adapter.test  Unit tests for the Cursor adapter (no API key)"
+	@echo "  local.mcp-runtime.test Unit tests for the local MCP runtime (no Azure PAT)"
 	@echo ""
 	@echo "  Frontend: http://localhost:5173   Backend: http://localhost:8000/docs"
 	@echo "  Keycloak: http://localhost:8081   (admin console user: admin)"
@@ -55,3 +56,6 @@ local.cursor-adapter:
 
 local.cursor-adapter.test:
 	cd etc/docker/cursor-adapter && python -m unittest discover -s tests -v
+
+local.mcp-runtime.test:
+	cd etc/docker/mcp-runtime && python -m unittest discover -s tests -v

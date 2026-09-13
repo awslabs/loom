@@ -1,0 +1,21 @@
+id: azure-devops
+display_name: Azure DevOps
+command: npx
+args:
+  # Bin name differs from the package name; without --package npx looks for
+  # `mcp-server-azuredevops` on PATH and the child exits immediately.
+  - "-y"
+  - "--package=@azure-devops/mcp@2.9.0"
+  - "mcp-server-azuredevops"
+  - "{{params.organization}}"
+  - "--authentication"
+  - "envvar"
+params_schema:
+  organization:
+    type: string
+    pattern: "^[A-Za-z0-9][A-Za-z0-9-]*$"
+secrets:
+  - name: AZURE_DEVOPS_PAT
+    env: ADO_MCP_AUTH_TOKEN
+startup_timeout_s: 90
+max_restarts: 3

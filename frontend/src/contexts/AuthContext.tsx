@@ -163,7 +163,9 @@ function isTokenExpired(accessToken: string): boolean {
   try {
     const claims = decodeJwtPayload(accessToken);
     const exp = claims.exp as number | undefined;
-    return !!exp && exp <= Date.now() / 1000;
+    // Treat as expired a few seconds early so clock skew with Keycloak
+    // does not produce a 401 that the interceptor then refuses to refresh.
+    return !!exp && exp <= Date.now() / 1000 + 15;
   } catch {
     // Cannot decode — treat as expired so the caller fails safe.
     return true;
@@ -414,8 +416,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const currentConfig = configRef.current;
       if (!currentTokens?.refreshToken || !currentConfig) return null;
 
-      // A 401 on a scope-restricted endpoint shouldn't nuke the session, so only act
-      // when the access token has actually expired.
+      // Missing scopes are 403. A 401 here is an expired/rejected JWT — always
+      // try to refresh. Keycloak and the browser clock can disagree by a few
+      // seconds, so "frontend thinks token is still valid" is not reliable.
       const expired = isTokenExpired(currentTokens.accessToken);
       const strategy = refreshStrategyFor(currentConfig);
 
@@ -426,7 +429,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setAuthToken(null);
         return null;
       }
-      if (strategy === "backend-proxy" && !expired) return null;
 
       try {
         let newTokens: AuthTokens | null = null;
@@ -458,9 +460,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return newTokens.accessToken;
         }
       } catch {
-        setTokens(null);
-        setUser(null);
-        setAuthToken(null);
+        if (expired) {
+          setTokens(null);
+          setUser(null);
+          setAuthToken(null);
+        }
       }
       return null;
     });

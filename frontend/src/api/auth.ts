@@ -1,12 +1,24 @@
 import { apiFetch, getBaseUrl } from "./client";
 
+export interface ProviderCapabilities {
+  authorization_code_pkce: boolean;
+  refresh_token: boolean;
+  password_grant: boolean;
+  client_credentials: boolean;
+  rfc8693_token_exchange: boolean;
+  jwt_bearer_grant: boolean;
+  idp_initiated_logout: boolean;
+  requires_group_mapping: boolean;
+}
+
 export interface AuthConfig {
   provider_type?: string;
   user_pool_id: string;
   region: string;
-  // External IdP fields (present when provider_type != "cognito")
+  // Redirect-based IdP fields (present when a provider is registered)
   authorization_endpoint?: string;
   token_endpoint?: string;
+  end_session_endpoint?: string;
   client_id?: string;
   scopes?: string;
   issuer_url?: string;
@@ -15,6 +27,8 @@ export interface AuthConfig {
   group_mappings?: Record<string, string[]>;
   has_client_secret?: boolean;
   client_type?: string; // "public" or "confidential"
+  capabilities?: ProviderCapabilities;
+  supports_refresh?: boolean;
 }
 
 export interface AuthTokens {
@@ -217,6 +231,26 @@ export async function startOIDCLogin(config: AuthConfig): Promise<void> {
   sessionStorage.setItem("oidc_state", params.get("state")!);
 
   window.location.href = `${config.authorization_endpoint}?${params.toString()}`;
+}
+
+/**
+ * Renew tokens at the active provider through the backend proxy.
+ *
+ * The backend attaches the client secret for confidential clients. Providers that rotate
+ * refresh tokens return a new one, so callers must store whatever comes back.
+ */
+export async function refreshOIDCToken(refreshToken: string): Promise<OIDCTokenResponse> {
+  const response = await fetch(`${getBaseUrl()}/api/auth/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Token refresh failed: ${await response.text()}`);
+  }
+
+  return response.json() as Promise<OIDCTokenResponse>;
 }
 
 export async function exchangeOIDCCode(

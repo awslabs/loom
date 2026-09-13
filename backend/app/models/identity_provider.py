@@ -8,8 +8,9 @@ class IdentityProvider(Base):
     __tablename__ = "identity_providers"
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False, unique=True)
-    provider_type = Column(String, nullable=False)  # "cognito", "entra_id", "okta", "auth0", "generic_oidc"
-    issuer_url = Column(String, nullable=False)  # OIDC issuer base URL
+    provider_type = Column(String, nullable=False)  # "keycloak", "cognito", "entra_id", "okta", "auth0", "generic_oidc"
+    issuer_url = Column(String, nullable=False)  # OIDC issuer base URL (as seen by the browser; matches the `iss` claim)
+    internal_base_url = Column(String, nullable=True)  # base URL this process uses for discovery/JWKS when it differs
     client_id = Column(String, nullable=False)
     client_secret_arn = Column(String, nullable=True)  # Secrets Manager ARN (write-only)
     client_type = Column(String, nullable=True, default="public")  # "public" or "confidential"
@@ -18,10 +19,13 @@ class IdentityProvider(Base):
     group_claim_path = Column(String, nullable=True)  # claim path for groups: "cognito:groups", "groups", "roles"
     group_mappings = Column(Text, nullable=True)  # JSON: {"ExternalGroup": ["t-admin", "g-admins-super"], ...}
     status = Column(String, nullable=False, default="active")  # "active" or "inactive"
+    refresh_enabled = Column(String, nullable=True)  # operator override; defaults to the adapter capability
+    managed_by = Column(String, nullable=True)  # "bootstrap" when seeded from environment, else null
     # Cached OIDC discovery metadata
     jwks_uri = Column(String, nullable=True)
     authorization_endpoint = Column(String, nullable=True)
     token_endpoint = Column(String, nullable=True)
+    end_session_endpoint = Column(String, nullable=True)
     discovery_scopes = Column(Text, nullable=True)  # JSON array of supported scopes from discovery
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -40,6 +44,7 @@ class IdentityProvider(Base):
             "name": self.name,
             "provider_type": self.provider_type,
             "issuer_url": self.issuer_url,
+            "internal_base_url": self.internal_base_url,
             "client_id": self.client_id,
             "has_client_secret": bool(self.client_secret_arn),
             "client_type": self.client_type or ("confidential" if self.client_secret_arn else "public"),
@@ -48,9 +53,11 @@ class IdentityProvider(Base):
             "group_claim_path": self.group_claim_path,
             "group_mappings": self.get_group_mappings(),
             "status": self.status,
+            "managed_by": self.managed_by,
             "jwks_uri": self.jwks_uri,
             "authorization_endpoint": self.authorization_endpoint,
             "token_endpoint": self.token_endpoint,
+            "end_session_endpoint": self.end_session_endpoint,
             "discovery_scopes": json.loads(self.discovery_scopes) if self.discovery_scopes else [],
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

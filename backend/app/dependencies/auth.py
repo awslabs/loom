@@ -4,10 +4,12 @@ import logging
 import os
 from typing import Any
 
+import jwt
 from fastapi import Depends, HTTPException, Request, Security
 from fastapi.security import OAuth2AuthorizationCodeBearer, SecurityScopes
 
-from app.services.jwt_validator import validate_cognito_token, validate_token
+from app.idp import IdpConfig, cognito_config_from_env, get_adapter
+from app.services.jwt_validator import validate_token
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +172,7 @@ def _map_external_groups(external_groups: list[str], group_mappings: dict[str, l
 
 
 def _get_active_idp():
-    """Load the active external IdP from the database, if any. Returns None if no active IdP."""
+    """Load the active IdP from the database, if any. Returns None if no active IdP."""
     try:
         from app.db import SessionLocal
         from app.models.identity_provider import IdentityProvider
@@ -178,16 +180,7 @@ def _get_active_idp():
         try:
             idp = db.query(IdentityProvider).filter(IdentityProvider.status == "active").first()
             if idp:
-                return {
-                    "id": idp.id,
-                    "provider_type": idp.provider_type,
-                    "issuer_url": idp.issuer_url,
-                    "client_id": idp.client_id,
-                    "audience": idp.audience,
-                    "jwks_uri": idp.jwks_uri,
-                    "group_claim_path": idp.group_claim_path,
-                    "group_mappings": idp.get_group_mappings(),
-                }
+                return IdpConfig.from_model(idp).to_dict()
         finally:
             db.close()
     except Exception as e:
@@ -216,6 +209,43 @@ def invalidate_idp_cache() -> None:
     _idp_cache.pop("active", None)
 
 
+def get_active_config() -> IdpConfig | None:
+    """Return the configuration of the active provider: the registered one, else Cognito from env."""
+    cached = _get_active_idp_cached()
+    if cached:
+        return IdpConfig.from_dict(cached)
+    return cognito_config_from_env()
+
+
+def _validate_with_config(token: str, config: IdpConfig) -> dict[str, Any]:
+    """Validate a token against one provider configuration. Raises on failure."""
+    adapter = get_adapter(config.provider_type)
+    if not config.jwks_uri:
+        raise ValueError(f"Provider {config.provider_type!r} has no cached jwks_uri; run discovery")
+    try:
+        return validate_token(
+            token,
+            jwks_uri=config.jwks_uri,
+            issuer=adapter.expected_issuer(config),
+            audience=adapter.expected_audience(config),
+        )
+    except Exception:
+        _diagnose(token, config)
+        raise
+
+
+def _diagnose(token: str, config: IdpConfig) -> None:
+    """Let the adapter explain a rejected token, using unverified claims."""
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False, "verify_aud": False})
+    except Exception:
+        return
+    try:
+        get_adapter(config.provider_type).diagnose_validation_failure(claims, config)
+    except Exception:  # pragma: no cover - diagnostics must never mask the original error
+        logger.debug("Provider diagnostics failed", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # FastAPI dependencies
 # ---------------------------------------------------------------------------
@@ -223,25 +253,23 @@ def invalidate_idp_cache() -> None:
 def get_current_user(request: Request) -> UserInfo:
     """Extract and validate the Bearer token, returning a UserInfo with derived scopes.
 
-    Checks for an active external IdP first. Falls back to Cognito.
-    In bypass mode (LOOM_COGNITO_USER_POOL_ID not set and no active IdP) returns a
-    user with all scopes, but ONLY when LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV is set
-    AND the request arrives from loopback. Fails closed (401) otherwise, since an
-    IdP-less deployment reachable over the network would otherwise be an open
-    admin panel.
+    Provider-neutral: the registered provider is tried first, then Cognito from the
+    environment, and each one is validated and interpreted by its own adapter.
+    In bypass mode (no provider configured at all) returns a user with all scopes, but
+    ONLY when LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV is set AND the request arrives from
+    loopback. Fails closed (401) otherwise, since an IdP-less deployment reachable over
+    the network would otherwise be an open admin panel.
     """
-    user_pool_id = os.getenv("LOOM_COGNITO_USER_POOL_ID", "")
-    region = os.getenv("LOOM_COGNITO_REGION", os.getenv("AWS_REGION", "us-east-1"))
-
     auth_header = request.headers.get("Authorization", "")
     token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
 
-    # Check for active external IdP
-    active_idp = _get_active_idp_cached()
+    registered = _get_active_idp_cached()
+    registered_config = IdpConfig.from_dict(registered) if registered else None
+    cognito_config = cognito_config_from_env()
 
-    # Bypass mode — no Cognito and no external IdP configured. Requires explicit
-    # opt-in and a loopback client; otherwise fail closed with 401.
-    if not user_pool_id and not active_idp:
+    # Bypass mode — no provider configured at all. Requires explicit opt-in and a
+    # loopback client; otherwise fail closed with 401.
+    if not registered_config and not cognito_config:
         if _bypass_auth_enabled() and _is_loopback_request(request):
             logger.warning("No identity provider configured; bypassing auth for loopback request")
             return UserInfo(
@@ -261,77 +289,28 @@ def get_current_user(request: Request) -> UserInfo:
     if not token:
         raise HTTPException(status_code=401, detail="Missing authorization token")
 
-    # Try external IdP first if active
-    if active_idp and active_idp.get("jwks_uri"):
+    candidates = [c for c in (registered_config, cognito_config) if c is not None]
+    last_error: Exception | None = None
+    for config in candidates:
         try:
-            issuer = active_idp["issuer_url"]
-            # Azure AD v2.0 token endpoint issues access tokens with v1.0 issuer
-            if active_idp.get("provider_type") == "entra_id" and "/v2.0" in issuer:
-                tid = issuer.split("/")[-2]
-                issuer = f"https://sts.windows.net/{tid}/"
-            claims = validate_token(
-                token,
-                jwks_uri=active_idp["jwks_uri"],
-                issuer=issuer,
-                audience=active_idp.get("audience") or active_idp.get("client_id"),
-            )
-            return _build_user_from_external_claims(claims, active_idp)
+            claims = _validate_with_config(token, config)
         except Exception as e:
-            logger.warning("External IdP validation failed (jwks_uri=%s, issuer=%s, audience=%s): %s",
-                           active_idp["jwks_uri"], issuer,
-                           active_idp.get("audience") or active_idp.get("client_id"), e)
-            # Fall through to Cognito if external validation fails
-            if not user_pool_id:
-                raise HTTPException(status_code=401, detail="Invalid or expired token") from e
+            last_error = e
+            logger.warning(
+                "Token validation failed for provider %r (issuer=%s): %s",
+                config.provider_type, config.issuer_url, e,
+            )
+            continue
+        identity = get_adapter(config.provider_type).extract_identity(claims, config)
+        return UserInfo(
+            sub=identity.sub,
+            username=identity.username,
+            groups=identity.groups,
+            scopes=derive_scopes(identity.groups),
+            idp_type=config.provider_type,
+        )
 
-    # Cognito validation
-    try:
-        claims = validate_cognito_token(token, user_pool_id, region)
-    except Exception as e:
-        logger.warning("Invalid token: %s", e)
-        raise HTTPException(status_code=401, detail="Invalid or expired token") from e
-
-    groups: list[str] = claims.get("cognito:groups", [])
-    username: str = claims.get("cognito:username", claims.get("username", claims.get("sub", "")))
-
-    return UserInfo(
-        sub=claims.get("sub", ""),
-        username=username,
-        groups=groups,
-        scopes=derive_scopes(groups),
-    )
-
-
-def _build_user_from_external_claims(claims: dict[str, Any], idp: dict) -> UserInfo:
-    """Build a UserInfo from external IdP JWT claims using the IdP's group mapping."""
-    sub = claims.get("sub", "")
-    username = (
-        claims.get("preferred_username")
-        or claims.get("email")
-        or claims.get("name")
-        or sub
-    )
-
-    # Extract groups using the configured claim path
-    group_claim = idp.get("group_claim_path", "groups")
-    external_groups = claims.get(group_claim, [])
-    if isinstance(external_groups, str):
-        external_groups = [external_groups]
-
-    # Map external groups to Loom groups
-    group_mappings = idp.get("group_mappings", {})
-    if group_mappings:
-        loom_groups = _map_external_groups(external_groups, group_mappings)
-    else:
-        loom_groups = external_groups
-
-    return UserInfo(
-        sub=sub,
-        username=username,
-        groups=loom_groups,
-        scopes=derive_scopes(loom_groups),
-        idp_type=idp.get("provider_type", "external"),
-    )
+    raise HTTPException(status_code=401, detail="Invalid or expired token") from last_error
 
 
 def require_scopes(*required: str):
@@ -355,6 +334,22 @@ def require_scopes(*required: str):
 # Legacy helpers (used by invocations.py for token forwarding)
 # ---------------------------------------------------------------------------
 
+def _validate_against_any_provider(token: str) -> dict[str, Any] | None:
+    """Validate a token against every configured provider in priority order."""
+    registered = _get_active_idp_cached()
+    candidates = [c for c in (
+        IdpConfig.from_dict(registered) if registered else None,
+        cognito_config_from_env(),
+    ) if c is not None]
+
+    for config in candidates:
+        try:
+            return _validate_with_config(token, config)
+        except Exception as e:
+            logger.warning("Token validation failed for provider %r: %s", config.provider_type, e)
+    return None
+
+
 def get_current_user_token(request: Request) -> str | None:
     """Extract and validate the user's access token from the Authorization header."""
     auth_header = request.headers.get("Authorization", "")
@@ -363,41 +358,15 @@ def get_current_user_token(request: Request) -> str | None:
 
     token = auth_header[7:]
 
-    user_pool_id = os.getenv("LOOM_COGNITO_USER_POOL_ID", "")
-    region = os.getenv("LOOM_COGNITO_REGION", os.getenv("AWS_REGION", "us-east-1"))
-
-    # Check for active external IdP
-    active_idp = _get_active_idp_cached()
-
-    if not user_pool_id and not active_idp:
+    if not _get_active_idp_cached() and not cognito_config_from_env():
         logger.warning("No identity provider configured; skipping token validation")
         return token
 
-    # Try external IdP first
-    if active_idp and active_idp.get("jwks_uri"):
-        try:
-            validate_token(
-                token,
-                jwks_uri=active_idp["jwks_uri"],
-                issuer=active_idp["issuer_url"],
-                audience=active_idp.get("audience") or active_idp.get("client_id"),
-            )
-            return token
-        except Exception:
-            if not user_pool_id:
-                return None
-
-    # Cognito validation
-    if user_pool_id:
-        try:
-            claims = validate_cognito_token(token, user_pool_id, region)
-            logger.debug("Validated user token for sub=%s", claims.get("sub"))
-            return token
-        except Exception as e:
-            logger.warning("Invalid user token: %s", e)
-            return None
-
-    return None
+    claims = _validate_against_any_provider(token)
+    if claims is None:
+        return None
+    logger.debug("Validated user token for sub=%s", claims.get("sub"))
+    return token
 
 
 def get_token_claims(request: Request) -> dict[str, Any] | None:
@@ -406,30 +375,4 @@ def get_token_claims(request: Request) -> dict[str, Any] | None:
     if not auth_header.startswith("Bearer "):
         return None
 
-    token = auth_header[7:]
-
-    user_pool_id = os.getenv("LOOM_COGNITO_USER_POOL_ID", "")
-    region = os.getenv("LOOM_COGNITO_REGION", os.getenv("AWS_REGION", "us-east-1"))
-
-    # Try external IdP first
-    active_idp = _get_active_idp_cached()
-    if active_idp and active_idp.get("jwks_uri"):
-        try:
-            return validate_token(
-                token,
-                jwks_uri=active_idp["jwks_uri"],
-                issuer=active_idp["issuer_url"],
-                audience=active_idp.get("audience") or active_idp.get("client_id"),
-            )
-        except Exception:
-            if not user_pool_id:
-                return None
-
-    if not user_pool_id:
-        return None
-
-    try:
-        return validate_cognito_token(token, user_pool_id, region)
-    except Exception as e:
-        logger.warning("Invalid user token: %s", e)
-        return None
+    return _validate_against_any_provider(auth_header[7:])

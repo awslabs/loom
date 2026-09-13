@@ -1,5 +1,4 @@
 """Identity Provider management endpoints."""
-import json
 import logging
 import os
 
@@ -9,7 +8,9 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes, invalidate_idp_cache
+from app.idp import SUPPORTED_PROVIDER_TYPES
 from app.models.identity_provider import IdentityProvider
+from app.services.idp_discovery import run_discovery
 from app.services.oidc import fetch_discovery, OIDCDiscoveryError
 from app.services.secrets import store_secret, delete_secret
 
@@ -28,8 +29,9 @@ def _get_region() -> str:
 
 class CreateIdPRequest(BaseModel):
     name: str
-    provider_type: str = Field(..., description="cognito, entra_id, okta, auth0, generic_oidc")
+    provider_type: str = Field(..., description=", ".join(SUPPORTED_PROVIDER_TYPES))
     issuer_url: str
+    internal_base_url: str | None = Field(None, description="Base URL the backend uses for discovery/JWKS when it differs from issuer_url")
     client_id: str
     client_secret: str | None = None
     client_type: str = Field("public", description="'public' (PKCE only) or 'confidential' (backend proxies code exchange with secret)")
@@ -44,6 +46,7 @@ class UpdateIdPRequest(BaseModel):
     name: str | None = None
     provider_type: str | None = None
     issuer_url: str | None = None
+    internal_base_url: str | None = None
     client_id: str | None = None
     client_secret: str | None = None
     client_type: str | None = None
@@ -60,16 +63,7 @@ class UpdateIdPRequest(BaseModel):
 
 def _run_discovery(idp: IdentityProvider) -> None:
     """Fetch OIDC discovery and update cached fields on the model."""
-    try:
-        disc = fetch_discovery(idp.issuer_url)
-        idp.jwks_uri = disc["jwks_uri"]
-        idp.authorization_endpoint = disc["authorization_endpoint"]
-        idp.token_endpoint = disc["token_endpoint"]
-        idp.discovery_scopes = json.dumps(disc.get("scopes_supported", []))
-    except OIDCDiscoveryError:
-        raise
-    except Exception as e:
-        raise OIDCDiscoveryError(f"Unexpected error during discovery: {e}") from e
+    run_discovery(idp)
 
 
 def _enforce_single_active(db: Session, new_idp_id: int | None, new_status: str) -> None:
@@ -115,6 +109,7 @@ def create_identity_provider(
         name=request.name,
         provider_type=request.provider_type,
         issuer_url=request.issuer_url,
+        internal_base_url=request.internal_base_url,
         client_id=request.client_id,
         client_secret_arn=client_secret_arn,
         client_type=request.client_type,
@@ -174,10 +169,10 @@ def update_identity_provider(
         raise HTTPException(status_code=404, detail="Identity provider not found")
 
     rerun_discovery = False
-    for field in ("name", "provider_type", "issuer_url", "client_id", "client_type", "scopes", "audience", "group_claim_path", "status"):
+    for field in ("name", "provider_type", "issuer_url", "internal_base_url", "client_id", "client_type", "scopes", "audience", "group_claim_path", "status"):
         value = getattr(request, field)
         if value is not None:
-            if field == "issuer_url" and value != idp.issuer_url:
+            if field in ("issuer_url", "internal_base_url", "provider_type") and value != getattr(idp, field):
                 rerun_discovery = True
             setattr(idp, field, value)
 

@@ -14,6 +14,7 @@ import { listMemories, getMemoryRecords } from "@/api/memories";
 import { trackAction } from "@/api/audit";
 import { useInvoke, clearInvokeState, sendElicitationResponse, type StreamSegment } from "@/hooks/useInvoke";
 import { useAuth } from "@/contexts/AuthContext";
+import { issuerMatchesDiscovery, usesRedirectLogin } from "@/auth/providers";
 import { useTheme, isLightTheme, THEME_LABELS, type Theme } from "@/contexts/ThemeContext";
 import { listConnectors, setUserApiKey, deleteUserApiKey } from "@/api/mcp";
 import { listAuthorizerConfigs, checkAuthorizerLinkStatus, getAuthorizerLinkAuthorizeUrl, submitAuthorizerLinkCallback, deleteAuthorizerLink } from "@/api/security";
@@ -135,32 +136,21 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
     const authConfig = agent?.authorizer_config;
     if (!authConfig?.type) { setResolvedAuthorizerId(null); setLinkStatus("not-configured"); return; }
 
-    // Same-IdP detection: login issuer matches agent's authorizer discovery URL
-    // Only applies when user logged in via Cognito directly (not external IdP),
-    // since an Entra user's token is NOT valid for a Cognito authorizer.
-    const isExternalLogin = loginAuthConfig?.provider_type && loginAuthConfig.provider_type !== "cognito";
+    // Same-IdP detection: login issuer matches agent's authorizer discovery URL.
+    // A Cognito pool match only counts when the user logged in through Cognito itself,
+    // since a token from another IdP is not valid for a Cognito authorizer.
+    const isExternalLogin = usesRedirectLogin(loginAuthConfig);
     if (!isExternalLogin && loginAuthConfig?.user_pool_id && authConfig.pool_id &&
         loginAuthConfig.user_pool_id === authConfig.pool_id) {
       setLinkStatus("same-idp");
       setResolvedAuthorizerId(null);
       return;
     }
-    if (isExternalLogin && authConfig.discovery_url && loginAuthConfig?.issuer_url) {
-      const entraPattern = /login\.microsoftonline\.com\/([^/]+)/i;
-      const issuerMatch = entraPattern.exec(loginAuthConfig.issuer_url);
-      const discoveryMatch = entraPattern.exec(authConfig.discovery_url);
-      let sameIdp = false;
-      if (issuerMatch && discoveryMatch) {
-        sameIdp = issuerMatch[1]!.toLowerCase() === discoveryMatch[1]!.toLowerCase();
-      } else {
-        const base = authConfig.discovery_url.replace(/\/?\.well-known\/openid-configuration\/?$/, "").replace(/\/+$/, "");
-        sameIdp = base.toLowerCase() === loginAuthConfig.issuer_url.replace(/\/+$/, "").toLowerCase();
-      }
-      if (sameIdp) {
-        setLinkStatus("same-idp");
-        setResolvedAuthorizerId(null);
-        return;
-      }
+    if (isExternalLogin &&
+        issuerMatchesDiscovery(loginAuthConfig?.provider_type, loginAuthConfig?.issuer_url, authConfig.discovery_url)) {
+      setLinkStatus("same-idp");
+      setResolvedAuthorizerId(null);
+      return;
     }
 
     listAuthorizerConfigs()

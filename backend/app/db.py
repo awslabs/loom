@@ -135,6 +135,10 @@ def _migrate_add_columns(eng) -> None:
         ("identity_providers", "token_endpoint", "VARCHAR"),
         ("identity_providers", "discovery_scopes", "TEXT"),
         ("identity_providers", "client_type", "VARCHAR"),
+        ("identity_providers", "internal_base_url", "VARCHAR"),
+        ("identity_providers", "end_session_endpoint", "VARCHAR"),
+        ("identity_providers", "refresh_enabled", "VARCHAR"),
+        ("identity_providers", "managed_by", "VARCHAR"),
         ("mcp_servers", "supports_elicitation", "VARCHAR"),
         ("mcp_servers", "runtime_endpoint_url", "VARCHAR"),
         ("mcp_servers", "delegation_mode", "VARCHAR DEFAULT 'm2m'"),
@@ -279,3 +283,11 @@ def init_db() -> None:
     _backfill_session_users(engine)
     _seed_default_tags(engine)
     _seed_demo_tag_profiles(engine)
+    _bootstrap_identity_provider(engine)
+
+
+def _bootstrap_identity_provider(eng) -> None:
+    """Seed the active identity provider from environment configuration, if any."""
+    from app.services.idp_bootstrap import bootstrap_identity_provider
+
+    bootstrap_identity_provider(eng)

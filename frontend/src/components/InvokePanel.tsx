@@ -16,6 +16,7 @@ import { listAuthorizerConfigs, listAuthorizerCredentials, checkAuthorizerLinkSt
 import { fetchModels, fetchLitellmModels } from "@/api/agents";
 import { listConnectors, setUserApiKey, deleteUserApiKey } from "@/api/mcp";
 import { groupModels } from "@/lib/models";
+import { issuerMatchesDiscovery } from "@/auth/providers";
 import type { SessionResponse, AuthorizerCredential, ModelOption, ConnectorInfo } from "@/api/types";
 
 const NEW_SESSION = "__new__";
@@ -38,22 +39,13 @@ interface InvokePanelProps {
   authorizerDiscoveryUrl?: string;
   isExternalIdp?: boolean;
   loginIssuerUrl?: string;
+  loginProviderType?: string;
   currentUserId?: string;
   onInvoke: (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean) => void;
   onCancel: () => void;
 }
 
-function issuerMatchesDiscovery(issuerUrl?: string, discoveryUrl?: string): boolean {
-  if (!issuerUrl || !discoveryUrl) return false;
-  const entraPattern = /login\.microsoftonline\.com\/([^/]+)/i;
-  const issuerMatch = entraPattern.exec(issuerUrl);
-  const discoveryMatch = entraPattern.exec(discoveryUrl);
-  if (issuerMatch && discoveryMatch) return issuerMatch[1]!.toLowerCase() === discoveryMatch[1]!.toLowerCase();
-  const base = discoveryUrl.replace(/\/?\.well-known\/openid-configuration\/?$/, "").replace(/\/+$/, "");
-  return base.toLowerCase() === issuerUrl.replace(/\/+$/, "").toLowerCase();
-}
-
-export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelId, allowedModelIds = [], mcpNames = [], authorizerName, authorizerId, authorizerPoolId, authorizerDiscoveryUrl, isExternalIdp, loginIssuerUrl, currentUserId, onInvoke, onCancel }: InvokePanelProps) {
+export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelId, allowedModelIds = [], mcpNames = [], authorizerName, authorizerId, authorizerPoolId, authorizerDiscoveryUrl, isExternalIdp, loginIssuerUrl, loginProviderType, currentUserId, onInvoke, onCancel }: InvokePanelProps) {
   const promptKey = `loom:invokePrompt:${agentId}`;
   const [prompt, setPrompt] = useState(() => sessionStorage.getItem(promptKey) ?? "");
 
@@ -91,7 +83,7 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
   // Authorizer linking state (cross-IdP)
   const [linkStatus, setLinkStatus] = useState<"unknown" | "linked" | "unlinked" | "linking" | "not-configured" | "same-idp">("unknown");
 
-  const sameIdp = isExternalIdp && issuerMatchesDiscovery(loginIssuerUrl, authorizerDiscoveryUrl);
+  const sameIdp = isExternalIdp && issuerMatchesDiscovery(loginProviderType, loginIssuerUrl, authorizerDiscoveryUrl);
 
   useEffect(() => {
     if (sameIdp) {

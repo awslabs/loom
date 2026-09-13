@@ -781,14 +781,34 @@ export interface ConnectorInfo {
 }
 
 // MCP Server types
+export type McpTransportType = "sse" | "streamable_http" | "stdio";
+export type McpAuthType = "none" | "oauth2" | "api_key" | "loom";
+
+export interface McpTemplate {
+  id: string;
+  display_name: string;
+  params_schema: Record<string, { type?: string; pattern?: string }>;
+  secrets: Array<{ name: string; env: string }>;
+}
+
+export interface McpSecretRef {
+  name: string;
+  backend: "env" | "secrets_manager";
+  ref: string;
+}
+
 export interface McpServer {
   id: number;
   name: string;
   description: string | null;
   endpoint_url: string;
-  transport_type: "sse" | "streamable_http";
+  transport_type: McpTransportType;
   status: "active" | "inactive" | "error";
-  auth_type: "none" | "oauth2" | "api_key";
+  auth_type: McpAuthType;
+  template_id?: string | null;
+  template_params?: Record<string, string> | null;
+  secret_refs?: McpSecretRef[] | null;
+  runtime_state?: string | null;
   oauth2_well_known_url: string | null;
   oauth2_client_id: string | null;
   oauth2_scopes: string | null;
@@ -809,9 +829,12 @@ export interface McpServer {
 export interface McpServerCreateRequest {
   name: string;
   description?: string;
-  endpoint_url: string;
-  transport_type: "sse" | "streamable_http";
-  auth_type?: "none" | "oauth2" | "api_key";
+  endpoint_url?: string;
+  transport_type: McpTransportType;
+  auth_type?: McpAuthType;
+  template_id?: string;
+  template_params?: Record<string, string>;
+  secret_refs?: McpSecretRef[];
   oauth2_well_known_url?: string;
   oauth2_client_id?: string;
   oauth2_client_secret?: string;
@@ -829,9 +852,12 @@ export interface McpServerUpdateRequest {
   name?: string;
   description?: string;
   endpoint_url?: string;
-  transport_type?: "sse" | "streamable_http";
+  transport_type?: McpTransportType;
   status?: "active" | "inactive" | "error";
-  auth_type?: "none" | "oauth2" | "api_key";
+  auth_type?: McpAuthType;
+  template_id?: string;
+  template_params?: Record<string, string>;
+  secret_refs?: McpSecretRef[];
   oauth2_well_known_url?: string;
   oauth2_client_id?: string;
   oauth2_client_secret?: string;

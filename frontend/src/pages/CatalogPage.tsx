@@ -793,7 +793,7 @@ export function CatalogPage({
                 <CardContent className="text-xs text-muted-foreground">
                   <div className="rounded border bg-input-bg p-3 space-y-0.5">
                     <div className="truncate" title={server.endpoint_url}><span className="text-muted-foreground/70">Endpoint:</span> {server.endpoint_url}</div>
-                    <div><span className="text-muted-foreground/70">Transport:</span> {server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</div>
+                    <div><span className="text-muted-foreground/70">Transport:</span> {server.transport_type === "stdio" ? "Stdio (local)" : server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</div>
                     <div><span className="text-muted-foreground/70">Authentication:</span> {server.auth_type === "oauth2" ? "OAuth2" : "None"}</div>
                     {server.created_at && (
                       <div><span className="text-muted-foreground/70">Created:</span> {formatTimestamp(server.created_at, timezone)}</div>
@@ -835,7 +835,7 @@ export function CatalogPage({
                       </div>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground truncate">{server.endpoint_url}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{server.transport_type === "stdio" ? "Stdio (local)" : server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">{server.auth_type === "oauth2" ? "OAuth2" : "None"}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {formatTimestamp(server.created_at, timezone)}

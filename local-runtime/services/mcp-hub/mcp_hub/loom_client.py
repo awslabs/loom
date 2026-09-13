@@ -1,4 +1,4 @@
-﻿"""HTTP client to Loom BFF for Hub session and tools."""
+﻿"""HTTP client to Loom BFF for Hub session and materialize/call."""
 from __future__ import annotations
 
 import json
@@ -54,22 +54,42 @@ def introspect(hub_session_token: str) -> dict[str, Any]:
     return payload
 
 
-def allowlist(hub_session_id: str) -> tuple[int, dict[str, Any]]:
-    return _request(
-        "GET",
-        "/api/mcp/hub/allowlist",
-        None,
-        {"X-Loom-Hub-Session-Id": hub_session_id},
-    )
-
-
-def tools_call(hub_session_id: str, tool_name: str, arguments: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def materialize_allowlist(
+    *,
+    hub_session_id: str,
+    mcp_client_slug: str,
+    client_status: str,
+    allowed_groups: list[str],
+    grants: list[dict[str, Any]],
+) -> tuple[int, dict[str, Any]]:
     return _request(
         "POST",
-        "/api/mcp/hub/tools/call",
+        "/api/mcp/hub/materialize-allowlist",
         {
             "hub_session_id": hub_session_id,
-            "tool_name": tool_name,
-            "arguments": arguments or {},
+            "mcp_client_slug": mcp_client_slug,
+            "client_status": client_status,
+            "allowed_groups": allowed_groups,
+            "grants": grants,
         },
     )
+
+
+def tools_call(
+    hub_session_id: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    server_id: int | None = None,
+    original_tool_name: str | None = None,
+) -> tuple[int, dict[str, Any]]:
+    body: dict[str, Any] = {
+        "hub_session_id": hub_session_id,
+        "tool_name": tool_name,
+        "arguments": arguments or {},
+    }
+    if server_id is not None:
+        body["server_id"] = server_id
+    if original_tool_name is not None:
+        body["original_tool_name"] = original_tool_name
+    return _request("POST", "/api/mcp/hub/tools/call", body)

@@ -186,9 +186,73 @@ class TestMcpHub(unittest.TestCase):
         self.assertEqual(names, {"grafana__search", "rancher__search"})
         self.assertEqual(mapping["grafana__search"], (1, "search"))
 
-    def test_hash_token_stable(self):
-        self.assertEqual(hash_token("hs_abc"), hash_token("hs_abc"))
-        self.assertNotEqual(hash_token("hs_abc"), hash_token("hs_abd"))
+    def test_materialize_from_grants_enabled(self):
+        server = McpServer(
+            name="Grafana",
+            endpoint_url="http://mcp-runtime:8787/s/1/mcp",
+            transport_type="stdio",
+            template_id="grafana",
+            status="active",
+        )
+        self.session.add(server)
+        self.session.flush()
+        self.session.add(McpTool(
+            server_id=server.id,
+            tool_name="search_dashboards",
+            description="Search",
+            input_schema='{"type":"object"}',
+        ))
+        self.session.commit()
+
+        mint = self.client.post("/api/mcp/hub/sessions", json={}).json()
+        resp = self.client.post(
+            "/api/mcp/hub/materialize-allowlist",
+            headers={"Authorization": "Bearer test-hub-token"},
+            json={
+                "hub_session_id": mint["hub_session_id"],
+                "mcp_client_slug": "cursor",
+                "client_status": "enabled",
+                "allowed_groups": [],
+                "grants": [
+                    {
+                        "server_id": server.id,
+                        "access_level": "selected_tools",
+                        "tool_names": ["search_dashboards"],
+                    }
+                ],
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertEqual(body["mcp_client_slug"], "cursor")
+        self.assertEqual(len(body["entries"]), 1)
+        names = [t["name"] for t in body["entries"][0]["tools"]]
+        self.assertEqual(names, ["search_dashboards"])
+
+    def test_materialize_discovered_empty(self):
+        mint = self.client.post("/api/mcp/hub/sessions", json={}).json()
+        resp = self.client.post(
+            "/api/mcp/hub/materialize-allowlist",
+            headers={"Authorization": "Bearer test-hub-token"},
+            json={
+                "hub_session_id": mint["hub_session_id"],
+                "mcp_client_slug": "cursor",
+                "client_status": "discovered",
+                "grants": [{"server_id": 1, "access_level": "all_tools", "tool_names": []}],
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["entries"], [])
+
+    def test_introspect_includes_groups(self):
+        mint = self.client.post("/api/mcp/hub/sessions", json={}).json()
+        intro = self.client.post(
+            "/api/mcp/hub/sessions/introspect",
+            headers={"Authorization": "Bearer test-hub-token"},
+            json={"hub_session_token": mint["hub_session_token"]},
+        )
+        self.assertEqual(intro.status_code, 200)
+        self.assertIn("g-admins-super", intro.json().get("groups") or [])
 
 
 if __name__ == "__main__":

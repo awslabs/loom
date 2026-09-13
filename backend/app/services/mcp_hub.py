@@ -82,12 +82,19 @@ def introspect_token(db: Session, token: str) -> dict[str, Any]:
             scopes = list(json.loads(row.scopes_json))
         except json.JSONDecodeError:
             scopes = []
+    groups: list[str] = []
+    if row.groups_json:
+        try:
+            groups = list(json.loads(row.groups_json))
+        except json.JSONDecodeError:
+            groups = []
     return {
         "active": True,
         "hub_session_id": row.id,
         "subject": row.subject,
         "idp_type": row.idp_type,
         "scopes": scopes,
+        "groups": groups,
         "expires_at": _iso_z(row.expires_at),
     }
 
@@ -128,25 +135,10 @@ def server_slug(server: McpServer) -> str:
     return slug or f"server-{server.id}"
 
 
-def build_allowlist(db: Session, user: UserInfo) -> dict[str, Any]:
-    agents = db.query(Agent).all()
-    invocavel = [a for a in agents if user_can_invoke_agent(user, a)]
-    per_server: dict[int, set[str] | None] = {}
-    for agent in invocavel:
-        rules = db.query(McpServerAccess).filter(McpServerAccess.persona_id == agent.id).all()
-        for rule in rules:
-            names = allowed_tool_names(rule)
-            if names is None:
-                per_server[rule.server_id] = None
-                continue
-            current = per_server.get(rule.server_id, "__missing__")
-            if current == "__missing__":
-                per_server[rule.server_id] = set(names)
-            elif current is None:
-                continue
-            else:
-                current.update(names)
-
+def _entries_from_server_tools(
+    db: Session,
+    per_server: dict[int, set[str] | None],
+) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for server_id, allowed in per_server.items():
         server = db.query(McpServer).filter(McpServer.id == server_id).first()
@@ -183,10 +175,96 @@ def build_allowlist(db: Session, user: UserInfo) -> dict[str, Any]:
             "transport": transport,
             "tools": tools,
         })
+    return entries
+
+
+def build_allowlist(db: Session, user: UserInfo) -> dict[str, Any]:
+    """Interim union-by-agents allowlist (ADR 0007). Prefer materialize_from_grants."""
+    agents = db.query(Agent).all()
+    invocavel = [a for a in agents if user_can_invoke_agent(user, a)]
+    per_server: dict[int, set[str] | None] = {}
+    for agent in invocavel:
+        rules = db.query(McpServerAccess).filter(McpServerAccess.persona_id == agent.id).all()
+        for rule in rules:
+            names = allowed_tool_names(rule)
+            if names is None:
+                per_server[rule.server_id] = None
+                continue
+            current = per_server.get(rule.server_id, "__missing__")
+            if current == "__missing__":
+                per_server[rule.server_id] = set(names)
+            elif current is None:
+                continue
+            else:
+                current.update(names)
 
     return {
         "subject": user.sub,
-        "entries": entries,
+        "entries": _entries_from_server_tools(db, per_server),
+        "generated_at": _iso_z(datetime.utcnow()),
+    }
+
+
+def materialize_from_grants(
+    db: Session,
+    user: UserInfo,
+    *,
+    hub_session_id: str,
+    mcp_client_slug: str,
+    client_status: str,
+    allowed_groups: list[str],
+    grants: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build allowlist entries from extension MCP Client grants (ADR 0008)."""
+    if client_status != "enabled":
+        return {
+            "subject": user.sub,
+            "hub_session_id": hub_session_id,
+            "mcp_client_slug": mcp_client_slug,
+            "client_status": client_status,
+            "entries": [],
+            "generated_at": _iso_z(datetime.utcnow()),
+        }
+    if allowed_groups:
+        user_groups = set(user.groups or [])
+        if "g-admins-super" not in user_groups and not (user_groups & set(allowed_groups)):
+            return {
+                "subject": user.sub,
+                "hub_session_id": hub_session_id,
+                "mcp_client_slug": mcp_client_slug,
+                "client_status": client_status,
+                "entries": [],
+                "generated_at": _iso_z(datetime.utcnow()),
+            }
+
+    per_server: dict[int, set[str] | None] = {}
+    for grant in grants:
+        try:
+            server_id = int(grant["server_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        level = str(grant.get("access_level") or "selected_tools")
+        if level == "all_tools":
+            per_server[server_id] = None
+            continue
+        names = grant.get("tool_names") or []
+        if not isinstance(names, list):
+            continue
+        name_set = {str(n) for n in names if n}
+        current = per_server.get(server_id, "__missing__")
+        if current == "__missing__":
+            per_server[server_id] = name_set
+        elif current is None:
+            continue
+        else:
+            current.update(name_set)
+
+    return {
+        "subject": user.sub,
+        "hub_session_id": hub_session_id,
+        "mcp_client_slug": mcp_client_slug,
+        "client_status": client_status,
+        "entries": _entries_from_server_tools(db, per_server),
         "generated_at": _iso_z(datetime.utcnow()),
     }
 
@@ -216,17 +294,32 @@ def expose_tools(entries: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], d
     return exposed, mapping
 
 
-def call_hub_tool(db: Session, user: UserInfo, exposed_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    allowlist = build_allowlist(db, user)
-    _exposed, mapping = expose_tools(allowlist["entries"])
-    if exposed_name not in mapping:
-        return {"success": False, "error": "tool_not_allowed", "denied": True}
-    server_id, original = mapping[exposed_name]
-    server = db.query(McpServer).filter(McpServer.id == server_id).first()
+def call_hub_tool(
+    db: Session,
+    user: UserInfo,
+    exposed_name: str,
+    arguments: dict[str, Any],
+    *,
+    server_id: int | None = None,
+    original_tool_name: str | None = None,
+) -> dict[str, Any]:
+    """Execute a Hub tool. Prefer explicit server_id+original from Hub grant mapping."""
+    if server_id is not None and original_tool_name:
+        resolved_server_id = server_id
+        original = original_tool_name
+    else:
+        # Interim fallback: union allowlist (pre-ADR 0008 path)
+        allowlist = build_allowlist(db, user)
+        _exposed, mapping = expose_tools(allowlist["entries"])
+        if exposed_name not in mapping:
+            return {"success": False, "error": "tool_not_allowed", "denied": True}
+        resolved_server_id, original = mapping[exposed_name]
+        if not _subject_still_allows(db, user, resolved_server_id, original):
+            return {"success": False, "error": "tool_not_allowed", "denied": True}
+
+    server = db.query(McpServer).filter(McpServer.id == resolved_server_id).first()
     if server is None:
         return {"success": False, "error": "server_not_found", "denied": True}
-    if not _subject_still_allows(db, user, server_id, original):
-        return {"success": False, "error": "tool_not_allowed", "denied": True}
     if server.transport_type == "stdio":
         try:
             ensure_stdio_ready(server)

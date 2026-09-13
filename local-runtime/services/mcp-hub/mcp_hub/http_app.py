@@ -1,4 +1,4 @@
-﻿"""User-facing MCP Hub HTTP facade (ADR 0007 / spec 016)."""
+﻿"""User-facing MCP Hub HTTP facade (ADR 0007 / 0008 / specs 016-022)."""
 from __future__ import annotations
 
 import json
@@ -6,9 +6,10 @@ import logging
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
-from mcp_hub import loom_client
+from mcp_hub import loom_client, store
+from mcp_hub.identity import parse_client_info
 from mcp_hub.naming import expose_tools
 
 logger = logging.getLogger("mcp_hub")
@@ -35,11 +36,85 @@ def _is_hub_session(token: str) -> bool:
 
 
 def _method_not_allowed(handler: BaseHTTPRequestHandler, allow: str = "POST") -> None:
-    """Streamable HTTP: no standalone SSE — clients (Cursor) treat 405 as OK, 404 as fatal."""
     handler.send_response(405)
     handler.send_header("Allow", allow)
     handler.send_header("Content-Length", "0")
     handler.end_headers()
+
+
+def _require_service(handler: BaseHTTPRequestHandler) -> bool:
+    expected = loom_client.service_token()
+    if not expected:
+        _json(handler, 503, {"error": {"message": "hub_unavailable"}})
+        return False
+    if _bearer(handler) != expected:
+        _json(handler, 401, {"error": {"message": "unauthorized"}})
+        return False
+    return True
+
+
+def _read_json(handler: BaseHTTPRequestHandler) -> Any:
+    length = int(handler.headers.get("Content-Length") or "0")
+    raw = handler.rfile.read(length) if length else b"{}"
+    return json.loads(raw.decode("utf-8") or "{}")
+
+
+def _user_allowed(groups: list[str], allowed_groups: list[str]) -> bool:
+    if not allowed_groups:
+        return True
+    if "g-admins-super" in groups:
+        return True
+    return bool(set(groups) & set(allowed_groups))
+
+
+def _build_session_allowlist(token: str, hub_session_id: str, groups: list[str]) -> tuple[str, dict[str, Any], dict[str, tuple[int, str]]]:
+    slug = store.session_client_slug(hub_session_id)
+    if not slug:
+        empty = {
+            "hub_session_id": hub_session_id,
+            "mcp_client_slug": None,
+            "client_status": "unbound",
+            "entries": [],
+        }
+        return "unbound", empty, {}
+    client = store.get_client(slug)
+    if client is None:
+        empty = {
+            "hub_session_id": hub_session_id,
+            "mcp_client_slug": slug,
+            "client_status": "missing",
+            "entries": [],
+        }
+        return slug, empty, {}
+    status = str(client.get("status") or "discovered")
+    allowed_groups = list(client.get("allowed_groups") or [])
+    if status != "enabled" or not _user_allowed(groups, allowed_groups):
+        empty = {
+            "hub_session_id": hub_session_id,
+            "mcp_client_slug": slug,
+            "client_status": status,
+            "entries": [],
+        }
+        return slug, empty, {}
+    code, payload = loom_client.materialize_allowlist(
+        hub_session_id=hub_session_id,
+        mcp_client_slug=slug,
+        client_status=status,
+        allowed_groups=allowed_groups,
+        grants=list(client.get("grants") or []),
+    )
+    if code != 200:
+        empty = {
+            "hub_session_id": hub_session_id,
+            "mcp_client_slug": slug,
+            "client_status": status,
+            "entries": [],
+            "error": "materialize_failed",
+        }
+        return slug, empty, {}
+    entries = list(payload.get("entries") or [])
+    _tools, mapping = expose_tools(entries)
+    return slug, payload, mapping
 
 
 class HubHandler(BaseHTTPRequestHandler):
@@ -47,7 +122,8 @@ class HubHandler(BaseHTTPRequestHandler):
         logger.info(fmt, *args)
 
     def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/health":
             _json(self, 200, {"status": "ok"})
             return
@@ -61,9 +137,28 @@ class HubHandler(BaseHTTPRequestHandler):
                 return
             _json(self, 200, {"status": "ok", "contract_version": "2026-09-hub-1"})
             return
-        # Cursor opens GET /mcp as SSE listen; we are POST/JSON-only (MCP 2025-03-26).
         if path in ("/mcp", "/"):
             _method_not_allowed(self)
+            return
+        if path == "/v1/clients":
+            if not _require_service(self):
+                return
+            qs = parse_qs(parsed.query)
+            status_filter = (qs.get("status") or [None])[0]
+            _json(self, 200, {"clients": store.list_clients(status_filter)})
+            return
+        if path.startswith("/v1/clients/"):
+            if not _require_service(self):
+                return
+            slug = path.removeprefix("/v1/clients/").strip("/")
+            if not slug or "/" in slug:
+                _json(self, 404, {"error": {"message": "not_found"}})
+                return
+            row = store.get_client(slug)
+            if row is None:
+                _json(self, 404, {"error": {"message": "not_found"}})
+                return
+            _json(self, 200, row)
             return
         _json(self, 404, {"error": {"message": "not_found"}})
 
@@ -72,7 +167,71 @@ class HubHandler(BaseHTTPRequestHandler):
         if path in ("/mcp", "/"):
             _method_not_allowed(self)
             return
+        if path.startswith("/v1/clients/"):
+            if not _require_service(self):
+                return
+            slug = path.removeprefix("/v1/clients/").strip("/")
+            if not slug or "/" in slug:
+                _json(self, 404, {"error": {"message": "not_found"}})
+                return
+            if not store.delete_client(slug):
+                _json(self, 404, {"error": {"message": "not_found"}})
+                return
+            self.send_response(204)
+            self.end_headers()
+            return
         _json(self, 404, {"error": {"message": "not_found"}})
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        if not path.startswith("/v1/clients/"):
+            _json(self, 404, {"error": {"message": "not_found"}})
+            return
+        if not _require_service(self):
+            return
+        slug = path.removeprefix("/v1/clients/").strip("/")
+        if not slug or "/" in slug:
+            _json(self, 404, {"error": {"message": "not_found"}})
+            return
+        try:
+            body = _read_json(self)
+        except json.JSONDecodeError:
+            _json(self, 400, {"error": {"message": "parse_error"}})
+            return
+        if not isinstance(body, dict):
+            _json(self, 400, {"error": {"message": "invalid_request"}})
+            return
+        row = store.patch_client(slug, body)
+        if row is None:
+            _json(self, 404, {"error": {"message": "not_found"}})
+            return
+        _json(self, 200, row)
+
+    def do_PUT(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        if not path.endswith("/grants") or not path.startswith("/v1/clients/"):
+            _json(self, 404, {"error": {"message": "not_found"}})
+            return
+        if not _require_service(self):
+            return
+        mid = path.removeprefix("/v1/clients/").removesuffix("/grants").strip("/")
+        if not mid or "/" in mid:
+            _json(self, 404, {"error": {"message": "not_found"}})
+            return
+        try:
+            body = _read_json(self)
+        except json.JSONDecodeError:
+            _json(self, 400, {"error": {"message": "parse_error"}})
+            return
+        grants = body.get("grants") if isinstance(body, dict) else None
+        if not isinstance(grants, list):
+            _json(self, 400, {"error": {"message": "grants_required"}})
+            return
+        row = store.put_grants(mid, grants)
+        if row is None:
+            _json(self, 404, {"error": {"message": "not_found"}})
+            return
+        _json(self, 200, row)
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
@@ -86,10 +245,8 @@ class HubHandler(BaseHTTPRequestHandler):
         if not _is_hub_session(token):
             _json(self, 401, {"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message": "unauthorized"}})
             return
-        length = int(self.headers.get("Content-Length") or "0")
-        raw = self.rfile.read(length) if length else b"{}"
         try:
-            body = json.loads(raw.decode("utf-8") or "{}")
+            body = _read_json(self)
         except json.JSONDecodeError:
             _json(self, 400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse_error"}})
             return
@@ -100,7 +257,6 @@ class HubHandler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             _json(self, 400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid_request"}})
             return
-        # notifications have no id / no response body required; still ack 202-ish as empty 200
         if "id" not in body and body.get("method", "").startswith("notifications/"):
             self.send_response(202)
             self.end_headers()
@@ -112,6 +268,26 @@ class HubHandler(BaseHTTPRequestHandler):
         method = body.get("method")
         params = body.get("params") or {}
         if method == "initialize":
+            info = loom_client.introspect(token)
+            if not info.get("active"):
+                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32001, "message": "unauthorized"}}
+            hub_session_id = str(info["hub_session_id"])
+            slug, name, version, family = parse_client_info(params if isinstance(params, dict) else {})
+            row = store.upsert_from_initialize(
+                hub_session_id=hub_session_id,
+                slug=slug,
+                declared_name=name,
+                declared_version=version,
+                declared_family=family,
+            )
+            logger.info(
+                "hub_initialize session=%s slug=%s family=%s status=%s name=%s",
+                hub_session_id,
+                slug,
+                family,
+                row.get("status"),
+                name[:64],
+            )
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -127,18 +303,28 @@ class HubHandler(BaseHTTPRequestHandler):
             info = loom_client.introspect(token)
             if not info.get("active"):
                 return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32001, "message": "unauthorized"}}
-            status, allow = loom_client.allowlist(str(info["hub_session_id"]))
-            if status != 200:
-                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32002, "message": "allowlist_unavailable"}}
-            tools, _mapping = expose_tools(allow.get("entries") or [])
+            groups = list(info.get("groups") or [])
+            _slug, allow, _mapping = _build_session_allowlist(token, str(info["hub_session_id"]), groups)
+            tools, _ = expose_tools(allow.get("entries") or [])
             return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": tools}}
         if method == "tools/call":
             info = loom_client.introspect(token)
             if not info.get("active"):
                 return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32001, "message": "unauthorized"}}
+            groups = list(info.get("groups") or [])
+            _slug, allow, mapping = _build_session_allowlist(token, str(info["hub_session_id"]), groups)
             name = str((params or {}).get("name") or "")
             arguments = (params or {}).get("arguments") or {}
-            status, result = loom_client.tools_call(str(info["hub_session_id"]), name, arguments if isinstance(arguments, dict) else {})
+            if name not in mapping:
+                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32003, "message": "tool_not_allowed"}}
+            server_id, original = mapping[name]
+            status, result = loom_client.tools_call(
+                str(info["hub_session_id"]),
+                name,
+                arguments if isinstance(arguments, dict) else {},
+                server_id=server_id,
+                original_tool_name=original,
+            )
             if status == 403:
                 return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32003, "message": "tool_not_allowed"}}
             if status != 200 or not result.get("success"):
@@ -153,6 +339,10 @@ def serve(host: str | None = None, port: int | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     if not loom_client.service_token():
         logger.error("MCP_HUB_SERVICE_TOKEN unset — fail-closed")
+    try:
+        os.makedirs(os.path.dirname(store.store_path()) or ".", exist_ok=True)
+    except OSError:
+        pass
     server = ThreadingHTTPServer((bind_host, bind_port), HubHandler)
-    logger.info("mcp-hub listening on %s:%s", bind_host, bind_port)
+    logger.info("mcp-hub listening on %s:%s store=%s", bind_host, bind_port, store.store_path())
     server.serve_forever()

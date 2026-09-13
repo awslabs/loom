@@ -1,38 +1,48 @@
-# Spec 018 — Allowlist do MCP Hub (união por agents)
+# Spec 018 — Allowlist do MCP Hub
 
 - **Status:** Rascunho
 - **Data:** 2026-09-13
-- **Implementa:** [ADR 0007](../adr/0007-mcp-hub.md)
-- **Depende de:** [016 — contrato](016-mcp-hub-contract.md), [017 — sessão](017-mcp-hub-session.md), modelo `McpServerAccess` / invoke ACL
+- **Atualizado:** 2026-09-13 — canal bound ([ADR 0008](../adr/0008-hub-channel-personas.md) / [021](021-mcp-hub-channel-personas.md))
+- **Implementa:** [ADR 0007](../adr/0007-mcp-hub.md), [ADR 0008](../adr/0008-hub-channel-personas.md)
+- **Depende de:** [016 — contrato](016-mcp-hub-contract.md), [017 — sessão](017-mcp-hub-session.md), [021 — channel personas](021-mcp-hub-channel-personas.md), modelo `McpServerAccess`
 
 ## 1. Objetivo
 
-Traduzir **conta logada** → conjunto de tools MCP permitidas, reusando o
-modelo atual (**agent-centric**) sem criar ACL user→tool paralela.
+Traduzir **Hub session (conta + canal)** → conjunto de tools MCP
+permitidas, reusando o modelo **persona-centric** (`McpServerAccess`)
+sem ACL user→tool paralela.
 
-## 2. Algoritmo (Fase 1)
+## 2. Algoritmo
 
-Dado `subject` (e grupos/scopes já conhecidos no control plane):
+### 2a. Interino (só até ADR 0008 implementado)
+
+Dado `subject` (grupos/scopes no control plane), **sem** bind de canal:
 
 ```text
 1. agents = agents que o usuário PODE invocar
-   (mesma regra de grupo/ACL do POST /api/agents/{id}/invoke)
-
-2. Para cada agent em agents:
-     para cada McpServerAccess(persona_id=agent.id):
-       se access_level == all_tools:
-         incluir todas as tools publicadas daquele server (mcp_tools / tools/list)
-       se access_level == selected_tools:
-         incluir intersection(allowed_tool_names, tools do server)
-       se não há McpServerAccess para (server, agent):
-         skip (deny-by-default)
-
-3. allowlist = união dos pares (server_id, tool_name)
-   (depois naming/colisão na 016)
+   — excluir loom:kind=hub-channel
+2. união de McpServerAccess desses agents
+3. allowlist = união (server_id, tool_name)
 ```
 
-Deny-by-default: zero agents invocáveis ou zero access → `tools/list` = `[]`
-( Hub autenticado, catálogo vazio — não 403 no list ).
+### 2b. Default ([ADR 0008](../adr/0008-hub-channel-personas.md) / [021](021-mcp-hub-channel-personas.md))
+
+Sessão **com** `channel_slug` / `persona_id` (017):
+
+```text
+1. Carregar persona do bind; deve ser hub-channel ativa
+2. Revalidar acesso do user ao canal (021); senão entries=[]
+3. rules = McpServerAccess(persona_id=canal)
+4. Para cada rule:
+     all_tools → tools publicadas do server (mcp_tools)
+     selected_tools → intersection(allowed_tool_names, tools do server)
+5. allowlist = só esse conjunto (sem união de Chat)
+6. Naming/colisão → 016
+```
+
+Deny-by-default: sem access no canal → `tools/list` = `[]` (Hub
+autenticado, catálogo vazio — não 403 no list). `tools/call` fora da
+lista → erro / 403.
 
 ## 3. Onde calcula
 
@@ -42,12 +52,13 @@ Deny-by-default: zero agents invocáveis ou zero access → `tools/list` = `[]`
 GET /api/mcp/hub/allowlist
 Authorization: Bearer <MCP_HUB_SERVICE_TOKEN>
 X-Loom-Hub-Session-Id: <hub_session_id>
-  (ou body/query com session id já introspectado)
 
 → 200
 {
   "subject": "…",
   "hub_session_id": "…",
+  "channel_slug": "cursor-ide",
+  "persona_id": "<id>",
   "entries": [
     {
       "server_id": 1,
@@ -63,28 +74,23 @@ X-Loom-Hub-Session-Id: <hub_session_id>
 }
 ```
 
-O Hub **não** lê Postgres. Schemas podem vir do cache `mcp_tools` no Loom
-ou de refresh upstream (Loom chama mcp-runtime / remoto).
+O Hub **não** lê Postgres.
 
 ## 4. Frescor (live vs snapshot)
 
 | Evento | Comportamento v1 |
 |--------|------------------|
 | `tools/list` | Reavalia allowlist no Loom (ou cache ≤ 30s por `hub_session_id`) |
-| `tools/call` | Revalida que `(server_id, original_name)` ∈ allowlist **agora** |
-| Revogação de `McpServerAccess` | Próximo list/call já nega |
-| Mint | **Não** congela tools; só prova identidade |
+| `tools/call` | Revalida `(server_id, original_name)` ∈ allowlist **agora** |
+| Revogação de `McpServerAccess` no canal | Próximo list/call já nega |
+| Mint | **Não** congela tools; só identidade + bind de canal |
+| Troca de canal | Novo mint (017); sessão antiga mantém bind |
 
-## 5. Opção adiada: agent fixo
+## 5. Critérios de aceite
 
-Query/`agent_id` no mint para restringir a união a um agent = **não** é
-default Fase 1. Se implementada depois, documentar como extensão desta
-spec sem quebrar `2026-09-hub-1` sem bump.
-
-## 6. Critérios de aceite
-
-- [ ] User com access só a tool A via agent X → list contém A, não B
-- [ ] User com dois agents allowlisting A e B → list = {A,B}
-- [ ] Remover `McpServerAccess` → call seguinte falha sem rede ao filho
-- [ ] User sem agents invocáveis → list `[]`
+- [ ] Sessão bound a canal A com tool X → list contém X; tool só no Chat agent → ausente
+- [ ] Canal B com tools diferentes → sessão B não vê tools só de A
+- [ ] Remover `McpServerAccess` do canal → call seguinte falha sem rede ao filho
+- [ ] User sem acesso ao canal / canal sem rules → list `[]`
 - [ ] Hub sem DB próprio para ACL
+- [ ] Persona `hub-channel` excluída do algoritmo §2a

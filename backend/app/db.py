@@ -284,6 +284,7 @@ def init_db() -> None:
     _seed_default_tags(engine)
     _seed_demo_tag_profiles(engine)
     _bootstrap_identity_provider(engine)
+    _seed_local_demo_agents(engine)
 
 
 def _bootstrap_identity_provider(eng) -> None:
@@ -291,3 +292,10 @@ def _bootstrap_identity_provider(eng) -> None:
     from app.services.idp_bootstrap import bootstrap_identity_provider
 
     bootstrap_identity_provider(eng)
+
+
+def _seed_local_demo_agents(eng) -> None:
+    """Seed the local-only educational agent used to exercise LiteLLM invoke."""
+    from app.services.local_agents import seed_local_demo_agents
+
+    seed_local_demo_agents(eng)

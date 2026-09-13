@@ -23,6 +23,7 @@ import { RegistryActions } from "@/components/RegistryActions";
 import { ExternalIntegrationSection } from "@/components/ExternalIntegrationSection";
 import { useInvoke, sendElicitationResponse } from "@/hooks/useInvoke";
 import { useAuth } from "@/contexts/AuthContext";
+import { usesRedirectLogin } from "@/auth/providers";
 import { trackAction } from "@/api/audit";
 import type { AgentResponse, SessionResponse } from "@/api/types";
 
@@ -146,6 +147,9 @@ export function AgentDetailPage({
               {agent.source === "deploy" && (
                 <Badge variant="outline" className="text-[10px] px-1.5 py-0">CUSTOM</Badge>
               )}
+              {agent.source === "local" && (
+                <Badge variant="outline" className="text-[10px] px-1.5 py-0">LOCAL</Badge>
+              )}
               <RegistryStatusBadge status={agent.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
               {!registryReadOnly && registryEnabled && (
                 <RegistryActions
@@ -235,8 +239,9 @@ export function AgentDetailPage({
             authorizerName={agent.authorizer_config?.name}
             authorizerPoolId={agent.authorizer_config?.pool_id}
             authorizerDiscoveryUrl={agent.authorizer_config?.discovery_url}
-            isExternalIdp={Boolean(authConfig?.provider_type && authConfig.provider_type !== "cognito")}
+            isExternalIdp={usesRedirectLogin(authConfig)}
             loginIssuerUrl={authConfig?.issuer_url}
+            loginProviderType={authConfig?.provider_type}
             currentUserId={user?.username ?? user?.sub}
             onInvoke={handleInvoke}
             onCancel={cancel}

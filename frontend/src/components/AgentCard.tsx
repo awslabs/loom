@@ -63,6 +63,7 @@ function phaseLabel(agent: AgentResponse): string | null {
 function deploymentTypeLabel(agent: AgentResponse): string | null {
   if (agent.source === "harness") return "MANAGED";
   if (agent.source === "deploy") return "CUSTOM";
+  if (agent.source === "local") return "LOCAL";
   return null;
 }
 
@@ -72,7 +73,7 @@ function frameworkLabel(agent: AgentResponse): string | null {
 }
 
 function existsInAgentCore(agent: AgentResponse): boolean {
-  return !!agent.runtime_id;
+  return agent.source !== "local" && !!agent.runtime_id;
 }
 
 export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, showOnCardKeys, deleteStartTime, updateStartTime, userGroups = [], registryEnabled = true }: AgentCardProps) {

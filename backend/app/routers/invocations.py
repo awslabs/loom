@@ -30,6 +30,7 @@ from app.models.approval_policy import ApprovalPolicy
 
 from app.services.agentcore import invoke_agent, invoke_agent_ws
 from app.services.harness import invoke_harness_stream
+from app.services.local_invoke import invoke_local_agent_stream, is_local_agent
 from app.services.cloudwatch import (
     get_log_events, get_usage_log_events,
     parse_agent_start_time, parse_agentcore_request_id,
@@ -1683,8 +1684,13 @@ async def invoke_agent_endpoint(
     if active_policies:
         approval_policies_payload = [p.to_dict() for p in active_policies]
 
-    # Dispatch to harness or standard invoke path
-    if agent.source == "harness" and agent.harness_id:
+    # Dispatch to harness, local LiteLLM, or standard AgentCore invoke path
+    if is_local_agent(agent):
+        stream_gen = invoke_local_agent_stream(
+            agent, session, invocation, db, client_invoke_time,
+            request_body.prompt, runtime_model_id,
+        )
+    elif agent.source == "harness" and agent.harness_id:
         # Convert dynamic MCP connectors to harness tool format
         dynamic_harness_tools: list[dict[str, Any]] | None = None
         if dynamic_mcp_servers:

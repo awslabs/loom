@@ -668,6 +668,30 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertEqual(mcp_configs[0]["transport"], "streamable_http")
         self.assertNotIn("auth", mcp_configs[0])
 
+    def test_deploy_agent_rejects_stdio_mcp(self):
+        from app.models.mcp import McpServer
+        server = McpServer(
+            name="local-echo",
+            endpoint_url="http://mcp-runtime:8787/s/1/mcp",
+            transport_type="stdio",
+            auth_type="loom",
+            template_id="test-echo",
+        )
+        self.session.add(server)
+        self.session.commit()
+        self.session.refresh(server)
+        response = self.client.post(
+            "/api/agents",
+            json={
+                "source": "deploy",
+                "name": "stdio_agent",
+                "model_id": "us.anthropic.claude-sonnet-4-6",
+                "mcp_servers": [server.id],
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Stdio MCP cannot be deployed to AgentCore", response.json()["detail"])
+
     @patch("app.routers.agents.create_oauth2_credential_provider")
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")

@@ -26,6 +26,7 @@ from app.models.invocation import Invocation
 from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
 from app.models.mcp import McpServer
+from app.services.mcp_access import require_access, require_access_or_403, allowed_tool_names, McpAccessDenied
 from app.models.approval_policy import ApprovalPolicy
 
 from app.services.agentcore import invoke_agent, invoke_agent_ws
@@ -1600,12 +1601,21 @@ async def invoke_agent_endpoint(
         dynamic_mcp_servers = []
 
         for server in mcp_records:
+            rule = require_access_or_403(db, server.id, agent.id)
+            if server.transport_type == "stdio" and not is_local_agent(agent):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Stdio MCP cannot be used with AgentCore agents: {server.name}",
+                )
             entry: dict[str, Any] = {
                 "name": server.name,
                 "enabled": True,
-                "transport": server.transport_type,
+                "transport": "streamable_http" if server.transport_type == "stdio" else server.transport_type,
                 "endpoint_url": server.endpoint_url,
             }
+            selected = allowed_tool_names(rule)
+            if selected is not None:
+                entry["allowed_tools"] = selected
             if server.auth_type == "api_key":
                 # Per-user keys are stored by the immutable IdP subject.  The
                 # actor_id is a separately formatted value used by AgentCore
@@ -1804,9 +1814,22 @@ async def invoke_agent_websocket(
                 mcp_servers = db.query(McpServer).filter(McpServer.id.in_(connector_ids)).all()
                 dynamic_mcp_servers = []
                 for s in mcp_servers:
+                    try:
+                        require_access(db, s.id, agent.id)
+                    except McpAccessDenied as exc:
+                        await websocket.send_json({"type": "error", "content": str(exc)})
+                        dynamic_mcp_servers = None
+                        break
+                    if s.transport_type == "stdio" and not is_local_agent(agent):
+                        await websocket.send_json({
+                            "type": "error",
+                            "content": f"Stdio MCP cannot be used with AgentCore agents: {s.name}",
+                        })
+                        dynamic_mcp_servers = None
+                        break
                     server_data: dict[str, Any] = {
                         "name": s.name,
-                        "transport": s.transport_type,
+                        "transport": "streamable_http" if s.transport_type == "stdio" else s.transport_type,
                         "endpoint_url": s.endpoint_url,
                     }
                     dynamic_mcp_servers.append(server_data)

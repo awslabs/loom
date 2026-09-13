@@ -13,9 +13,13 @@ class McpServer(Base):
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     endpoint_url = Column(String, nullable=False)
-    transport_type = Column(String, nullable=False)  # 'sse' or 'streamable_http'
+    transport_type = Column(String, nullable=False)  # 'sse', 'streamable_http', or 'stdio'
     status = Column(String, nullable=False, default="active")  # active, inactive, error
-    auth_type = Column(String, nullable=False, default="none")  # none, oauth2
+    auth_type = Column(String, nullable=False, default="none")  # none, oauth2, api_key, loom
+    template_id = Column(String, nullable=True)
+    template_params = Column(Text, nullable=True)  # JSON
+    secret_refs = Column(Text, nullable=True)  # JSON list of SecretReference
+    runtime_state = Column(String, nullable=True)
     oauth2_well_known_url = Column(String, nullable=True)
     oauth2_client_id = Column(String, nullable=True)
     oauth2_client_secret = Column(String, nullable=True)
@@ -55,11 +59,37 @@ class McpServer(Base):
             "has_admin_api_key": self.has_admin_api_key == "true",
             "supports_elicitation": self.supports_elicitation == "true",
             "runtime_endpoint_url": self.runtime_endpoint_url,
+            "template_id": self.template_id,
+            "template_params": self.get_template_params(),
+            "secret_refs": self.get_secret_refs(),
+            "runtime_state": self.runtime_state,
             "registry_record_id": self.registry_record_id,
             "registry_status": self.registry_status,
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None,
             "updated_at": (self.updated_at.isoformat() + "Z") if self.updated_at else None,
         }
+
+    def get_template_params(self) -> dict | None:
+        if not self.template_params:
+            return None
+        try:
+            return json.loads(self.template_params)
+        except json.JSONDecodeError:
+            return None
+
+    def set_template_params(self, params: dict | None) -> None:
+        self.template_params = json.dumps(params) if params else None
+
+    def get_secret_refs(self) -> list | None:
+        if not self.secret_refs:
+            return None
+        try:
+            return json.loads(self.secret_refs)
+        except json.JSONDecodeError:
+            return None
+
+    def set_secret_refs(self, refs: list | None) -> None:
+        self.secret_refs = json.dumps(refs) if refs else None
 
 
 class McpTool(Base):

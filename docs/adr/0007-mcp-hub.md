@@ -64,11 +64,10 @@ mcp-runtime / MCP HTTP remotos  (já existentes)
    (TTL, `sub`, escopos mínimos, binding opcional a client_id). O cliente
    MCP usa esse Bearer. O Hub introspecta/valida a sessão **só** via API
    Loom (ou cache assinado pelo Loom).
-4. **Autorização (Fase 1 interina):** conta → agents invocáveis →
-   `McpServerAccess` → tools (**união**). Deny-by-default se não houver
-   regra. **Default duradouro:** [ADR 0008 — Hub channel personas](0008-hub-channel-personas.md)
-   (allowlist = persona `hub-channel` bound no mint; não invocável; não
-   união de Chat).
+4. **Autorização (Fase 1 interina):** união de agents invocáveis.
+   **Default duradouro:** [ADR 0008](0008-mcp-hub-clients.md) — MCP Client
+   **descoberto** no `initialize` (`clientInfo`); admin enable+grants na
+   extensão; mint só autentica o user. Ver também [ADR 0009](0009-mcp-hub-client-identification.md).
 5. **Só tools MCP.** Sem `list_agents` / `invoke_agent` / A2A nesta fase.
 6. **Nomes sem prefixo de produto.** Tools do Hub não usam prefixo `loom_`.
    Em colisão entre servidores, namespacar pelo **servidor/template**
@@ -143,8 +142,8 @@ A2A; decisão em ADR futura.
 |---|--------|-----------|
 | 1 | Hub só no FastAPI (BFF REST, sem MCP) | Rejeitada para IDE: Cursor espera MCP nativo. |
 | 2 | Cliente MCP manda JWT do IdP ao Hub | Rejeitada: data plane não valida IdP (ADR 0004/0005). |
-| 3 | ACL user→tool nova, ignorando agents | Adiada/rejeitada como default: duplicaria modelo; ver ADR 0008 (canal persona). |
-| 4 | Um Hub session = um agent/canal fixo | **Promovida** em [ADR 0008](0008-hub-channel-personas.md) (persona `hub-channel`, não invocável). Uniao Fase 1 = interina. |
+| 3 | ACL user→tool nova, ignorando agents | Rejeitada como default; ver ADR 0008 (MCP Client → tools na extensão). |
+| 4 | Um Hub session = um agent/canal fixo | **Promovida** como MCP Client bound ([ADR 0008](0008-mcp-hub-clients.md)); não é Agent. União Fase 1 = interina. |
 | 5 | Gateway MCP genérico no core (ADR 0004) | Rejeitada de novo: Hub é extensão local + BFF mínimo, não segundo catálogo. |
 | 6 | Incluir invoke de agents na Fase 1 | Rejeitada por escopo; mercado trata agents ≠ tools (MCP vs A2A). |
 
@@ -168,10 +167,12 @@ A2A; decisão em ADR futura.
 
 1. [016 — Contrato MCP](../specs/016-mcp-hub-contract.md) (`initialize` / `tools/list` / `tools/call` + naming)
 2. [017 — Hub session](../specs/017-mcp-hub-session.md) (mint / introspect)
-3. [018 — Allowlist](../specs/018-mcp-hub-allowlist.md) (união interina; **default duradouro: [ADR 0008](0008-hub-channel-personas.md)**)
+3. [018 — Allowlist](../specs/018-mcp-hub-allowlist.md) (união interina; **default: [ADR 0008](0008-mcp-hub-clients.md)**)
 4. [019 — Segurança](../specs/019-mcp-hub-security.md)
 5. [020 — Observabilidade](../specs/020-mcp-hub-observability.md)
-6. [ADR 0008 — Hub channel personas](0008-hub-channel-personas.md)
+6. [ADR 0008 — MCP Clients](0008-mcp-hub-clients.md)
+7. [ADR 0009 — Identificação MCP Client](0009-mcp-hub-client-identification.md)
+8. [021 — MCP Clients](../specs/021-mcp-hub-clients.md) · [022 — Identificação](../specs/022-mcp-hub-client-identification.md)
 
 Implementação **não** começa até as specs **016–018** serem aceitas.
 Na segurança (019), v1 prefere `tools/call` via BFF Loom para não guardar

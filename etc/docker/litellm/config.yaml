@@ -1,0 +1,30 @@
+# LOCAL DEVELOPMENT ONLY. Master key and model aliases here are throwaway.
+# Production LiteLLM config lives outside this tree and must not list cursor-local.
+
+model_list:
+  - model_name: mock-echo
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: dummy
+      mock_response: "LiteLLM local mock is up. Loom is talking only to this proxy."
+
+  - model_name: orientador-academico
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: dummy
+      mock_response: "Olá, sou o Orientador Acadêmico da Universidade Horizonte. Posso ajudar com matrícula (20 a 28 de julho de 2026), calendário 2026.2 (aulas de 3 de agosto a 11 de dezembro) e trancamento pelo Portal do Aluno até a 4ª semana letiva. Depois desse prazo, abra requerimento na Coordenação (sala A-102, 9h às 17h). Esta é uma resposta fictícia do proxy LiteLLM para o ambiente local."
+
+  # Name after the custom provider must not match a built-in model id
+  # (LiteLLM has historically dispatched those to OpenAI before custom_provider_map).
+  - model_name: cursor-local
+    litellm_params:
+      model: cursor_agent/cursor-default
+
+litellm_settings:
+  drop_params: true
+  custom_provider_map:
+    - provider: cursor_agent
+      custom_handler: cursor_handler.cursor_llm
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

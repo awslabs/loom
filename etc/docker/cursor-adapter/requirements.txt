@@ -1,0 +1,2 @@
+# Host-only. The Loom backend image must not install this.
+cursor-sdk>=0.4.0

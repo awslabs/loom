@@ -1,0 +1,181 @@
+{
+  "realm": "loom",
+  "enabled": true,
+  "displayName": "Loom (local)",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "verifyEmail": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "accessTokenLifespan": 900,
+  "ssoSessionIdleTimeout": 3600,
+  "ssoSessionMaxLifespan": 36000,
+  "clients": [
+    {
+      "clientId": "loom-frontend",
+      "name": "Loom Frontend",
+      "description": "Public SPA client using Authorization Code + PKCE.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [
+        "http://localhost:5173/*",
+        "http://127.0.0.1:5173/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*##http://127.0.0.1:5173/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "loom-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "loom-frontend",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "groups": [
+    { "name": "t-admin" },
+    { "name": "t-user" },
+    { "name": "g-admins-super" },
+    { "name": "g-admins-demo" },
+    { "name": "g-admins-security" },
+    { "name": "g-admins-memory" },
+    { "name": "g-admins-mcp" },
+    { "name": "g-admins-a2a" },
+    { "name": "g-admins-registry" },
+    { "name": "g-users-demo" },
+    { "name": "g-users-test" },
+    { "name": "g-users-strategics" }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "admin@local.loom",
+      "firstName": "Super",
+      "lastName": "Admin",
+      "credentials": [
+        { "type": "password", "value": "Loom-Local-Dev-1", "temporary": false }
+      ],
+      "groups": ["/t-admin", "/g-admins-super"]
+    },
+    {
+      "username": "demo-admin-1",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "demo-admin-1@local.loom",
+      "firstName": "Demo",
+      "lastName": "Admin",
+      "credentials": [
+        { "type": "password", "value": "Loom-Local-Dev-1", "temporary": false }
+      ],
+      "groups": ["/t-admin", "/g-admins-demo"]
+    },
+    {
+      "username": "security-admin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "security-admin@local.loom",
+      "firstName": "Security",
+      "lastName": "Admin",
+      "credentials": [
+        { "type": "password", "value": "Loom-Local-Dev-1", "temporary": false }
+      ],
+      "groups": ["/t-admin", "/g-admins-security"]
+    },
+    {
+      "username": "integration-admin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "integration-admin@local.loom",
+      "firstName": "Integration",
+      "lastName": "Admin",
+      "credentials": [
+        { "type": "password", "value": "Loom-Local-Dev-1", "temporary": false }
+      ],
+      "groups": ["/t-admin", "/g-admins-memory", "/g-admins-mcp", "/g-admins-a2a"]
+    },
+    {
+      "username": "registry-admin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "registry-admin@local.loom",
+      "firstName": "Registry",
+      "lastName": "Admin",
+      "credentials": [
+        { "type": "password", "value": "Loom-Local-Dev-1", "temporary": false }
+      ],
+      "groups": ["/t-admin", "/g-admins-registry"]
+    },
+    {
+      "username": "demo-user-1",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "demo-user-1@local.loom",
+      "firstName": "Demo",
+      "lastName": "User",
+      "credentials": [
+        { "type": "password", "value": "Loom-Local-Dev-1", "temporary": false }
+      ],
+      "groups": ["/t-user", "/g-users-demo"]
+    },
+    {
+      "username": "test-user",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "test-user@local.loom",
+      "firstName": "Test",
+      "lastName": "User",
+      "credentials": [
+        { "type": "password", "value": "Loom-Local-Dev-1", "temporary": false }
+      ],
+      "groups": ["/t-user", "/g-users-test"]
+    },
+    {
+      "username": "strategics-user",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "strategics-user@local.loom",
+      "firstName": "Strategics",
+      "lastName": "User",
+      "credentials": [
+        { "type": "password", "value": "Loom-Local-Dev-1", "temporary": false }
+      ],
+      "groups": ["/t-user", "/g-users-strategics"]
+    }
+  ]
+}

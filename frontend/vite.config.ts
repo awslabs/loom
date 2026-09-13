@@ -14,4 +14,12 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    // Bind-mounted source (Docker on a Windows or macOS host) does not deliver change
+    // events into the container, so hot reload only works when the watcher polls.
+    watch:
+      process.env.VITE_USE_POLLING === "true"
+        ? { usePolling: true, interval: 300 }
+        : undefined,
+  },
 });

@@ -11,9 +11,11 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && chmod +x /usr/local/lib/node_modules/npm/bin/npm-cli.js \
                 /usr/local/lib/node_modules/npm/bin/npx-cli.js \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g @azure-devops/mcp@2.9.0
+    && npm install -g @azure-devops/mcp@2.9.0 rancher-mcp-server@0.9.1 \
+    && pip install --no-cache-dir uv \
+    && uvx --from mcp-grafana==1.4.1 mcp-grafana --help >/dev/null
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

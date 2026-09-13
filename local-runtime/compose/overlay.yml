@@ -41,12 +41,20 @@ services:
     build:
       context: ./local-runtime/services/mcp-runtime
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      # Kind ingress on Windows :8080 (C:\work\k8s local-access). Host header must match Ingress.
+      - "grafana.local:host-gateway"
+      - "rancher.local:host-gateway"
     environment:
       MCP_RUNTIME_HOST: 0.0.0.0
       MCP_RUNTIME_PORT: "8787"
       MCP_RUNTIME_TOKEN: ${MCP_RUNTIME_TOKEN:-loom-mcp-runtime-local}
       MCP_TEMPLATES_DIR: /templates
       AZURE_DEVOPS_PAT: ${AZURE_DEVOPS_PAT:-}
+      GRAFANA_SERVICE_ACCOUNT_TOKEN: ${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}
+      RANCHER_MCP_RANCHER_TOKEN: ${RANCHER_MCP_RANCHER_TOKEN:-}
+      RANCHER_MCP_TLS_INSECURE: ${RANCHER_MCP_TLS_INSECURE:-}
     volumes:
       - ./local-runtime/templates:/templates:ro
     ports:

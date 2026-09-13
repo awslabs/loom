@@ -84,16 +84,26 @@ def validate_params(template: dict[str, Any], params: dict[str, Any]) -> dict[st
     return cleaned
 
 
+def _replace_params(raw: str, params: dict[str, str], *, kind: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in params:
+            raise TemplateError(f"{kind} references unknown param {name!r}")
+        return params[name]
+
+    return PARAM_PLACEHOLDER.sub(_replace, raw)
+
+
 def render_args(template: dict[str, Any], params: dict[str, str]) -> list[str]:
-    rendered: list[str] = []
-    for raw in template.get("args") or []:
-        arg = str(raw)
+    return [_replace_params(str(raw), params, kind="arg") for raw in (template.get("args") or [])]
 
-        def _replace(match: re.Match[str]) -> str:
-            name = match.group(1)
-            if name not in params:
-                raise TemplateError(f"arg references unknown param {name!r}")
-            return params[name]
 
-        rendered.append(PARAM_PLACEHOLDER.sub(_replace, arg))
+def render_env(template: dict[str, Any], params: dict[str, str]) -> dict[str, str]:
+    """Non-secret child env from template `env:` + `{{params.*}}` placeholders."""
+    rendered: dict[str, str] = {}
+    for key, raw in (template.get("env") or {}).items():
+        env_name = str(key)
+        if not env_name.isidentifier():
+            raise TemplateError(f"invalid env name {env_name!r}")
+        rendered[env_name] = _replace_params(str(raw), params, kind="env")
     return rendered

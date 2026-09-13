@@ -11,7 +11,7 @@ from typing import Any
 
 from mcp_runtime.secrets import SecretError, resolve_secret_refs
 from mcp_runtime.stdio import StdioError, StdioSession
-from mcp_runtime.templates import get_template, render_args, validate_params
+from mcp_runtime.templates import get_template, render_args, render_env, validate_params
 
 logger = logging.getLogger("mcp_runtime")
 
@@ -84,6 +84,7 @@ class Supervisor:
             raise RuntimeError(f"command {command} is not on PATH")
         args = [binary, *render_args(template, handle.params)]
         child_env = os.environ.copy()
+        child_env.update(render_env(template, handle.params))
         try:
             child_env.update(resolve_secret_refs(handle.secret_refs, template.get("secrets") or []))
         except SecretError:

@@ -8,6 +8,8 @@ from fastapi import HTTPException, status
 
 # Keep in sync with local-runtime/templates/*.yaml. The runtime reads the YAML;
 # the backend only needs public metadata and param validation (no PyYAML).
+_URL_PATTERN = r"^https?://[A-Za-z0-9][A-Za-z0-9._:-]*(:[0-9]+)?(/[A-Za-z0-9._~/-]*)*$"
+
 _TEMPLATES: dict[str, dict[str, Any]] = {
     "azure-devops": {
         "id": "azure-devops",
@@ -20,6 +22,28 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             },
         },
         "secrets": [{"name": "AZURE_DEVOPS_PAT", "env": "ADO_MCP_AUTH_TOKEN"}],
+    },
+    "grafana": {
+        "id": "grafana",
+        "display_name": "Grafana",
+        "hidden": False,
+        "params_schema": {
+            "grafana_url": {"type": "string", "pattern": _URL_PATTERN},
+        },
+        "secrets": [
+            {"name": "GRAFANA_SERVICE_ACCOUNT_TOKEN", "env": "GRAFANA_SERVICE_ACCOUNT_TOKEN"},
+        ],
+    },
+    "rancher": {
+        "id": "rancher",
+        "display_name": "Rancher",
+        "hidden": False,
+        "params_schema": {
+            "rancher_server_url": {"type": "string", "pattern": _URL_PATTERN},
+        },
+        "secrets": [
+            {"name": "RANCHER_MCP_RANCHER_TOKEN", "env": "RANCHER_MCP_RANCHER_TOKEN"},
+        ],
     },
     "test-echo": {
         "id": "test-echo",

@@ -47,6 +47,8 @@ class TestMcpRuntimeRegistration(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         ids = [item["id"] for item in response.json()["templates"]]
         self.assertIn("azure-devops", ids)
+        self.assertIn("grafana", ids)
+        self.assertIn("rancher", ids)
         self.assertNotIn("test-echo", ids)
 
     def test_create_stdio_rejects_command(self):

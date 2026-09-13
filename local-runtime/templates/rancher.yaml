@@ -1,0 +1,21 @@
+id: rancher
+display_name: Rancher
+command: npx
+args:
+  - "-y"
+  - "--package=rancher-mcp-server@0.9.1"
+  - "rancher-mcp-server"
+  - "--rancher-server-url"
+  - "{{params.rancher_server_url}}"
+  - "--toolsets"
+  - "rancher,kubernetes,fleet"
+params_schema:
+  rancher_server_url:
+    type: string
+    # URL reachable from the mcp-runtime container (often host.docker.internal).
+    pattern: "^https?://[A-Za-z0-9][A-Za-z0-9._:-]*(:[0-9]+)?(/[A-Za-z0-9._~/-]*)*$"
+secrets:
+  - name: RANCHER_MCP_RANCHER_TOKEN
+    env: RANCHER_MCP_RANCHER_TOKEN
+startup_timeout_s: 90
+max_restarts: 3

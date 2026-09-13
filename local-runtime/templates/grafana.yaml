@@ -1,0 +1,19 @@
+id: grafana
+display_name: Grafana
+command: uvx
+args:
+  - "--from"
+  - "mcp-grafana==1.4.1"
+  - "mcp-grafana"
+params_schema:
+  grafana_url:
+    type: string
+    # Base URL reachable from the mcp-runtime container (often host.docker.internal).
+    pattern: "^https?://[A-Za-z0-9][A-Za-z0-9._:-]*(:[0-9]+)?(/[A-Za-z0-9._~/-]*)*$"
+env:
+  GRAFANA_URL: "{{params.grafana_url}}"
+secrets:
+  - name: GRAFANA_SERVICE_ACCOUNT_TOKEN
+    env: GRAFANA_SERVICE_ACCOUNT_TOKEN
+startup_timeout_s: 90
+max_restarts: 3

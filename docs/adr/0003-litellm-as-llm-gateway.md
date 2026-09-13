@@ -61,6 +61,84 @@ As variáveis **já existentes** são a fonte de verdade. Não inventar `LITELLM
 
 No compose local, discovery aponta para `http://litellm:4000` (rede Docker) e a URL do agente, quando visível no browser/host, para `http://localhost:4000` — a mesma dualidade issuer/JWKS da spec 001.
 
+### Como funciona (C4 nível 2)
+
+Nível 2 = **containers**. O LiteLLM é o único gateway de modelo. Cursor não é
+container do Loom: o `cursor-adapter` fala com a API/SDK do Cursor. AgentCore
+continua sendo o runtime de agente implantado; o invoke local (`source=local`)
+é o único caminho em que o **backend** chama o LiteLLM direto.
+
+C4 L2 em Mermaid portátil (`flowchart`; o dialeto `C4Container` quase não
+renderiza no preview).
+
+```mermaid
+flowchart TB
+  user(["Usuario<br/>chat / invoke no Loom"])
+
+  subgraph loom["Loom - stack local"]
+    direction TB
+    fe["Frontend<br/>Vite / React"]
+    be["Backend<br/>FastAPI<br/>catalogo, auth, invoke"]
+    litellm["LiteLLM<br/>compose :4000<br/>unico LLM gateway"]
+    adapter["cursor-adapter<br/>compose :8765<br/>traduz OpenAI para cursor_sdk"]
+  end
+
+  idp{{"IdP<br/>Keycloak / Entra / Okta"}}
+  mock{{"mock-echo / orientador<br/>resposta fixa no proxy"}}
+  cursor{{"Cursor Agent<br/>SDK + CURSOR_API_KEY<br/>nao e este IDE"}}
+  vendors{{"Bedrock / Anthropic / OpenAI<br/>so no config do LiteLLM"}}
+  ac{{"AgentCore AWS<br/>runtime de agente implantado"}}
+
+  user --> fe
+  user --> idp
+  fe -->|"HTTPS /api Bearer"| be
+  be -->|"valida token"| idp
+  be -->|"source=local<br/>POST /v1/chat/completions"| litellm
+  be -->|"source=deploy/harness<br/>invoke_agent"| ac
+  ac -->|"agente provider=litellm"| litellm
+  litellm --> mock
+  litellm -->|"CustomLLM cursor-local"| adapter
+  adapter -->|"Agent.prompt / send"| cursor
+  litellm -->|"producao"| vendors
+```
+
+Dois caminhos de invoke (o LiteLLM e o mesmo; quem chama muda):
+
+```mermaid
+sequenceDiagram
+    actor U as Usuario
+    participant FE as Frontend
+    participant BE as Backend
+    participant LT as LiteLLM
+    participant AD as cursor-adapter
+    participant CA as Cursor Agent
+    participant AC as AgentCore
+
+    alt agente source=local
+        U->>FE: prompt + model cursor-local
+        FE->>BE: POST /api/agents/id/invoke
+        BE->>LT: POST /v1/chat/completions
+        LT->>AD: CustomLLM HTTP
+        AD->>CA: cursor_sdk local cwd
+        CA-->>AD: texto
+        AD-->>LT: chat.completion
+        LT-->>BE: chunk
+        BE-->>FE: SSE
+    else agente deploy ou harness
+        U->>FE: prompt
+        FE->>BE: POST /api/agents/id/invoke
+        BE->>AC: invoke_agent / InvokeHarness
+        AC->>LT: completion provider=litellm
+        LT-->>AC: tokens
+        AC-->>BE: stream
+        BE-->>FE: SSE
+    end
+```
+
+O backend **não** importa `cursor_sdk`. `CURSOR_API_KEY` vive só no
+`cursor-adapter`. Master key do proxy (`LOOM_LITELLM_PROXY_API_KEY`) é a
+única credencial de LLM que o Loom guarda.
+
 ## Alternativas consideradas
 
 | Opção | Vantagem | Desvantagem | Por que não |

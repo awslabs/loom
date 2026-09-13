@@ -60,6 +60,92 @@ Princípios:
 7. **Azure DevOps não entra no core.** É um arquivo de template + secret
    `AZURE_DEVOPS_PAT`.
 
+### Como funciona (C4 nível 2)
+
+Nível 2 = **containers** (processos implantáveis), não classes. O sistema
+é o stack local do Loom. Sistemas de fora da fronteira não veem stdio.
+
+C4 L2 em Mermaid portátil (`flowchart`, não o dialeto `C4Container`, que
+o preview do GitHub/Cursor em geral não desenha). Pessoas = estádio;
+containers internos = caixas; sistemas externos = caixas pontilhadas.
+
+```mermaid
+flowchart TB
+  admin(["Operador<br/>cadastra MCP stdio e regras"])
+  user(["Usuario<br/>login no IdP e invoke"])
+
+  subgraph loom["Loom - stack local v1"]
+    direction TB
+    fe["Frontend<br/>Vite / React<br/>form MCP, access, chat"]
+    be["Backend<br/>FastAPI<br/>catalogo, scopes, IdentityContext"]
+    db[("PostgreSQL<br/>mcp_servers / tools / access")]
+    rt["MCP Runtime<br/>compose :8787<br/>supervisor + fachada HTTP"]
+    child["Processo filho<br/>npx / uvx / python / node<br/>template allowlisted"]
+  end
+
+  idp{{"IdP<br/>Keycloak / Entra / Okta<br/>runtime NAO valida JWT"}}
+  remote{{"MCP HTTP remoto<br/>sse / streamable_http<br/>caminho atual, sem runtime"}}
+  azdo{{"Azure DevOps<br/>REST - PAT so no env do filho"}}
+  ac{{"AgentCore AWS<br/>v1 sem MCP stdio no deploy"}}
+
+  user --> idp
+  admin --> fe
+  user --> fe
+  fe -->|"HTTPS /api Bearer"| be
+  be -->|"valida token via adapter"| idp
+  be --> db
+  be -->|"JSON-RPC HTTP"| remote
+  be -->|"register / start / health / tools"| rt
+  rt -->|"stdio JSON-RPC"| child
+  child -->|"HTTPS"| azdo
+  be -->|"invoke so com MCP HTTP"| ac
+```
+
+Fluxo de um `tools/call` (o agente nunca vê o `npx`):
+
+```mermaid
+sequenceDiagram
+    actor U as Usuario
+    participant FE as Frontend
+    participant BE as Backend FastAPI
+    participant DB as PostgreSQL
+    participant RT as MCP Runtime
+    participant CH as Filho stdio
+    participant EXT as Azure DevOps
+
+    U->>FE: Invoke / connector Azure DevOps
+    FE->>BE: Bearer + agent_id + tool
+    BE->>BE: JWT → UserInfo (IdentityContext)
+    BE->>DB: McpServer + McpServerAccess
+    alt sem regra ou tool fora da allowlist
+        BE-->>FE: 403 — filho nao e chamado
+    else autorizado
+        BE->>RT: POST /s/{id}/mcp tools/call + IdentityContext
+        RT->>RT: state READY? senão start/initialize
+        RT->>CH: JSON-RPC na stdin
+        CH->>EXT: HTTPS (PAT so no env)
+        EXT-->>CH: resultado
+        CH-->>RT: JSON-RPC na stdout
+        RT-->>BE: envelope sem secret
+        BE-->>FE: tool result
+    end
+```
+
+Passo a passo da v1:
+
+1. Operador escolhe template `azure-devops` (não digita `command`). O backend
+   valida `template_id` + params, grava `McpServer(transport_type=stdio)` e
+   manda `register`/`start` ao runtime.
+2. O runtime faz `Popen` da allowlist (`npx -y @azure-devops/mcp …`), injeta
+   secrets só no env do filho e corre `initialize` + `tools/list` em stdio.
+3. O `endpoint_url` gravado é `http://mcp-runtime:8787/s/{id}/mcp`. Para o
+   resto do Loom isso é um MCP `streamable_http` interno.
+4. No invoke, o backend monta IdentityContext a partir do `UserInfo` (já
+   independente do IdP), aplica User → Agent → MCP → Tool e só então
+   encaminha o `tools/call`.
+5. A porta `8787` publica só em `127.0.0.1`. Anônimo e AgentCore na AWS não
+   alcançam o processo stdio.
+
 ### Independência do IdP
 
 ```text

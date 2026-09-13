@@ -135,9 +135,15 @@ async def stream_litellm_text(
             body = response.text
             if "cursor_adapter_unavailable" in body:
                 raise LocalInvokeError(
-                    "Cursor adapter is not running on the host. "
-                    "Leave the model as orientador-academico for the local mock, "
-                    "or start the adapter in WSL on 127.0.0.1:8765 and retry."
+                    "Cursor adapter is not running. "
+                    "Use model orientador-academico, or start the cursor-adapter service."
+                )
+            if "cursor_auth_missing" in body:
+                raise LocalInvokeError(
+                    "cursor-local needs CURSOR_API_KEY in the repo-root .env. "
+                    "Copy .env.example, set the key from https://cursor.com/dashboard/integrations, "
+                    "then run: docker compose up -d --force-recreate cursor-adapter. "
+                    "Or switch the chat model to orientador-academico."
                 )
             raise LocalInvokeError(
                 f"LiteLLM returned HTTP {response.status_code}: {body[:500]}"

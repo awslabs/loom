@@ -1,0 +1,64 @@
+# Loom local-runtime extension overlay (ADR 0006).
+# Merged by `make local.up` with the root docker-compose.yml.
+# Project directory = repository root (first -f file).
+
+services:
+  backend:
+    environment:
+      MCP_RUNTIME_URL: http://mcp-runtime:8787
+      MCP_RUNTIME_TOKEN: ${MCP_RUNTIME_TOKEN:-loom-mcp-runtime-local}
+      # AGENT_RUNTIME_URL left unset until agent-runtime ships (ADR 0005).
+
+  cursor-adapter:
+    build:
+      context: ./local-runtime/services/cursor-adapter
+    restart: unless-stopped
+    environment:
+      CURSOR_ADAPTER_HOST: 0.0.0.0
+      CURSOR_ADAPTER_PORT: "8765"
+      CURSOR_API_KEY: ${CURSOR_API_KEY:-}
+      CURSOR_WORKSPACE: /workspace
+      CURSOR_MODEL: ${CURSOR_MODEL:-composer-2.5}
+    volumes:
+      - ${CURSOR_WORKSPACE:-.}:/workspace
+    ports:
+      - "127.0.0.1:8765:8765"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  mcp-runtime:
+    build:
+      context: ./local-runtime/services/mcp-runtime
+    restart: unless-stopped
+    environment:
+      MCP_RUNTIME_HOST: 0.0.0.0
+      MCP_RUNTIME_PORT: "8787"
+      MCP_RUNTIME_TOKEN: ${MCP_RUNTIME_TOKEN:-loom-mcp-runtime-local}
+      MCP_TEMPLATES_DIR: /templates
+      AZURE_DEVOPS_PAT: ${AZURE_DEVOPS_PAT:-}
+    volumes:
+      - ./local-runtime/templates:/templates:ro
+    ports:
+      - "127.0.0.1:8787:8787"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s

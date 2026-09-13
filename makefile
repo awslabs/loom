@@ -1,11 +1,11 @@
-.PHONY: help local.up local.down local.reset local.logs local.ps local.build local.keycloak.export local.cursor-adapter local.cursor-adapter.test local.mcp-runtime.test
+.PHONY: help local.up local.down local.reset local.logs local.ps local.build local.keycloak.export local.cursor-adapter local.cursor-adapter.test local.mcp-runtime.test extension.install
 
-COMPOSE := docker compose
+COMPOSE := docker compose -f docker-compose.yml -f local-runtime/compose/overlay.yml
 
 help:
-	@echo "Loom — root orchestration"
+	@echo "Loom — root orchestration (+ local-runtime overlay)"
 	@echo ""
-	@echo "  local.up               Build and start the full local stack (Postgres, Keycloak, backend, frontend)"
+	@echo "  local.up               Build and start Loom + local-runtime backends"
 	@echo "  local.down             Stop the stack, keeping data volumes"
 	@echo "  local.reset            Stop the stack and delete its volumes (fresh database and realm)"
 	@echo "  local.build            Rebuild the backend image"
@@ -15,9 +15,11 @@ help:
 	@echo "  local.cursor-adapter   Rebuild/start the cursor-adapter compose service"
 	@echo "  local.cursor-adapter.test  Unit tests for the Cursor adapter (no API key)"
 	@echo "  local.mcp-runtime.test Unit tests for the local MCP runtime (no Azure PAT)"
+	@echo "  extension.install      Link UI plugin paths (dev hint; Vite alias resolves automatically)"
 	@echo ""
 	@echo "  Frontend: http://localhost:5173   Backend: http://localhost:8000/docs"
 	@echo "  Keycloak: http://localhost:8081   (admin console user: admin)"
+	@echo "  Extension nav: Local runtime (mcp:read)"
 	@echo ""
 	@echo "  Set LOOM_AWS_CREDS_DIR to your ~/.aws to exercise AWS-backed features."
 
@@ -55,7 +57,12 @@ local.cursor-adapter:
 	$(COMPOSE) up -d --build cursor-adapter
 
 local.cursor-adapter.test:
-	cd etc/docker/cursor-adapter && python -m unittest discover -s tests -v
+	cd local-runtime/services/cursor-adapter && python -m unittest discover -s tests -v
 
 local.mcp-runtime.test:
-	cd etc/docker/mcp-runtime && python -m unittest discover -s tests -v
+	cd local-runtime/services/mcp-runtime && python -m unittest discover -s tests -v
+
+extension.install:
+	@echo "UI plugin resolves via Vite alias @loom-ext/local-runtime → local-runtime/plugin"
+	@echo "Docker mounts ./local-runtime/plugin at /app/extensions/local-runtime"
+	@test -f local-runtime/plugin/src/register.tsx && echo "OK: plugin entry present"

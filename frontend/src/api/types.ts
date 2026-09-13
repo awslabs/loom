@@ -13,7 +13,7 @@ export interface AgentResponse {
   active_session_count: number;
   registered_at: string | null;
   last_refreshed_at: string | null;
-  source: "register" | "deploy" | "harness" | null;
+  source: "register" | "deploy" | "harness" | "local" | null;
   deployment_status: string | null;
   execution_role_arn: string | null;
   config_hash: string | null;
@@ -774,7 +774,7 @@ export interface ConnectorInfo {
   id: number;
   name: string;
   description: string | null;
-  auth_type: "none" | "oauth2" | "api_key";
+  auth_type: "none" | "oauth2" | "api_key" | "loom";
   has_user_api_key: boolean;
   supports_elicitation: boolean;
   delegation_mode?: "m2m" | "obo";

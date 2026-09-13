@@ -75,10 +75,21 @@ class TestHttpContract(unittest.TestCase):
 
 
 class TestCustomHandlerForward(unittest.TestCase):
+    @staticmethod
+    def _cursor_handler_path() -> Path:
+        # tests/ → cursor-adapter → services → local-runtime → repo root
+        return (
+            Path(__file__).resolve().parents[4]
+            / "etc"
+            / "docker"
+            / "litellm"
+            / "cursor_handler.py"
+        )
+
     def test_unavailable_when_adapter_down(self) -> None:
         import importlib.util
 
-        handler_path = Path(__file__).resolve().parents[2] / "litellm" / "cursor_handler.py"
+        handler_path = self._cursor_handler_path()
         spec = importlib.util.spec_from_file_location("cursor_handler", handler_path)
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
@@ -94,7 +105,7 @@ class TestCustomHandlerForward(unittest.TestCase):
     def test_litellm_mro_uses_our_completion_not_stubs(self) -> None:
         import importlib.util
 
-        handler_path = Path(__file__).resolve().parents[2] / "litellm" / "cursor_handler.py"
+        handler_path = self._cursor_handler_path()
         spec = importlib.util.spec_from_file_location("cursor_handler_mro", handler_path)
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None

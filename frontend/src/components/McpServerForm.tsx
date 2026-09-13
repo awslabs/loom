@@ -14,7 +14,7 @@ import { Loader2 } from "lucide-react";
 import { listMcpTemplates, testConnectionPreCreate, exportMcpServer } from "@/api/mcp";
 import { JsonConfigSection } from "./JsonConfigSection";
 import { useAuth } from "@/contexts/AuthContext";
-import type { McpServerCreateRequest, McpTemplate, TestConnectionResult } from "@/api/types";
+import type { McpAuthType, McpServerCreateRequest, McpTemplate, TestConnectionResult } from "@/api/types";
 
 interface McpServerFormProps {
   onSubmit: (data: McpServerCreateRequest) => Promise<void>;
@@ -35,7 +35,7 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
   const [templateParams, setTemplateParams] = useState<Record<string, string>>(initialData?.template_params ?? {});
   const isStdio = transportType === "stdio";
   const selectedTemplate = templates.find((item) => item.id === templateId);
-  const [authType, setAuthType] = useState<"none" | "oauth2" | "api_key">(initialData?.auth_type ?? "none");
+  const [authType, setAuthType] = useState<McpAuthType>(initialData?.auth_type ?? "none");
   const [wellKnownUrl, setWellKnownUrl] = useState(initialData?.oauth2_well_known_url ?? "");
   const [clientId, setClientId] = useState(initialData?.oauth2_client_id ?? "");
   const [clientSecret, setClientSecret] = useState("");

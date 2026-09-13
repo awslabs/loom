@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
-# Keep in sync with etc/mcp-templates/*.yaml. The runtime reads the YAML;
+# Keep in sync with local-runtime/templates/*.yaml. The runtime reads the YAML;
 # the backend only needs public metadata and param validation (no PyYAML).
 _TEMPLATES: dict[str, dict[str, Any]] = {
     "azure-devops": {

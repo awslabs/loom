@@ -1,0 +1,16 @@
+{
+  "name": "@loom-ext/local-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Loom UI plugin for local MCP / runtime ops (ADR 0006)",
+  "exports": {
+    ".": "./src/register.tsx"
+  },
+  "loom.extension": "./src/register.tsx",
+  "peerDependencies": {
+    "lucide-react": "^0.576.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  }
+}

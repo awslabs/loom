@@ -11,7 +11,7 @@ Backend FastAPI
         → child stdio JSON-RPC
 ```
 
-Templates live in `etc/mcp-templates/`. The client never sends `command` or `args`.
+Templates live in `local-runtime/templates/`. The client never sends `command` or `args`.
 
 Host port is loopback-only (`127.0.0.1:8787`). Health: `GET /health` (no auth).
 

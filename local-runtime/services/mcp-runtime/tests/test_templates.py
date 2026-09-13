@@ -26,5 +26,5 @@ class TestTemplates(unittest.TestCase):
             validate_params(template, {"organization": "org;rm -rf /"})
 
     def test_templates_live_in_repo_allowlist(self) -> None:
-        root = Path(__file__).resolve().parents[3] / "mcp-templates"
+        root = Path(__file__).resolve().parents[3] / "templates"
         self.assertTrue((root / "azure-devops.yaml").is_file())

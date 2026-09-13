@@ -20,7 +20,7 @@ def templates_dir() -> Path:
     raw = os.environ.get("MCP_TEMPLATES_DIR", "")
     if raw:
         return Path(raw)
-    return Path(__file__).resolve().parents[3] / "mcp-templates"
+    return Path(__file__).resolve().parents[3] / "templates"
 
 
 def load_templates() -> dict[str, dict[str, Any]]:

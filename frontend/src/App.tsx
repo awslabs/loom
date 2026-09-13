@@ -33,11 +33,14 @@ import type { SessionResponse, InvocationResponse } from "@/api/types";
 import { getRegistryConfig } from "@/api/settings";
 import { AuthProvider, useAuth, GROUP_SCOPES, type Scope } from "@/contexts/AuthContext";
 import { LoginPage } from "@/pages/LoginPage";
-import { BookOpen, Shield, Bot, Brain, Network, LogOut, User, Settings, Eye, BarChart3, Palette } from "lucide-react";
+import { BookOpen, Shield, Bot, Brain, Network, LogOut, User, Settings, Eye, BarChart3, Palette, Server } from "lucide-react";
 import { AdminDashboardPage } from "./pages/AdminDashboardPage";
 import { ChatPage } from "./pages/ChatPage";
 import { OAuthLinkCallbackPage } from "./pages/OAuthLinkCallbackPage";
 import { recordPageView, sendBeaconPageView, trackAction } from "./api/audit";
+import { loadExtensions } from "./extensions/load";
+import { getExtension } from "./extensions/registry";
+import type { LoomExtensionRegistration } from "./extensions/types";
 
 // Consolidated navigation (issue #20): MCP Servers and A2A Agents merged into
 // one "Integrations" persona with a tab per resource type; Tagging moved
@@ -63,7 +66,8 @@ import { recordPageView, sendBeaconPageView, trackAction } from "./api/audit";
 //     this is also a no-op for current groups)
 //   - Catalog > Registry section: visible iff registry:read; editable iff
 //     registry:write (unchanged from the standalone Registry page's gate)
-type Persona = "catalog" | "security" | "builder" | "memory" | "integrations" | "settings" | "admin";
+type BuiltinPersona = "catalog" | "security" | "builder" | "memory" | "integrations" | "settings" | "admin";
+type Persona = BuiltinPersona | string;
 
 const USER_GROUPS: Record<string, string[]> = {
   "admin": ["t-admin", "g-admins-super"],
@@ -203,6 +207,17 @@ function AppContent() {
   const [pendingMcpId, setPendingMcpId] = useState<number | null>(null);
   const [pendingA2aId, setPendingA2aId] = useState<number | null>(null);
   const [integrationsTab, setIntegrationsTab] = useState<"mcp" | "a2a">("mcp");
+  const [extensions, setExtensions] = useState<readonly LoomExtensionRegistration[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadExtensions().then((loaded) => {
+      if (!cancelled) setExtensions(loaded);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Reset all navigation state when user logs in (skip if returning from link callback)
   const hasResetForSession = useRef(false);
@@ -550,6 +565,24 @@ function AppContent() {
                 onClick={() => setActivePersona("integrations")}
               />
             )}
+            {extensions
+              .filter((ext) => ext.nav.section === "build")
+              .filter((ext) =>
+                (ext.nav.requiredScopes ?? []).length === 0
+                || (ext.nav.requiredScopes ?? []).some((scope) => effectiveHasScope(scope as Scope)),
+              )
+              .map((ext) => {
+                const Icon = ext.nav.icon ?? Server;
+                return (
+                  <SidebarItem
+                    key={ext.id}
+                    icon={Icon}
+                    label={ext.nav.label}
+                    active={activePersona === ext.id}
+                    onClick={() => setActivePersona(ext.id)}
+                  />
+                );
+              })}
           </SidebarSection>
           <SidebarSection label={t("nav.sections.operate")}>
             {(effectiveHasScope("security:read") || effectiveHasScope("security:write")) && (
@@ -796,6 +829,13 @@ function AppContent() {
 
           {activePersona === "security" && <SecurityAdminPage readOnly={!effectiveHasScope("security:write")} />}
           {activePersona === "memory" && <MemoryManagementPage viewMode={memoryViewMode} onViewModeChange={setMemoryViewMode} readOnly={!effectiveHasScope("memory:write")} groupRestriction={groupRestriction} ownerRestriction={ownerRestriction} userGroups={viewAsUser ? (USER_GROUPS[viewAsUser] ?? []) : (user?.groups ?? [])} />}
+          {(() => {
+            const ext = getExtension(activePersona);
+            if (!ext) return null;
+            return ext.render({
+              hasScope: (scope) => effectiveHasScope(scope as Scope),
+            });
+          })()}
           {activePersona === "integrations" && (
             <IntegrationsPage
               canViewMcp={effectiveHasScope("mcp:read")}

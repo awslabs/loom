@@ -1,0 +1,10 @@
+# ADRs da extensão
+
+Enquanto `local-runtime` estiver co-localizado no monorepo Loom, as ADRs
+canônicas ficam em `docs/adr/` na raiz do Loom:
+
+- [0004 — Local MCP Runtime](../../docs/adr/0004-local-mcp-runtime.md)
+- [0005 — Local Agent Runtime](../../docs/adr/0005-local-agent-runtime.md) (adiado)
+- [0006 — Extensão local-runtime](../../docs/adr/0006-local-runtime-extension-repo.md)
+
+Ao extrair este diretório para um repo git próprio, copiar essas ADRs para cá.

@@ -12,7 +12,9 @@ args:
 params_schema:
   rancher_server_url:
     type: string
-    # URL reachable from the mcp-runtime container (often host.docker.internal).
+    # Loom/Docker (rede kind): http://kind-control-plane:30080
+    # (entrypoint também aliasa rancher.local → kind-control-plane para Host do Ingress)
+    # Stdio no WSL/Windows: http://rancher.local:8080
     pattern: "^https?://[A-Za-z0-9][A-Za-z0-9._:-]*(:[0-9]+)?(/[A-Za-z0-9._~/-]*)*$"
 secrets:
   - name: RANCHER_MCP_RANCHER_TOKEN

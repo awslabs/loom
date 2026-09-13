@@ -2,6 +2,12 @@
 # Merged by `make local.up` with the root docker-compose.yml.
 # Project directory = repository root (first -f file).
 
+networks:
+  # Kind cluster network (C:\work\k8s). Required for Rancher MCP via NodePort.
+  kind:
+    external: true
+    name: kind
+
 services:
   backend:
     environment:
@@ -41,11 +47,13 @@ services:
     build:
       context: ./local-runtime/services/mcp-runtime
     restart: unless-stopped
+    networks:
+      - default
+      - kind
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      # Kind ingress on Windows :8080 (C:\work\k8s local-access). Host header must match Ingress.
+      # Grafana Ingress via Kind publish on the host (:8080 → 30080).
       - "grafana.local:host-gateway"
-      - "rancher.local:host-gateway"
     environment:
       MCP_RUNTIME_HOST: 0.0.0.0
       MCP_RUNTIME_PORT: "8787"

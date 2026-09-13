@@ -21,6 +21,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY mcp_runtime ./mcp_runtime
+COPY docker-entrypoint.py /docker-entrypoint.py
 
 ENV MCP_RUNTIME_HOST=0.0.0.0
 ENV MCP_RUNTIME_PORT=8787
@@ -30,4 +31,5 @@ ENV PYTHONPATH=/app
 
 EXPOSE 8787
 
+ENTRYPOINT ["python", "/docker-entrypoint.py"]
 CMD ["python", "-m", "mcp_runtime"]

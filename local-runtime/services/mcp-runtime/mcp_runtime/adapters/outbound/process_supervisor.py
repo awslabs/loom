@@ -17,6 +17,7 @@ from mcp_runtime.adapters.outbound.yaml_templates import (
     render_env,
     validate_params,
 )
+from mcp_runtime.domain.types import HealthInfo, SecretRef
 
 logger = logging.getLogger("mcp_runtime")
 
@@ -35,7 +36,7 @@ class ServerHandle:
     server_id: int
     template_id: str
     params: dict[str, str]
-    secret_refs: list[dict[str, Any]]
+    secret_refs: list[SecretRef]
     state: str = REGISTERED
     process: subprocess.Popen[str] | None = None
     session: StdioSession | None = None
@@ -54,7 +55,7 @@ class Supervisor:
         server_id: int,
         template_id: str,
         params: dict[str, Any],
-        secret_refs: list[dict[str, Any]] | None = None,
+        secret_refs: list[SecretRef] | None = None,
     ) -> ServerHandle:
         template = get_template(template_id)
         cleaned = validate_params(template, params or {})
@@ -179,7 +180,7 @@ class Supervisor:
             raise RuntimeError("max restarts exceeded")
         return self.start(server_id)
 
-    def health(self, server_id: int) -> dict[str, Any]:
+    def health(self, server_id: int) -> HealthInfo:
         handle = self._require(server_id)
         pid = handle.process.pid if handle.process and handle.process.poll() is None else None
         return {

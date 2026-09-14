@@ -62,6 +62,16 @@ salvo impossibilidade (ver [rules.md](rules.md)).
 Lógica de runtime, Popen, tool loop e PATs **não** vão no FastAPI do Loom nem no
 bundle do plugin.
 
+### Testes dos sidecars
+
+Cada serviço sob `local-runtime/services/{name}/tests/`:
+
+- `unit/` — domain + application com fakes
+- `adapters/` — HTTP / store / I/O
+
+Alvos Make: `local.mcp-hub.test`, `local.cursor-adapter.test`,
+`local.mcp-runtime.test`, `local.agent-runtime.test` (cada um corre unit + adapters).
+
 ## Padrões de código (fork)
 
 Boas práticas Python (SOLID, GoF, hexagonal **alvo**):

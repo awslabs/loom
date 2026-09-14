@@ -11,6 +11,8 @@ from typing import Any
 import jwt
 from jwt import PyJWKClient
 
+from mcp_hub.domain.records import HubIdentity
+
 logger = logging.getLogger("mcp_hub.oauth")
 
 _jwks_client: PyJWKClient | None = None
@@ -121,7 +123,7 @@ def _extract_groups(claims: dict[str, Any]) -> list[str]:
     return []
 
 
-def validate_access_token(token: str) -> dict[str, Any] | None:
+def validate_access_token(token: str) -> HubIdentity | None:
     """Return identity dict {sub, groups, username} or None if invalid.
 
     Rejects legacy mint tokens (`hs_…`) and JWTs that fail issuer/audience checks.
@@ -183,7 +185,7 @@ def warm_jwks() -> bool:
 class OAuthJwksValidator:
     """Outbound adapter implementing ``TokenValidator``."""
 
-    def validate_access_token(self, token: str) -> dict[str, Any] | None:
+    def validate_access_token(self, token: str) -> HubIdentity | None:
         return validate_access_token(token)
 
     def www_authenticate_value(self) -> str:

@@ -3,23 +3,19 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
 
+from cursor_adapter.domain.sessions import SessionRecord
 
 DEFAULT_TTL_SECONDS = 60 * 60
 
 
-@dataclass
-class SessionRecord:
-    key: str
-    cursor_agent_id: str
-    workspace: str
-    created_at: float
-    last_used_at: float
-
-
 class SessionManager:
-    def __init__(self, ttl_seconds: int = DEFAULT_TTL_SECONDS, now: callable | None = None) -> None:
+    def __init__(
+        self,
+        ttl_seconds: int = DEFAULT_TTL_SECONDS,
+        now: Callable[[], float] | None = None,
+    ) -> None:
         self._ttl = ttl_seconds
         self._now = now or time.time
         self._records: dict[str, SessionRecord] = {}

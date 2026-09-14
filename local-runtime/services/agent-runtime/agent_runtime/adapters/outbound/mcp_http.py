@@ -8,13 +8,14 @@ import httpx
 
 from agent_runtime.domain.contract import tool_name
 from agent_runtime.domain.errors import AgentRuntimeError
+from agent_runtime.domain.types import CallerIdentity
 
 
 def mcp_runtime_token() -> str:
     return os.environ.get("MCP_RUNTIME_TOKEN", "").strip()
 
 
-def _mcp_headers(server: dict[str, Any], identity: dict[str, str]) -> dict[str, str]:
+def _mcp_headers(server: dict[str, Any], identity: CallerIdentity) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     auth = server.get("auth") if isinstance(server.get("auth"), dict) else {}
     auth_type = (auth.get("type") or "none").lower()
@@ -50,7 +51,7 @@ class McpHttpClient:
         self,
         client: httpx.Client,
         server: dict[str, Any],
-        identity: dict[str, str],
+        identity: CallerIdentity,
         method: str,
         params: dict[str, Any] | None = None,
         req_id: int = 1,
@@ -97,7 +98,7 @@ class McpHttpClient:
     def load_tools(
         self,
         mcp_servers: list[dict[str, Any]],
-        identity: dict[str, str],
+        identity: CallerIdentity,
         *,
         timeout_s: float,
     ) -> tuple[list[dict[str, Any]], dict[str, tuple[dict[str, Any], str]]]:
@@ -146,7 +147,7 @@ class McpHttpClient:
     def call_tool(
         self,
         server: dict[str, Any],
-        identity: dict[str, str],
+        identity: CallerIdentity,
         *,
         name: str,
         arguments: dict[str, Any],

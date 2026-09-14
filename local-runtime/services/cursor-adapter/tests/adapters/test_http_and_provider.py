@@ -77,9 +77,9 @@ class TestHttpContract(unittest.TestCase):
 class TestCustomHandlerForward(unittest.TestCase):
     @staticmethod
     def _cursor_handler_path() -> Path:
-        # tests/ → cursor-adapter → services → local-runtime → repo root
+        # tests/adapters → tests → cursor-adapter → services → local-runtime → repo root
         return (
-            Path(__file__).resolve().parents[4]
+            Path(__file__).resolve().parents[5]
             / "etc"
             / "docker"
             / "litellm"

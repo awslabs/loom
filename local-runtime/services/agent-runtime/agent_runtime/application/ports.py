@@ -4,6 +4,12 @@ from __future__ import annotations
 import threading
 from typing import Any, Protocol
 
+from agent_runtime.domain.types import CallerIdentity
+
+# LiteLLM / MCP JSON-RPC wire payloads (external boundary).
+JsonObject = dict[str, Any]
+ChatMessage = dict[str, Any]
+
 
 class SessionStore(Protocol):
     def begin(self, session_id: str) -> threading.Event: ...
@@ -20,29 +26,29 @@ class LlmGateway(Protocol):
         self,
         *,
         model_id: str,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
+        messages: list[ChatMessage],
+        tools: list[JsonObject],
         session_id: str,
         timeout_s: float,
-    ) -> dict[str, Any]: ...
+    ) -> JsonObject: ...
 
 
 class McpToolsClient(Protocol):
     def load_tools(
         self,
-        mcp_servers: list[dict[str, Any]],
-        identity: dict[str, str],
+        mcp_servers: list[JsonObject],
+        identity: CallerIdentity,
         *,
         timeout_s: float,
-    ) -> tuple[list[dict[str, Any]], dict[str, tuple[dict[str, Any], str]]]: ...
+    ) -> tuple[list[JsonObject], dict[str, tuple[JsonObject, str]]]: ...
 
     def call_tool(
         self,
-        server: dict[str, Any],
-        identity: dict[str, str],
+        server: JsonObject,
+        identity: CallerIdentity,
         *,
         name: str,
-        arguments: dict[str, Any],
+        arguments: JsonObject,
         timeout_s: float,
         req_id: int = 1,
-    ) -> dict[str, Any]: ...
+    ) -> JsonObject: ...

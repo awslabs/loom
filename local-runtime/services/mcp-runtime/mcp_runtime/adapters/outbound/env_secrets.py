@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import os
-from typing import Any
-
 
 from mcp_runtime.domain.errors import SecretError
+from mcp_runtime.domain.types import SecretRef
 
 
-def resolve_secret_refs(refs: list[dict[str, Any]], template_secrets: list[dict[str, str]]) -> dict[str, str]:
+def resolve_secret_refs(refs: list[SecretRef], template_secrets: list[dict[str, str]]) -> dict[str, str]:
     """Return env-name → value for the child process."""
     env_map: dict[str, str] = {}
     by_name = {item["name"]: item for item in template_secrets}

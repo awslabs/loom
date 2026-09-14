@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 # Ensure echo_child can be imported as mcp_runtime.echo_child
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -15,7 +15,7 @@ from mcp_runtime.templates import TemplateError
 
 class TestSupervisor(unittest.TestCase):
     def setUp(self) -> None:
-        root = str(Path(__file__).resolve().parents[1])
+        root = str(Path(__file__).resolve().parents[2])
         current = os.environ.get("PYTHONPATH", "")
         os.environ["PYTHONPATH"] = root if not current else f"{root}{os.pathsep}{current}"
         self.supervisor = Supervisor()

@@ -135,6 +135,19 @@ Checklist commit: `git diff` sem `sk-`, `eyJ` (JWT), `pat:`, senhas.
 - [ ] URLs outbound allowlisted ou fixas de config?
 - [ ] Se exceção Core: ok do Dev + [CHANGELOG](../CHANGELOG-LOOM-FORK.md)?
 
+### Higiene sidecars (revisão 2026-09-14)
+
+Varredura rápida pós-hexagonal (Fase 6):
+
+| Serviço | Auth fail-closed | Logs | Secrets |
+|---------|------------------|------|---------|
+| mcp-hub | OIDC unset / JWT fail → deny; service token required | JWT: tipo de erro / aud / azp — **não** Bearer; PG DSN sem password | `MCP_HUB_SERVICE_TOKEN`, DSN via env |
+| mcp-runtime | Bearer runtime token | stderr sanitize redacts `Authorization: Bearer` | `resolve_secret_refs` never logs values |
+| agent-runtime | Bearer runtime token | sem echo de token | `AGENT_RUNTIME_TOKEN` / MCP runtime token env |
+| cursor-adapter | API key required for runs | erros tipados, sem key | `CURSOR_API_KEY` env |
+
+Nada a corrigir nesta passagem; manter o checklist acima em PRs novos.
+
 ---
 
 ## 9. Fora de escopo (de propósito)

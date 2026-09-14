@@ -30,9 +30,18 @@ Fluxo:
 
 ## Itens abertos
 
-_(nenhum)_
+_(nenhum — iniciativa guideline refactor Fases 1–6 concluída na branch `refactor/mcp-hub-hexagonal`)_
 
 ## Itens encerrados
+
+### REF-2026-09-14-07 — higiene transversal (Fase 6)
+
+| Campo | Valor |
+|-------|--------|
+| **Data** | 2026-09-14 |
+| **Área** | `local-runtime/services/*` |
+| **Status** | done |
+| **Notas** | TypedDict/records nos ports; `tests/{unit,adapters}`; Makefile `local.*.test` + `local.mcp-hub.test`; revisão secrets/logging OK. |
 
 ### REF-2026-09-14-06 — plugin: fatiar LocalRuntimePage
 

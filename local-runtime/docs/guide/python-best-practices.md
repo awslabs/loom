@@ -265,9 +265,10 @@ __main__ / wiring: único lugar que instancia adapters e injeta nos use cases
 
 ### Serviços atuais vs alvo
 
-Hoje (`mcp_hub/http_app.py`, `store.py`, …) é um layout **plano**. Este guia é o
-**norte**. **Não** migrar automaticamente. Quando o Dev pedir, migrar serviço a
-serviço (começar pelo que for mexer na feature).
+Sidecars principais (`mcp-hub`, `agent-runtime`, `mcp-runtime`, `cursor-adapter`)
+já seguem o layout hexagonal alvo (Fases 1–4 do plano de refactor). Novos módulos
+continuam em `domain/` / `application/` / `adapters/`; shims de import plano podem
+permanecer por compat.
 
 ---
 

@@ -1,7 +1,7 @@
 # Plano — refatorar `local-runtime` para aderência aos guidelines
 
 - **Branch:** `plan/local-runtime-guideline-refactor`
-- **Status:** rascunho de planejamento (sem código de migração nesta fase)
+- **Status:** Fases 1–6 executadas na branch `refactor/mcp-hub-hexagonal` (plano original docs-only encerrado)
 - **Data:** 2026-09-14
 - **Alvos canônicos:**
   - [guide/rules.md](../guide/rules.md)
@@ -114,9 +114,9 @@ Critério de aceite: mesmos testes verdes; smoke Cursor `tools/list` + `agent__*
 
 ### Fase 6 — Higiene transversal
 
-- Tipagem pública sem `Any` nas bordas onde possível
-- `tests/unit` vs `tests/adapters` em todos os serviços
-- Revisar secrets/logging vs [security.md](../guide/security.md)
+- [x] Tipagem pública sem `Any` nas bordas onde possível (TypedDict / domain records nos ports; JSON wire externo permanece `dict`)
+- [x] `tests/unit` vs `tests/adapters` em todos os serviços (+ `make local.mcp-hub.test`)
+- [x] Revisar secrets/logging vs [security.md](../guide/security.md) (ver nota § higiene 2026-09-14)
 
 ---
 
@@ -130,6 +130,7 @@ Critério de aceite: mesmos testes verdes; smoke Cursor `tools/list` + `agent__*
 | REF-2026-09-14-04 | mcp-runtime → hexagonal (leve) | 4 |
 | REF-2026-09-14-05 | cursor-adapter → hexagonal | 4 |
 | REF-2026-09-14-06 | plugin LocalRuntimePage split | 5 |
+| REF-2026-09-14-07 | higiene transversal (types / tests / secrets) | 6 |
 
 Detalhe tabular em [refactoring.md](refactoring.md).
 
@@ -152,7 +153,6 @@ Pacote fechado pelo Dev (seguir recomendações do agente):
 
 ## 7. Próximo passo
 
-1. ~~Commit do plano na branch `plan/local-runtime-guideline-refactor`~~ (feito)
-2. PR docs-only → merge em `main` do fork
-3. Branch `refactor/mcp-hub-hexagonal` — implementar `REF-2026-09-14-02` sob as decisões acima
-4. Depois: `REF-2026-09-14-01` (adapter Postgres no port `HubStore`)
+1. Abrir/mergear PR da branch `refactor/mcp-hub-hexagonal` → `main` do fork
+2. Stacks Postgres existentes: garantir DB `mcp_hub` (`make local.reset` ou CREATE manual)
+3. Novas oportunidades → novos itens REF em [refactoring.md](refactoring.md)

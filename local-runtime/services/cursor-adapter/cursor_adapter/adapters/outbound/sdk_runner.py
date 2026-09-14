@@ -12,7 +12,7 @@ from cursor_adapter.domain.planner import (
     extract_tools_from_messages,
     planner_system_prompt,
 )
-from cursor_adapter.adapters.outbound.memory_sessions import SessionManager
+from cursor_adapter.application.ports import SessionStore
 from cursor_adapter.domain.translation import translate_messages
 
 logger = logging.getLogger("cursor_adapter")
@@ -42,7 +42,7 @@ def run_prompt(
     session_id: str | None,
     agent_id: str | None,
     tenant: str = "local",
-    sessions: SessionManager,
+    sessions: SessionStore,
     default_workspace: str | None = None,
     api_key: str | None = None,
     model: str = "composer-2.5",

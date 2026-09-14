@@ -162,7 +162,7 @@ flowchart LR
   subgraph fe[SPA]
     HOST[extensions host]
     PAGES[host pages<br/>Chat Agents MCP]
-    PLUG[LocalRuntimePage plugin]
+    PLUG[plugin: LocalRuntimePage + local-runtime/*]
   end
   HOST --> PLUG
   PLUG -.->|apiFetch + AuthProvider| PAGES

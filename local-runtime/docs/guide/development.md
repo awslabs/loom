@@ -43,6 +43,9 @@ make local.agent-runtime.test
 - Entry: `local-runtime/plugin/src/register.tsx` → `host.addExtension({…})`
 - Alias Vite / mount Docker: `@loom-ext/local-runtime` → `local-runtime/plugin`
 - `make extension.install` só valida que o entry existe (alias já resolve)
+- Ops page: `pages/LocalRuntimePage.tsx` (orchestration) + pieces under
+  `src/local-runtime/` (thin `api.ts`, Hub info, clients list, agents toggle,
+  profile grants editor)
 
 Telas novas de ops → **plugin**, não páginas novas no `frontend/src/pages` do host,
 salvo impossibilidade (ver [rules.md](rules.md)).

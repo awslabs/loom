@@ -109,8 +109,8 @@ Critério de aceite: mesmos testes verdes; smoke Cursor `tools/list` + `agent__*
 
 ### Fase 5 — plugin UI
 
-- Fatiar `LocalRuntimePage` (lista clients / grants / agents toggle)
-- Sem mudar contratos BFF/Hub
+- [x] Fatiar `LocalRuntimePage` (lista clients / grants / agents toggle)
+- [x] Sem mudar contratos BFF/Hub
 
 ### Fase 6 — Higiene transversal
 

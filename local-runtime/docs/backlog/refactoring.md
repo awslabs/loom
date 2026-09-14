@@ -30,21 +30,18 @@ Fluxo:
 
 ## Itens abertos
 
+_(nenhum)_
+
+## Itens encerrados
+
 ### REF-2026-09-14-06 — plugin: fatiar LocalRuntimePage
 
 | Campo | Valor |
 |-------|--------|
 | **Data** | 2026-09-14 |
 | **Área** | `local-runtime/plugin` |
-| **Paths** | `plugin/src/pages/LocalRuntimePage.tsx` |
-| **Oportunidade** | Componentes por responsabilidade (clients list, grants, agents_enabled) + client API fino |
-| **Motivo** | Página monolítica; manutenção e testes de UI |
-| **Complexidade** | média |
-| **Risco** | baixo |
-| **Status** | open |
-| **Notas** | Preferir após contratos Hub estáveis (Fase 1–2). Plano Fase 5. |
-
-## Itens encerrados
+| **Status** | done |
+| **Notas** | Shell em `pages/LocalRuntimePage.tsx`; pieces em `plugin/src/local-runtime/` (api, grants, HubInfo, ClientsList, ChannelAgentsToggle, ProfileGrantsEditor). Contratos BFF/Hub inalterados. |
 
 ### REF-2026-09-14-01 — Hub store: JSON file → Postgres (paridade produção)
 

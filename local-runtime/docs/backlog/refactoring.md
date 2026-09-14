@@ -30,9 +30,18 @@ Fluxo:
 
 ## Itens abertos
 
-_(nenhum — iniciativa guideline refactor Fases 1–6 concluída na branch `refactor/mcp-hub-hexagonal`)_
+_(nenhum)_
 
 ## Itens encerrados
+
+### REF-2026-09-14-08 — mover templates/ para mcp-runtime
+
+| Campo | Valor |
+|-------|--------|
+| **Data** | 2026-09-14 |
+| **Área** | `local-runtime/services/mcp-runtime` |
+| **Status** | done |
+| **Notas** | `services/mcp-runtime/templates/`; remoção de `local-runtime/templates/`. |
 
 ### REF-2026-09-14-07 — higiene transversal (Fase 6)
 

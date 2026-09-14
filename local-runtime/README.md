@@ -5,8 +5,7 @@ Out-of-tree data plane + UI plugin for local MCP, agent runtime, and MCP Hub.
 ```text
 local-runtime/
 ├── plugin/                 # @loom-ext/local-runtime — UI only (Loom bundle)
-├── services/               # mcp-hub, mcp-runtime, cursor-adapter, agent-runtime
-├── templates/              # MCP allowlist YAML
+├── services/               # mcp-hub, mcp-runtime (+templates/), cursor-adapter, agent-runtime
 ├── compose/overlay.yml     # merged by `make local.up`
 └── docs/                   # fork docs (rules, guides, changelog) — start here
 ```

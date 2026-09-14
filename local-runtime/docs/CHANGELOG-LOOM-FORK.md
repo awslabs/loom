@@ -75,6 +75,17 @@ Checklist pós-merge:
 
 ## Registro
 
+### 2026-09-14 — mcp-runtime owns templates/
+
+| Campo | Valor |
+|-------|--------|
+| **Zona** | **Extension** (+ comentário **Core** path sync) |
+| **Motivação** | Allowlist YAML é do supervisor stdio — não asset compartilhado na raiz de `local-runtime/` |
+| **Core** | `backend/app/services/mcp_templates.py` — comentário de sync → novo path (sem lógica) |
+| **Extension** | `services/mcp-runtime/templates/*.yaml`; compose mount; Dockerfile `COPY templates`; default `templates_dir()` |
+| **Docs** | architecture, rules, overview, ADR 0004/0006, READMEs |
+| **Risco sync** | Baixo |
+
 ### 2026-09-14 — cursor-adapter hexagonal (REF-05)
 
 **Contexto:** isolar translation/planner do SDK Cursor.
@@ -402,7 +413,7 @@ estrutura hexagonal para sidecars — **sem** refatorar código existente.
 | Zona | Paths (principais) | O que mudou |
 |------|--------------------|-------------|
 | **Core** | `backend/.../mcp.py`, `mcp_access.py`, `mcp_templates.py`, `mcp_runtime_client.py`, forms/pages MCP no frontend | Catalog, access, deploy path para stdio |
-| **Extension** | `local-runtime/services/mcp-runtime/**`, `templates/*.yaml` | Supervisor stdio + templates |
+| **Extension** | `local-runtime/services/mcp-runtime/**` (incl. `templates/*.yaml`) | Supervisor stdio + templates |
 | **Docs** | ADR 0004, specs 005–010, 015 *(legado)* | |
 
 ---

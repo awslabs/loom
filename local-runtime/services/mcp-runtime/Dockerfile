@@ -21,11 +21,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY mcp_runtime ./mcp_runtime
+COPY templates ./templates
 COPY docker-entrypoint.py /docker-entrypoint.py
 
 ENV MCP_RUNTIME_HOST=0.0.0.0
 ENV MCP_RUNTIME_PORT=8787
-ENV MCP_TEMPLATES_DIR=/templates
+ENV MCP_TEMPLATES_DIR=/app/templates
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 

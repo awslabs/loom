@@ -276,10 +276,10 @@ local-runtime/
 │   │   └── locales/
 │   └── tsconfig.json
 ├── services/                        # backends apartados (não-UI)
-│   ├── mcp-runtime/                 # escalável; crash ≠ derruba Loom
+│   ├── mcp-runtime/                 # + templates/ (allowlist YAML)
 │   ├── agent-runtime/
-│   └── cursor-adapter/
-├── templates/
+│   ├── cursor-adapter/
+│   └── mcp-hub/
 ├── seeds/
 ├── docs/
 │   ├── adr/

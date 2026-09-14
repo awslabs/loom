@@ -61,13 +61,13 @@ services:
       MCP_RUNTIME_HOST: 0.0.0.0
       MCP_RUNTIME_PORT: "8787"
       MCP_RUNTIME_TOKEN: ${MCP_RUNTIME_TOKEN:-loom-mcp-runtime-local}
-      MCP_TEMPLATES_DIR: /templates
+      MCP_TEMPLATES_DIR: /app/templates
       AZURE_DEVOPS_PAT: ${AZURE_DEVOPS_PAT:-}
       GRAFANA_SERVICE_ACCOUNT_TOKEN: ${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}
       RANCHER_MCP_RANCHER_TOKEN: ${RANCHER_MCP_RANCHER_TOKEN:-}
       RANCHER_MCP_TLS_INSECURE: ${RANCHER_MCP_TLS_INSECURE:-}
     volumes:
-      - ./local-runtime/templates:/templates:ro
+      - ./local-runtime/services/mcp-runtime/templates:/app/templates:ro
     ports:
       - "127.0.0.1:8787:8787"
     healthcheck:

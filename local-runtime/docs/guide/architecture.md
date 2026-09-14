@@ -29,7 +29,7 @@ Relacionados: [ADR 0005](../adr/0005-local-agent-runtime.md),
 [overview](overview.md), [scalability-reliability.md](scalability-reliability.md),
 [CHANGELOG-LOOM-FORK.md](../CHANGELOG-LOOM-FORK.md).
 
-**Última revisão:** 2026-09-14 (AgentCore/Bedrock no desenho; LiteLLM ≠ Bedrock)
+**Última revisão:** 2026-09-14 (templates sob mcp-runtime; LiteLLM ≠ Bedrock)
 
 ---
 
@@ -337,7 +337,7 @@ erDiagram
 | **Postgres DB `mcp_hub`** | Mesmo servidor PG do compose; DSN `MCP_HUB_DATABASE_URL` | Canais MCP, `agents_enabled`, profile grants, session bindings (`hub_clients`, `hub_session_bindings`) |
 | **JSON fallback** | `MCP_HUB_STORE_PATH` (só se DSN unset; ou fonte de migrate) | Snapshot legado |
 | **Keycloak DB** | Container Keycloak | Realm `loom`, users/groups, client `loom-mcp-hub` |
-| **Templates YAML** | `local-runtime/templates/` (ro no mcp-runtime) | Allowlist de servers stdio — arquivos, não SQL |
+| **Templates YAML** | `local-runtime/services/mcp-runtime/templates/` (ro no container) | Allowlist stdio — dono: **mcp-runtime** |
 
 #### Hub store schema (Postgres `mcp_hub`)
 
@@ -360,13 +360,13 @@ Não misturar com schema/ORM do Loom Core.
 | Runs `agent__*` / Chat invoke | BFF cria **Core** `invocation_sessions` / `invocations` | Adapter **local** → agent-runtime; **deploy/harness** → AgentCore (produção) |
 | Modelo LLM | LiteLLM (único gateway do control plane) | OpenAI / Anthropic / …; `cursor-local` → cursor-adapter. Bedrock → AgentCore |
 | IdP ativo | **Fork (PG)** `identity_providers` | Keycloak/Entra (**local-runtime** / SaaS) |
-| Template stdio | **Fork** colunas em `mcp_servers` | **local-runtime** YAML + mcp-runtime |
+| Template stdio | **Fork** colunas em `mcp_servers` | **mcp-runtime** YAML allowlist |
 
 ```text
                     ┌──────────────────────────┐
                     │  local-runtime           │
                     │  Postgres DB mcp_hub     │
-                    │  templates/*.yaml        │
+                    │  mcp-runtime/templates/*.yaml │
                     │  Keycloak (realm)        │
                     └────────────┬─────────────┘
                                  │ server_id / OAuth

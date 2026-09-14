@@ -17,9 +17,8 @@ extensão **local-runtime** (plugin UI + sidecars + docs do fork).
 ├── frontend/                # SPA Loom + Extension Host
 ├── local-runtime/
 │   ├── plugin/              # UI @loom-ext/local-runtime
-│   ├── services/            # mcp-hub, mcp-runtime, agent-runtime, cursor-adapter
+│   ├── services/            # mcp-hub, mcp-runtime (+templates/), …
 │   ├── compose/overlay.yml  # sidecars no `make local.up`
-│   ├── templates/           # YAML allowlist MCP
 │   └── docs/                # ← regras, guias, ADRs, specs, changelog
 ├── etc/docker/              # Keycloak, LiteLLM, postgres-init (stack local)
 └── makefile                 # orquestra compose raiz + overlay

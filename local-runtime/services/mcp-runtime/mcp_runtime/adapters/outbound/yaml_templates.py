@@ -18,7 +18,8 @@ def templates_dir() -> Path:
     raw = os.environ.get("MCP_TEMPLATES_DIR", "")
     if raw:
         return Path(raw)
-    return Path(__file__).resolve().parents[5] / "templates"
+    # Default: local-runtime/services/mcp-runtime/templates (service-owned allowlist)
+    return Path(__file__).resolve().parents[3] / "templates"
 
 
 def load_templates() -> dict[str, dict[str, Any]]:

@@ -6,8 +6,9 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
-# Keep in sync with local-runtime/templates/*.yaml. The runtime reads the YAML;
-# the backend only needs public metadata and param validation (no PyYAML).
+# Keep in sync with local-runtime/services/mcp-runtime/templates/*.yaml.
+# The runtime reads the YAML; the backend only needs public metadata and
+# param validation (no PyYAML).
 _URL_PATTERN = r"^https?://[A-Za-z0-9][A-Za-z0-9._:-]*(:[0-9]+)?(/[A-Za-z0-9._~/-]*)*$"
 
 _TEMPLATES: dict[str, dict[str, Any]] = {

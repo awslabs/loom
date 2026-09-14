@@ -75,6 +75,20 @@ Checklist pós-merge:
 
 ## Registro
 
+### 2026-09-14 — mcp-hub hexagonal strangler (REF-02)
+
+**Contexto:** decisões do plano aceitas; primeira fatia de layout ports/adapters.
+
+| Zona | Paths | O que mudou |
+|------|-------|-------------|
+| **Extension** | `services/mcp-hub/mcp_hub/{domain,application,adapters}/` | Layout hexagonal + ports + FileHubStore/Loom/OAuth classes |
+| **Extension** | shims `access.py`…`http_app.py` | Compat de imports |
+| **Docs** | plano / backlog REF-02 | Decisões locked; execução iniciada |
+
+**Impacto no sync upstream:** baixo.
+
+---
+
 ### 2026-09-14 — Plano de refactor local-runtime × guidelines
 
 **Contexto:** iniciar planejamento (sem código) para aderência hexagonal / SOLID.

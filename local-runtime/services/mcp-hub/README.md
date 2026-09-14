@@ -57,3 +57,17 @@ active IdP, register an equivalent public PKCE app instead.
 | `MCP_HUB_OIDC_JWKS_URL` | JWKS reachable from container (may differ from browser issuer host) |
 
 Contract: `2026-09-hub-1`. Docs: ADR 0011 / 0012, specs 017 / 024 / 025.
+
+## Package layout (hexagonal strangler)
+
+```text
+mcp_hub/
+  domain/           # pure rules (access, naming, identity, errors)
+  application/      # ports + wiring
+  adapters/
+    inbound/        # http_app (http.server)
+    outbound/       # file_store, loom_http, oauth_jwks
+  *.py              # compat shims (old import paths)
+```
+
+Wire protocol and env unchanged. Postgres Hub store = `REF-2026-09-14-01` (port `HubStore` already defined).

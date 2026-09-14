@@ -77,15 +77,16 @@ Ordem proposta (maior valor / churn / clareza → menor):
 
 ### Fase 1 — mcp-hub hexagonal (mínimo viável)
 
-Escopo sugerido (1–2 PRs):
+Escopo (strangler; wire estável):
 
-1. Criar pastas alvo sem mover comportamento ainda (`domain/errors`, `application/ports`)
-2. Extrair regras puras já quase isoladas: `access`, `naming`, identity parsing
-3. Use cases: `tools_list`, `tools_call`, `patch_client`, `materialize` orchestration
-4. Inbound: `http_app` só HTTP ↔ use case
-5. Outbound ports: `HubStore`, `LoomGateway`, `TokenValidator`
-6. Adapters: `file_store` (atual), `loom_http`, `oauth_jwks`
-7. Composition root em `__main__`
+1. [x] Pastas alvo `domain/` · `application/` · `adapters/{inbound,outbound}/`
+2. [x] Mover regras puras: `access`, `naming`, `identity` → `domain/`
+3. [x] Ports: `HubStore`, `LoomGateway`, `TokenValidator` + wiring defaults
+4. [x] Outbound: `file_store`, `loom_http`, `oauth_jwks` (+ classes adapter)
+5. [x] Inbound: `http_app` sob `adapters/inbound/` (ainda orquestra use cases inline)
+6. [x] Shims de compat nos imports antigos + testes verdes
+7. [ ] Extrair use cases (`tools_list` / `tools_call`) para `application/use_cases/` (próximo PR)
+8. [ ] Injetar ports no handler (em vez de módulos globais) — próximo PR
 
 Critério de aceite: mesmos testes verdes; smoke Cursor `tools/list` + `agent__*`.
 

@@ -87,6 +87,8 @@ class LoomGateway(Protocol):
         session_id: str | None = None,
         mode: str = "async",
         timeout_s: int = 120,
+        hub_server_ids: list[int] | None = None,
+        hub_tool_allowlists: dict[str, list[str]] | None = None,
     ) -> tuple[int, dict[str, Any]]: ...
 
     def agents_run(

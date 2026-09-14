@@ -215,7 +215,18 @@ export function useAgents() {
   );
 
   const patchAgent = useCallback(
-    async (id: number, updates: { description?: string | null }) => {
+    async (
+      id: number,
+      updates: {
+        description?: string | null;
+        model_id?: string;
+        allowed_model_ids?: string[];
+        provider?: string;
+        base_url?: string;
+        api_key?: string;
+        tags?: Record<string, string>;
+      },
+    ) => {
       const agent = await agentsApi.patchAgent(id, updates);
       setAgents((prev) => prev.map((a) => (a.id === id ? agent : a)));
       return agent;

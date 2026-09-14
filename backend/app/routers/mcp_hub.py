@@ -59,6 +59,9 @@ class HubAgentInvokeRequest(BaseModel):
     session_id: str | None = None
     mode: str = Field(default="async")
     timeout_s: int = Field(default=120, ge=5, le=600)
+    # Hub profile allowlist ∩ agent MCP links (optional; omit = all linked MCPs)
+    hub_server_ids: list[int] | None = None
+    hub_tool_allowlists: dict[str, list[str]] | None = None
 
 
 class HubAgentRunQuery(BaseModel):
@@ -195,6 +198,12 @@ async def hub_agents_invoke(
         session_id=body.session_id,
         mode=mode,
         timeout_s=body.timeout_s,
+        hub_server_ids=body.hub_server_ids,
+        hub_tool_allowlists=(
+            {int(k): list(v) for k, v in body.hub_tool_allowlists.items()}
+            if body.hub_tool_allowlists
+            else None
+        ),
     )
     if result.get("denied"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=result.get("error") or "denied")

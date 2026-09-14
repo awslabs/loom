@@ -236,6 +236,10 @@ class AgentResponse(BaseModel):
     memory_names: list[str] = []
     mcp_names: list[str] = []
     a2a_names: list[str] = []
+    mcp_server_ids: list[int] = []
+    a2a_agent_ids: list[int] = []
+    timeout_s: float | None = None
+    max_tool_rounds: int | None = None
     code_interpreter_id: str | None = None
     code_interpreter_status: str | None = None
     status_reason: str | None = None
@@ -266,6 +270,10 @@ class AgentUpdateRequest(BaseModel):
     provider: str | None = None
     base_url: str | None = None
     api_key: str | None = Field(None, description="Provider API key, write-only — stored in Secrets Manager and never returned")
+    tags: dict[str, str] | None = Field(
+        None,
+        description="Replace agent tags (e.g. from a tag profile). Local agents supported.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -346,9 +354,13 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     base_url = None
     template_id = None
     system_prompt = None
+    timeout_s: float | None = None
+    max_tool_rounds: int | None = None
     memory_names: list[str] = []
     mcp_names: list[str] = []
     a2a_names: list[str] = []
+    mcp_server_ids: list[int] = []
+    a2a_agent_ids: list[int] = []
 
     for entry in agent.config_entries:
         if entry.key == "AGENT_CONFIG_JSON":
@@ -359,6 +371,20 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
                 base_url = config.get("base_url") or None
                 template_id = config.get("template_id") or None
                 system_prompt = config.get("system_prompt") or None
+                options = config.get("options") if isinstance(config.get("options"), dict) else {}
+                if options:
+                    try:
+                        timeout_s = float(options["timeout_s"]) if options.get("timeout_s") is not None else None
+                    except (TypeError, ValueError):
+                        timeout_s = None
+                    try:
+                        max_tool_rounds = (
+                            int(options["max_tool_rounds"])
+                            if options.get("max_tool_rounds") is not None
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        max_tool_rounds = None
 
                 # Extract integration names from config
                 integrations = config.get("integrations", {})
@@ -378,6 +404,12 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
                     mcp_name = mcp_server.get("name")
                     if mcp_name:
                         mcp_names.append(mcp_name)
+                    sid = mcp_server.get("server_id")
+                    if sid is not None:
+                        try:
+                            mcp_server_ids.append(int(sid))
+                        except (TypeError, ValueError):
+                            pass
 
                 # A2A agents
                 a2a_agents = integrations.get("a2a_agents", [])
@@ -385,6 +417,12 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
                     a2a_name = a2a_agent.get("name")
                     if a2a_name:
                         a2a_names.append(a2a_name)
+                    aid = a2a_agent.get("a2a_agent_id") or a2a_agent.get("id")
+                    if aid is not None:
+                        try:
+                            a2a_agent_ids.append(int(aid))
+                        except (TypeError, ValueError):
+                            pass
 
             except (json.JSONDecodeError, TypeError):
                 pass
@@ -452,6 +490,10 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
         memory_names=memory_names,
         mcp_names=mcp_names,
         a2a_names=a2a_names,
+        mcp_server_ids=sorted(set(mcp_server_ids)),
+        a2a_agent_ids=sorted(set(a2a_agent_ids)),
+        timeout_s=timeout_s,
+        max_tool_rounds=max_tool_rounds,
         code_interpreter_status=None,
     )
     if inv_count > 0 and grand_total > 0:
@@ -4055,9 +4097,20 @@ def patch_agent(
                 update_runtime(agent.runtime_id, description=request.description or "")
             except Exception:
                 logger.warning("Failed to propagate description to AgentCore for agent %s", agent_id, exc_info=True)
+    if "tags" in request.model_fields_set and request.tags is not None:
+        if "g-admins-demo" in user.groups and "g-admins-super" not in user.groups:
+            new_group = request.tags.get("loom:group", "")
+            if new_group and new_group != "demo":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Demo admins can only assign the 'demo' group",
+                )
+        agent.set_tags(dict(request.tags))
     if "model_id" in request.model_fields_set and request.model_id is not None:
         valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
-        if request.model_id not in valid_ids:
+        # Local agents may use LiteLLM ids that are briefly absent from discovery
+        # (or template allowlist ids); still persist them on AGENT_CONFIG_JSON.
+        if request.model_id not in valid_ids and agent.source != "local":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid model ID: {request.model_id}",
@@ -4074,12 +4127,23 @@ def patch_agent(
     if "allowed_model_ids" in request.model_fields_set and request.allowed_model_ids is not None:
         valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
         invalid = [m for m in request.allowed_model_ids if m not in valid_ids]
-        if invalid:
+        if invalid and agent.source != "local":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid model IDs: {invalid}",
             )
         agent.set_allowed_model_ids(request.allowed_model_ids)
+        for entry in agent.config_entries:
+            if entry.key == "AGENT_CONFIG_JSON":
+                try:
+                    config = json.loads(entry.value)
+                    config["allowed_model_ids"] = list(request.allowed_model_ids)
+                    if config.get("model_id") and config["model_id"] not in config["allowed_model_ids"]:
+                        config["allowed_model_ids"] = [config["model_id"], *config["allowed_model_ids"]]
+                    entry.value = json.dumps(config)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                break
     provider_fields_set = {"provider", "base_url", "api_key"} & request.model_fields_set
     if provider_fields_set:
         if request.provider is not None:

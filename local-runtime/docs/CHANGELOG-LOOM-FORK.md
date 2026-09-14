@@ -75,6 +75,22 @@ Checklist pós-merge:
 
 ## Registro
 
+### 2026-09-14 — Local agents: MCP/A2A persistidos + limits + Hub ∩ grants
+
+| Zona | Path | Nota |
+|------|------|------|
+| **Core** | `backend` `local_agent_mcp.py`, `local_agents.py`, `local_invoke.py`, `mcp_hub*`, `invocations.py`, `agents.py` | Links MCP/A2A + `options` no config; Hub invoke passa grants; Chat fallback aos MCPs linkados; AgentResponse expõe ids/limits |
+| **Core** | `frontend` create + Detail | Allowed models, MCP, A2A, timeout / max_tool_rounds; Detail: Save integrations |
+| **Extension** | `mcp-hub` ports / loom_http / tools | `agents_invoke` envia `hub_server_ids` + `hub_tool_allowlists` |
+
+### 2026-09-14 — Local agents: tag profile + model no create/Detail
+
+| Zona | Path | Nota |
+|------|------|------|
+| **Core** | `backend/app/routers/local_agents.py` | Create aceita `model_id` / `allowed_model_ids` (+ `tags` já previsto) |
+| **Core** | `backend/app/routers/agents.py` | `PATCH /api/agents/{id}` aceita `tags`; validação de model relaxada para `source=local`; sync `allowed_model_ids` no `AGENT_CONFIG_JSON` |
+| **Core** | `frontend` `LocalAgentCreateForm`, `AgentListPage`, `AgentDetailPage`, `App`, `api/agents`, `hooks/useAgents` | Create: seletor LiteLLM + `ResourceTagFields`; Detail local: Model Configuration + Save tag profile |
+
 ### 2026-09-14 — A2: create/edit local agents from templates
 
 | Zona | Path | Nota |

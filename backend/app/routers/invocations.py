@@ -1670,6 +1670,20 @@ async def invoke_agent_endpoint(
             if server.supports_elicitation == "true":
                 has_elicitation_connector = True
         logger.info("Resolved %d dynamic MCP connectors for invocation (elicitation=%s)", len(dynamic_mcp_servers), has_elicitation_connector)
+    elif is_local_agent(agent):
+        # Fallback: agent-linked MCPs when Chat Invoke did not pass connector_ids
+        from app.services.local_agent_mcp import resolve_dynamic_mcp_servers
+
+        dynamic_mcp_servers = resolve_dynamic_mcp_servers(db, agent, user)
+        if dynamic_mcp_servers:
+            logger.info(
+                "Resolved %d linked MCP servers for local agent %s (no connector_ids)",
+                len(dynamic_mcp_servers),
+                agent.id,
+            )
+            for mcp in dynamic_mcp_servers:
+                # Elicitation flag is not carried on resolve entries; leave false
+                _ = mcp
 
     # ---- Detect OBO delegation mode and static elicitation from AGENT_CONFIG_JSON ----
     # If any integration has delegation_mode="obo", we must forward the user's

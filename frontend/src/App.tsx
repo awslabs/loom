@@ -806,6 +806,8 @@ function AppContent() {
                   registryReadOnly={!effectiveHasScope("registry:write")}
                   registryEnabled={registryEnabled}
                   userGroups={viewAsUser ? (USER_GROUPS[viewAsUser] ?? []) : (user?.groups ?? [])}
+                  groupRestriction={groupRestriction}
+                  ownerRestriction={ownerRestriction}
                   initialTab={agentInitialTab}
                 />
               )}

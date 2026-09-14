@@ -193,9 +193,15 @@ async def _consume_local_stream(
     invocation_id: str,
     prompt: str,
     subject: str,
+    groups: list[str] | None = None,
+    hub_server_ids: list[int] | None = None,
+    hub_tool_allowlists: dict[int, list[str]] | None = None,
 ) -> None:
     db = SessionLocal()
     try:
+        from app.dependencies.auth import UserInfo, derive_scopes
+        from app.services.local_agent_mcp import resolve_dynamic_mcp_servers
+
         agent = db.query(Agent).filter(Agent.id == agent_id).first()
         session = db.query(InvocationSession).filter(InvocationSession.session_id == session_id).first()
         invocation = db.query(Invocation).filter(Invocation.invocation_id == invocation_id).first()
@@ -207,6 +213,24 @@ async def _consume_local_stream(
             session.status = "error"
             db.commit()
             return
+        user = UserInfo(
+            sub=subject,
+            username=subject,
+            groups=list(groups or []),
+            scopes=derive_scopes(list(groups or [])),
+            idp_type="keycloak",
+        )
+        hub_ids = set(hub_server_ids) if hub_server_ids is not None else None
+        hub_tools: dict[int, set[str] | None] | None = None
+        if hub_tool_allowlists is not None:
+            hub_tools = {int(k): set(v) for k, v in hub_tool_allowlists.items()}
+        dynamic_mcp = resolve_dynamic_mcp_servers(
+            db,
+            agent,
+            user,
+            hub_allowed_server_ids=hub_ids,
+            hub_tool_allowlists=hub_tools,
+        )
         buf: list[str] = []
         async for piece in invoke_local_agent_stream(
             agent,
@@ -216,6 +240,7 @@ async def _consume_local_stream(
             time.time(),
             prompt,
             subject=subject,
+            dynamic_mcp_servers=dynamic_mcp,
         ):
             buf.append(piece)
         raw = "".join(buf)
@@ -307,6 +332,8 @@ async def start_agent_run(
     session_id: str | None = None,
     mode: str = "async",
     timeout_s: int = 120,
+    hub_server_ids: list[int] | None = None,
+    hub_tool_allowlists: dict[int, list[str]] | None = None,
 ) -> dict[str, Any]:
     if "invoke" not in (user.scopes or set()):
         return {"error": "invoke_scope_required", "denied": True}
@@ -326,17 +353,21 @@ async def start_agent_run(
 
     sid = session.session_id
     iid = invocation.invocation_id
+    stream_kwargs = {
+        "agent_id": agent.id,
+        "session_id": sid,
+        "invocation_id": iid,
+        "prompt": prompt,
+        "subject": user.sub,
+        "groups": list(user.groups or []),
+        "hub_server_ids": hub_server_ids,
+        "hub_tool_allowlists": hub_tool_allowlists,
+    }
 
     if mode == "sync":
         try:
             await asyncio.wait_for(
-                _consume_local_stream(
-                    agent_id=agent.id,
-                    session_id=sid,
-                    invocation_id=iid,
-                    prompt=prompt,
-                    subject=user.sub,
-                ),
+                _consume_local_stream(**stream_kwargs),
                 timeout=max(5, min(timeout_s, 600)),
             )
         except asyncio.TimeoutError:
@@ -358,15 +389,7 @@ async def start_agent_run(
             "error_message": run.get("error_message"),
         }
 
-    asyncio.create_task(
-        _consume_local_stream(
-            agent_id=agent.id,
-            session_id=sid,
-            invocation_id=iid,
-            prompt=prompt,
-            subject=user.sub,
-        )
-    )
+    asyncio.create_task(_consume_local_stream(**stream_kwargs))
     return {
         "status": "accepted",
         "session_id": sid,

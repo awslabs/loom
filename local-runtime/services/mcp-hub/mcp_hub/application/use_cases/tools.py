@@ -65,6 +65,8 @@ def handle_agent_tool_call(
     agent_map: dict[str, int],
     *,
     loom: LoomGateway,
+    hub_server_ids: list[int] | None = None,
+    hub_tool_allowlists: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     subject = str(identity["sub"])
     groups = list(identity.get("groups") or [])
@@ -124,6 +126,8 @@ def handle_agent_tool_call(
             prompt=prompt,
             session_id=str(sid) if sid else None,
             mode=mode,
+            hub_server_ids=hub_server_ids,
+            hub_tool_allowlists=hub_tool_allowlists,
         )
         if status == 403:
             return {"error": {"code": -32003, "message": "agent_forbidden"}}
@@ -165,7 +169,7 @@ def call_tool(
 ) -> dict[str, Any]:
     """Return JSON-RPC ``result`` or ``error`` object (without jsonrpc/id wrapper)."""
     groups = list(identity.get("groups") or [])
-    _slug, _allow, mapping, client = build_session_allowlist(identity, store=store, loom=loom)
+    _slug, allow, mapping, client = build_session_allowlist(identity, store=store, loom=loom)
     if not isinstance(arguments, dict):
         arguments = {}
     agents_on = bool(client and client.get("agents_enabled") and client.get("status") == "enabled")
@@ -173,7 +177,29 @@ def call_tool(
         if not agents_on:
             return {"error": {"code": -32003, "message": "agents_disabled"}}
         _agent_tools, agent_map = list_agent_tools(identity, client or {}, loom=loom)
-        handled = handle_agent_tool_call(identity, name, arguments, agent_map, loom=loom)
+        hub_server_ids: list[int] = []
+        hub_tool_allowlists: dict[str, list[str]] = {}
+        for entry in allow.get("entries") or []:
+            try:
+                sid = int(entry["server_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            hub_server_ids.append(sid)
+            names = [
+                str(t.get("name"))
+                for t in (entry.get("tools") or [])
+                if isinstance(t, dict) and t.get("name")
+            ]
+            hub_tool_allowlists[str(sid)] = names
+        handled = handle_agent_tool_call(
+            identity,
+            name,
+            arguments,
+            agent_map,
+            loom=loom,
+            hub_server_ids=hub_server_ids,
+            hub_tool_allowlists=hub_tool_allowlists,
+        )
         if "error" in handled and "result" not in handled:
             return {"error": handled["error"]}
         return {"result": handled.get("result") or {}}

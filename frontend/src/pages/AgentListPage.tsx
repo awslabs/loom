@@ -255,6 +255,8 @@ export function AgentListPage({
                     setShowAddForm(false);
                   }}
                   isLoading={submitting}
+                  groupRestriction={groupRestriction}
+                  ownerRestriction={ownerRestriction}
                 />
               ) : (
                 <AgentRegistrationForm

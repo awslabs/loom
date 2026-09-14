@@ -266,6 +266,8 @@ async def invoke_local_agent_stream(
         try:
             model_id = resolve_local_model_id(agent, runtime_model_id)
             system_prompt = config.get("system_prompt")
+            from app.services.local_agent_mcp import get_runtime_options
+            options = get_runtime_options(agent)
             payload = {
                 "contract_version": CONTRACT_VERSION,
                 "prompt": prompt,
@@ -284,7 +286,10 @@ async def invoke_local_agent_stream(
                     "session_id": session_id,
                 },
                 "approval_policies": [],
-                "options": {"timeout_s": 300, "max_tool_rounds": 20},
+                "options": {
+                    "timeout_s": options["timeout_s"],
+                    "max_tool_rounds": options["max_tool_rounds"],
+                },
             }
             buffer = ""
             saw_end = False

@@ -120,6 +120,7 @@ export function patchAgent(
     provider?: string;
     base_url?: string;
     api_key?: string;
+    tags?: Record<string, string>;
   },
 ): Promise<AgentResponse> {
   return apiFetch<AgentResponse>(`/api/agents/${id}`, {
@@ -165,8 +166,14 @@ export function createLocalAgent(body: {
   name: string;
   description?: string;
   params?: Record<string, string>;
+  model_id?: string;
+  allowed_model_ids?: string[];
   system_prompt_override?: string;
   tags?: Record<string, string>;
+  mcp_server_ids?: number[];
+  a2a_agent_ids?: number[];
+  timeout_s?: number;
+  max_tool_rounds?: number;
 }): Promise<AgentResponse> {
   return apiFetch<AgentResponse>("/api/agents/local", {
     method: "POST",
@@ -180,6 +187,21 @@ export function updateLocalAgentBehavior(
 ): Promise<AgentResponse> {
   return apiFetch<AgentResponse>(`/api/agents/${id}/local-behavior`, {
     method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateLocalAgentIntegrations(
+  id: number,
+  body: {
+    mcp_server_ids?: number[];
+    a2a_agent_ids?: number[];
+    timeout_s?: number;
+    max_tool_rounds?: number;
+  },
+): Promise<AgentResponse> {
+  return apiFetch<AgentResponse>(`/api/agents/${id}/local-integrations`, {
+    method: "PUT",
     body: JSON.stringify(body),
   });
 }

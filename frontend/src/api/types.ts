@@ -42,6 +42,10 @@ export interface AgentResponse {
   memory_names: string[];
   mcp_names: string[];
   a2a_names: string[];
+  mcp_server_ids?: number[];
+  a2a_agent_ids?: number[];
+  timeout_s?: number | null;
+  max_tool_rounds?: number | null;
   harness_id: string | null;
   registry_record_id: string | null;
   registry_status: string | null;

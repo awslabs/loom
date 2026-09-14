@@ -118,19 +118,26 @@ def agents_invoke(
     session_id: str | None = None,
     mode: str = "async",
     timeout_s: int = 120,
+    hub_server_ids: list[int] | None = None,
+    hub_tool_allowlists: dict[str, list[str]] | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    body: dict[str, Any] = {
+        "subject": subject,
+        "groups": groups,
+        "agent_id": agent_id,
+        "prompt": prompt,
+        "session_id": session_id,
+        "mode": mode,
+        "timeout_s": timeout_s,
+    }
+    if hub_server_ids is not None:
+        body["hub_server_ids"] = hub_server_ids
+    if hub_tool_allowlists is not None:
+        body["hub_tool_allowlists"] = hub_tool_allowlists
     return _request(
         "POST",
         "/api/mcp/hub/agents/invoke",
-        {
-            "subject": subject,
-            "groups": groups,
-            "agent_id": agent_id,
-            "prompt": prompt,
-            "session_id": session_id,
-            "mode": mode,
-            "timeout_s": timeout_s,
-        },
+        body,
         timeout=float(timeout_s + 30) if mode == "sync" else 60.0,
     )
 
@@ -207,6 +214,8 @@ class LoomHttpGateway:
         session_id: str | None = None,
         mode: str = "async",
         timeout_s: int = 120,
+        hub_server_ids: list[int] | None = None,
+        hub_tool_allowlists: dict[str, list[str]] | None = None,
     ) -> tuple[int, dict[str, Any]]:
         return agents_invoke(
             subject=subject,
@@ -216,6 +225,8 @@ class LoomHttpGateway:
             session_id=session_id,
             mode=mode,
             timeout_s=timeout_s,
+            hub_server_ids=hub_server_ids,
+            hub_tool_allowlists=hub_tool_allowlists,
         )
 
     def agents_run(

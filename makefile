@@ -1,6 +1,12 @@
-.PHONY: help local.up local.down local.reset local.logs local.ps local.build local.keycloak.export local.cursor-adapter local.cursor-adapter.test local.mcp-runtime.test local.agent-runtime.test extension.install
+.PHONY: help local.up local.down local.reset local.logs local.ps local.build local.keycloak.export local.cursor-adapter local.cursor-adapter.test local.mcp-runtime.test local.agent-runtime.test local.mcp-hub.test extension.install
 
 COMPOSE := docker compose -f docker-compose.yml -f local-runtime/compose/overlay.yml
+
+# Run unit + adapter test packages for a local-runtime service.
+define local_service_tests
+	cd local-runtime/services/$(1) && python -m unittest discover -s tests/unit -v
+	cd local-runtime/services/$(1) && python -m unittest discover -s tests/adapters -v
+endef
 
 help:
 	@echo "Loom — root orchestration (+ local-runtime overlay)"
@@ -13,9 +19,10 @@ help:
 	@echo "  local.ps               Show service status"
 	@echo "  local.keycloak.export  Export the running realm to etc/docker/keycloak-export/"
 	@echo "  local.cursor-adapter   Rebuild/start the cursor-adapter compose service"
-	@echo "  local.cursor-adapter.test  Unit tests for the Cursor adapter (no API key)"
-	@echo "  local.mcp-runtime.test Unit tests for the local MCP runtime (no Azure PAT)"
-	@echo "  local.agent-runtime.test Unit tests for the local agent runtime"
+	@echo "  local.mcp-hub.test     Unit + adapter tests for MCP Hub"
+	@echo "  local.cursor-adapter.test  Unit + adapter tests for Cursor adapter (no API key)"
+	@echo "  local.mcp-runtime.test Unit + adapter tests for MCP runtime (no Azure PAT)"
+	@echo "  local.agent-runtime.test Unit + adapter tests for agent runtime"
 	@echo "  extension.install      Link UI plugin paths (dev hint; Vite alias resolves automatically)"
 	@echo ""
 	@echo "  Frontend: http://localhost:5173   Backend: http://localhost:8000/docs"
@@ -57,14 +64,17 @@ local.keycloak.export:
 local.cursor-adapter:
 	$(COMPOSE) up -d --build cursor-adapter
 
+local.mcp-hub.test:
+	$(call local_service_tests,mcp-hub)
+
 local.cursor-adapter.test:
-	cd local-runtime/services/cursor-adapter && python -m unittest discover -s tests -v
+	$(call local_service_tests,cursor-adapter)
 
 local.mcp-runtime.test:
-	cd local-runtime/services/mcp-runtime && python -m unittest discover -s tests -v
+	$(call local_service_tests,mcp-runtime)
 
 local.agent-runtime.test:
-	cd local-runtime/services/agent-runtime && python -m unittest discover -s tests -v
+	$(call local_service_tests,agent-runtime)
 
 extension.install:
 	@echo "UI plugin resolves via Vite alias @loom-ext/local-runtime → local-runtime/plugin"

@@ -8,9 +8,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mcp_runtime.stdio import sanitize_stderr
-from mcp_runtime.supervisor import REGISTERED, READY, SUPERVISOR, Supervisor
-from mcp_runtime.templates import TemplateError
+from mcp_runtime.adapters.outbound.process_supervisor import REGISTERED, READY, SUPERVISOR, Supervisor
+from mcp_runtime.adapters.outbound.stdio_session import sanitize_stderr
+from mcp_runtime.domain.errors import TemplateError
 
 
 class TestSupervisor(unittest.TestCase):

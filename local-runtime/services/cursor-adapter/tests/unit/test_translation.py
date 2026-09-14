@@ -1,7 +1,7 @@
 import unittest
 
-from cursor_adapter.planner import completion_from_planner_text, extract_json_object, normalize_tool_calls
-from cursor_adapter.translation import translate_messages
+from cursor_adapter.domain.planner import completion_from_planner_text, extract_json_object, normalize_tool_calls
+from cursor_adapter.domain.translation import translate_messages
 
 
 class TestTranslation(unittest.TestCase):
@@ -76,7 +76,7 @@ class TestPlanner(unittest.TestCase):
         self.assertIn("empty", (out["choices"][0]["message"]["content"] or "").lower())
 
     def test_extract_tools_from_messages(self) -> None:
-        from cursor_adapter.planner import extract_tools_from_messages
+        from cursor_adapter.domain.planner import extract_tools_from_messages
 
         tools, cleaned = extract_tools_from_messages([
             {

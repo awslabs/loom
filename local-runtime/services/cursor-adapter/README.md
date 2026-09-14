@@ -21,10 +21,10 @@ Host fallback (without Compose): `CURSOR_ADAPTER_HOST=127.0.0.1 python -m cursor
 
 ```text
 cursor_adapter/
-  domain/           # errors, translation, planner, streaming
+  domain/           # errors, translation, planner, streaming, sessions
   application/      # ports, wiring, use_cases/chat
   adapters/
     inbound/http_app.py
     outbound/{sdk_runner,memory_sessions}.py
-  *.py              # compat shims
+  __main__.py
 ```

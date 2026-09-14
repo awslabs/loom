@@ -1,6 +1,6 @@
 import unittest
 
-from cursor_adapter.errors import (
+from cursor_adapter.domain.errors import (
     auth_failed,
     auth_missing,
     from_sdk_error,

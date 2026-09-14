@@ -13,8 +13,9 @@ import sys
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent_runtime.http_app import RuntimeHandler
-from agent_runtime.loop import CONTRACT_VERSION, validate_payload, AgentRuntimeError, _tool_name
+from agent_runtime.adapters.inbound.http_app import RuntimeHandler
+from agent_runtime.domain.contract import CONTRACT_VERSION, tool_name as _tool_name, validate_payload
+from agent_runtime.domain.errors import AgentRuntimeError
 
 
 class TestValidatePayload(unittest.TestCase):

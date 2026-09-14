@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from mcp_hub import oauth
+from mcp_hub.adapters.outbound import oauth_jwks as oauth
 
 
 class TestOAuthPrm(unittest.TestCase):
@@ -46,8 +46,8 @@ class TestOAuthValidate(unittest.TestCase):
         os.environ["MCP_HUB_OIDC_ISSUER"] = ""
         self.assertIsNone(oauth.validate_access_token("eyJhbGciOiJSUzI1NiJ9.e30.x"))
 
-    @patch("mcp_hub.oauth._get_jwks_client")
-    @patch("mcp_hub.oauth.jwt.decode")
+    @patch("mcp_hub.adapters.outbound.oauth_jwks._get_jwks_client")
+    @patch("mcp_hub.adapters.outbound.oauth_jwks.jwt.decode")
     def test_accepts_valid_claims(self, mock_decode: MagicMock, mock_jwks: MagicMock) -> None:
         mock_jwks.return_value.get_signing_key_from_jwt.return_value.key = "k"
         mock_decode.return_value = {
@@ -64,8 +64,8 @@ class TestOAuthValidate(unittest.TestCase):
         self.assertIn("g-users-demo", identity["groups"])
         self.assertEqual(identity["connection_id"], "oauth:user-1")
 
-    @patch("mcp_hub.oauth._get_jwks_client")
-    @patch("mcp_hub.oauth.jwt.decode")
+    @patch("mcp_hub.adapters.outbound.oauth_jwks._get_jwks_client")
+    @patch("mcp_hub.adapters.outbound.oauth_jwks.jwt.decode")
     def test_rejects_wrong_audience(self, mock_decode: MagicMock, mock_jwks: MagicMock) -> None:
         mock_jwks.return_value.get_signing_key_from_jwt.return_value.key = "k"
         mock_decode.return_value = {

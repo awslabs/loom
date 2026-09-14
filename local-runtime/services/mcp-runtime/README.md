@@ -26,11 +26,9 @@ make local.mcp-runtime.test
 mcp-runtime/
   templates/           # allowlist YAML (service-owned)
   mcp_runtime/
-    domain/errors.py
-    application/{ports,wiring}.py
+    domain/
+    application/
     adapters/
-      inbound/http_app.py
-      outbound/{process_supervisor,yaml_templates,stdio_session,env_secrets}.py
-    *.py                 # compat shims
-    echo_child.py        # child process for test-echo
+    echo_child.py      # child process for test-echo
+    __main__.py
 ```

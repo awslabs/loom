@@ -67,12 +67,12 @@ Contract: `2026-09-hub-1`. Docs: ADR 0011 / 0012, specs 017 / 024 / 025.
 
 ```text
 mcp_hub/
-  domain/           # pure rules (access, naming, identity, errors)
-  application/      # ports + wiring
+  domain/           # pure rules (access, naming, identity, errors, records)
+  application/      # ports + wiring + use_cases
   adapters/
     inbound/        # http_app (http.server)
-    outbound/       # file_store, loom_http, oauth_jwks
-  *.py              # compat shims (old import paths)
+    outbound/       # file_store, pg_store, loom_http, oauth_jwks
+  __main__.py
 ```
 
 Wire protocol and env unchanged for MCP. Store default = Postgres via

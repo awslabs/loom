@@ -34,6 +34,15 @@ _(nenhum)_
 
 ## Itens encerrados
 
+### REF-2026-09-14-09 — remover shims de compat hexagonal
+
+| Campo | Valor |
+|-------|--------|
+| **Data** | 2026-09-14 |
+| **Área** | todos os sidecars `local-runtime/services/*` |
+| **Status** | done |
+| **Notas** | Imports só via domain/application/adapters; mantido `echo_child` e `__main__`. |
+
 ### REF-2026-09-14-08 — mover templates/ para mcp-runtime
 
 | Campo | Valor |

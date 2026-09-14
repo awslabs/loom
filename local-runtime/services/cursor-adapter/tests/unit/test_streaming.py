@@ -1,6 +1,6 @@
 import unittest
 
-from cursor_adapter.streaming import format_sse, iter_openai_chunks
+from cursor_adapter.domain.streaming import format_sse, iter_openai_chunks
 
 
 class _Block:

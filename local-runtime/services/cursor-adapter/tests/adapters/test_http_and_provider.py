@@ -4,10 +4,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cursor_adapter.errors import AdapterError
-from cursor_adapter.http_app import bind_address, handle_chat_completions
-from cursor_adapter.sdk_runner import run_prompt
-from cursor_adapter.sessions import SessionManager
+from cursor_adapter.adapters.inbound.http_app import bind_address
+from cursor_adapter.adapters.outbound.memory_sessions import SessionManager
+from cursor_adapter.adapters.outbound.sdk_runner import run_prompt
+from cursor_adapter.application.use_cases.chat import handle_chat_completions
+from cursor_adapter.application.wiring import default_runner, default_sessions
+from cursor_adapter.domain.errors import AdapterError
 
 
 class TestHttpContract(unittest.TestCase):
@@ -26,6 +28,8 @@ class TestHttpContract(unittest.TestCase):
             status, body, streamed = handle_chat_completions(
                 {"messages": [{"role": "user", "content": "hi"}]},
                 {},
+                sessions=default_sessions(),
+                runner=default_runner(),
             )
         self.assertFalse(streamed)
         self.assertEqual(status, 401)

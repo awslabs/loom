@@ -5,8 +5,8 @@ import unittest
 @unittest.skipUnless(os.getenv("CURSOR_API_KEY"), "real Cursor e2e is opt-in; never run in CI without a key")
 class TestCursorE2E(unittest.TestCase):
     def test_analyze_workspace(self) -> None:
-        from cursor_adapter.sdk_runner import run_prompt
-        from cursor_adapter.sessions import SessionManager
+        from cursor_adapter.adapters.outbound.memory_sessions import SessionManager
+        from cursor_adapter.adapters.outbound.sdk_runner import run_prompt
 
         workspace = os.environ.get("CURSOR_WORKSPACE")
         result = run_prompt(

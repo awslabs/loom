@@ -1,4 +1,4 @@
-"""Local agent runtime (ADR 0005).
+# Local agent runtime (ADR 0005)
 
 Separate process from Loom FastAPI. Implements the invoke contract in
 `local-runtime/docs/specs/011-local-agent-runtime-contract.md`:
@@ -11,17 +11,16 @@ Separate process from Loom FastAPI. Implements the invoke contract in
 make local.agent-runtime.test
 ```
 
-## Package layout (hexagonal strangler)
+## Package layout (hexagonal)
 
 ```text
 agent_runtime/
-  domain/              # contract, errors (pure)
+  domain/              # contract, errors, types (pure)
   application/         # ports, wiring, use_cases/invoke
   adapters/
     inbound/http_app   # HTTP + SSE
     outbound/          # litellm_http, mcp_http, memory_sessions
-  loop.py / http_app.py  # compat shims
+  __main__.py
 ```
 
 Contract version unchanged: `2026-09-local-1`.
-"""

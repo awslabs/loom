@@ -1,6 +1,7 @@
 import unittest
 
-from mcp_runtime.secrets import SecretError, resolve_secret_refs
+from mcp_runtime.adapters.outbound.env_secrets import resolve_secret_refs
+from mcp_runtime.domain.errors import SecretError
 
 
 class TestSecrets(unittest.TestCase):

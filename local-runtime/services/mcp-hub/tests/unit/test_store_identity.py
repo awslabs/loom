@@ -5,9 +5,9 @@ import os
 import tempfile
 import unittest
 
-from mcp_hub.access import grants_for_user, merge_profile_grants, profile_keys_for_user
-from mcp_hub.identity import declared_family, normalize_slug, parse_client_info
-from mcp_hub import store
+from mcp_hub.adapters.outbound import file_store as store
+from mcp_hub.domain.access import grants_for_user, merge_profile_grants, profile_keys_for_user
+from mcp_hub.domain.identity import declared_family, normalize_slug, parse_client_info
 
 
 class TestIdentity(unittest.TestCase):

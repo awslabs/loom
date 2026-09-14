@@ -1,13 +1,13 @@
 import unittest
 from pathlib import Path
 
-from mcp_runtime.templates import (
-    TemplateError,
+from mcp_runtime.adapters.outbound.yaml_templates import (
     get_template,
     render_args,
     render_env,
     validate_params,
 )
+from mcp_runtime.domain.errors import TemplateError
 
 
 class TestTemplates(unittest.TestCase):

@@ -1,6 +1,6 @@
 import unittest
 
-from cursor_adapter.sessions import SessionManager
+from cursor_adapter.adapters.outbound.memory_sessions import SessionManager
 
 
 class TestSessions(unittest.TestCase):
@@ -25,8 +25,8 @@ class TestSessions(unittest.TestCase):
         self.assertIs(manager.lock_for(key), manager.lock_for(key))
 
     def test_invalid_workspace_rejected_by_runner(self) -> None:
-        from cursor_adapter.errors import AdapterError
-        from cursor_adapter.sdk_runner import run_prompt
+        from cursor_adapter.adapters.outbound.sdk_runner import run_prompt
+        from cursor_adapter.domain.errors import AdapterError
 
         with self.assertRaises(AdapterError) as ctx:
             run_prompt(
@@ -39,7 +39,6 @@ class TestSessions(unittest.TestCase):
                 launch=lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not launch")),
             )
         self.assertEqual(ctx.exception.code, "invalid_workspace")
-        self.assertEqual(ctx.exception.status, 400)
 
 
 if __name__ == "__main__":

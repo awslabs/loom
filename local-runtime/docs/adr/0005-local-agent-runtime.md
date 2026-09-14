@@ -2,13 +2,15 @@
 
 - **Status:** Aceita — M1 implementado (`local-runtime/services/agent-runtime` + BFF)
 - **Data:** 2026-09-13
-- **Atualizado:** 2026-09-13 — planner `cursor-local`; `ensure_stdio_ready` no invoke; overlay compose
+- **Atualizado:** 2026-09-14 — ver extensão [ADR 0013](0013-local-agent-templates-worker-pool.md)
+  (templates + pool de workers)
 - **Decisores:** Mantenedores da plataforma
 - **Relacionada a:**
   [ADR 0003 — LiteLLM](0003-litellm-as-llm-gateway.md),
   [ADR 0004 — Local MCP Runtime](0004-local-mcp-runtime.md),
   [ADR 0001 — IdP](0001-keycloak-as-identity-provider.md),
-  [ADR 0006 — Extensão local-runtime](0006-local-runtime-extension-repo.md)
+  [ADR 0006 — Extensão local-runtime](0006-local-runtime-extension-repo.md),
+  [ADR 0013 — Templates + worker pool](0013-local-agent-templates-worker-pool.md)
 
 ## Problema
 

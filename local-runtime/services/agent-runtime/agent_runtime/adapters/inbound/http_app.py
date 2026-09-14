@@ -93,10 +93,14 @@ class RuntimeHandler(BaseHTTPRequestHandler):
             _json(self, status, {"error": {"message": exc.message, "code": exc.code}})
             return
 
+        # SSE must end the HTTP body when the generator finishes. keep-alive
+        # left httpx.aiter_lines (BFF / Hub) waiting forever after session_end,
+        # so Loom sessions stayed "streaming" or flipped to empty Invocation failed.
+        self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         try:
@@ -116,6 +120,7 @@ class RuntimeHandler(BaseHTTPRequestHandler):
                 self.wfile.write(
                     f"event: error\ndata: {json.dumps({'message': 'internal error', 'code': 'internal'})}\n\n".encode("utf-8")
                 )
+                self.wfile.flush()
             except Exception:
                 pass
 

@@ -18,6 +18,7 @@ Todos os ADRs do fork moram **aqui** (`local-runtime/docs/adr/`). Não criar em 
 - [0010 — Grants por perfil IdP](0010-mcp-hub-profile-grants.md)
 - [0011 — Auth OAuth IdP (sem mint)](0011-mcp-hub-oauth-idp.md)
 - [0012 — Agents como tools MCP](0012-mcp-hub-agents-as-tools.md)
+- [0013 — Agents locais por template + pool de workers](0013-local-agent-templates-worker-pool.md)
 
 ## Specs Hub (relacionadas)
 

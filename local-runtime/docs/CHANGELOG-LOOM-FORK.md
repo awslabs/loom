@@ -75,6 +75,25 @@ Checklist pós-merge:
 
 ## Registro
 
+### 2026-09-14 — ADR 0013 + specs 026/027 (templates + worker pool)
+
+| Zona | Path | Nota |
+|------|------|------|
+| **Docs** | `adr/0013-…`, `specs/026-…`, `specs/027-…` | Agents locais por template; pool agnóstico; dual path AgentCore; K8s-ready |
+| **Docs** | `architecture.md`, índices ADR/specs | Ponteiros ao desenho |
+
+### 2026-09-14 — agent-runtime: 2 réplicas no compose (pool)
+
+| Zona | Path | Nota |
+|------|------|------|
+| **Extension** | `compose/overlay.yml`, `makefile` | Pool de workers: sem porta no host; `make local.up` sobe `--scale agent-runtime=2` (`AGENT_RUNTIME_REPLICAS`) |
+
+### 2026-09-14 — agent-runtime SSE fecha conexão após invoke
+
+| Zona | Path | Nota |
+|------|------|------|
+| **Extension** | `services/agent-runtime/.../adapters/inbound/http_app.py` | `/v1/invoke` SSE: `Connection: close` + `close_connection=True` para o BFF/Hub não ficarem em `streaming` após `session_end` |
+
 ### 2026-09-14 — mcp-runtime owns templates/
 
 | Campo | Valor |

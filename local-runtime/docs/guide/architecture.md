@@ -29,7 +29,7 @@ Relacionados: [ADR 0005](../adr/0005-local-agent-runtime.md),
 [overview](overview.md), [scalability-reliability.md](scalability-reliability.md),
 [CHANGELOG-LOOM-FORK.md](../CHANGELOG-LOOM-FORK.md).
 
-**Última revisão:** 2026-09-14 (templates sob mcp-runtime; LiteLLM ≠ Bedrock)
+**Última revisão:** 2026-09-14 (ADR 0013 templates + worker pool; templates MCP; LiteLLM ≠ Bedrock)
 
 ---
 
@@ -137,7 +137,7 @@ local de desenvolvimento; em produção use DNS/TLS e secrets store.
 | MCP Hub resource | `MCP_HUB_PUBLIC_URL` | `http://127.0.0.1:8790/mcp` |
 | Hub → BFF | `MCP_HUB_INTERNAL_URL` + `MCP_HUB_SERVICE_TOKEN` | service network |
 | mcp-runtime | `MCP_RUNTIME_URL` + `MCP_RUNTIME_TOKEN` | service network |
-| agent-runtime (extensão) | `AGENT_RUNTIME_URL` + `AGENT_RUNTIME_TOKEN` | service network |
+| agent-runtime (extensão) | `AGENT_RUNTIME_URL` + `AGENT_RUNTIME_TOKEN` | service network; **pool** de réplicas ([ADR 0013](../adr/0013-local-agent-templates-worker-pool.md), [spec 027](../specs/027-local-agent-worker-pool.md)) |
 | AgentCore / harness (produção) | credenciais AWS / ARNs no BFF | conta AWS |
 | LiteLLM | discovery / proxy URL | compose service |
 | LLM backends (via LiteLLM) | config LiteLLM (OpenAI, Anthropic, …) | API keys em env/secrets |
@@ -361,6 +361,7 @@ Não misturar com schema/ORM do Loom Core.
 | Modelo LLM | LiteLLM (único gateway do control plane) | OpenAI / Anthropic / …; `cursor-local` → cursor-adapter. Bedrock → AgentCore |
 | IdP ativo | **Fork (PG)** `identity_providers` | Keycloak/Entra (**local-runtime** / SaaS) |
 | Template stdio | **Fork** colunas em `mcp_servers` | **mcp-runtime** YAML allowlist |
+| Template agent local | **Extension** YAML (`agent-runtime/templates/`, [spec 026](../specs/026-local-agent-templates.md)) | `agents.source=local` + escopo no invoke ([ADR 0013](../adr/0013-local-agent-templates-worker-pool.md)) |
 
 ```text
                     ┌──────────────────────────┐

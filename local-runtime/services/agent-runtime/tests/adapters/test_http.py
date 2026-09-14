@@ -14,8 +14,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent_runtime.adapters.inbound.http_app import RuntimeHandler
+from agent_runtime.adapters.outbound.memory_sessions import MemorySessionStore
 from agent_runtime.domain.contract import CONTRACT_VERSION, tool_name as _tool_name, validate_payload
 from agent_runtime.domain.errors import AgentRuntimeError
+
+
+class _FakeLlm:
+    def chat_completion(self, **_kwargs: object) -> dict:
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+
+class _FakeMcp:
+    def load_tools(self, *_a: object, **_k: object) -> tuple[list, dict]:
+        return [], {}
+
+    def call_tool(self, *_a: object, **_k: object) -> dict:
+        return {"result": {}}
 
 
 class TestValidatePayload(unittest.TestCase):
@@ -45,6 +59,9 @@ class TestValidatePayload(unittest.TestCase):
 class TestRuntimeHttp(unittest.TestCase):
     def setUp(self) -> None:
         os.environ["AGENT_RUNTIME_TOKEN"] = "test-agent-token"
+        RuntimeHandler.sessions = MemorySessionStore()
+        RuntimeHandler.llm = _FakeLlm()  # type: ignore[assignment]
+        RuntimeHandler.mcp = _FakeMcp()  # type: ignore[assignment]
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), RuntimeHandler)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -87,3 +104,35 @@ class TestRuntimeHttp(unittest.TestCase):
         status, payload = self._json("GET", "/v1/health")
         self.assertEqual(status, 200)
         self.assertIn(CONTRACT_VERSION, payload["contract_versions"])
+
+    def test_invoke_sse_closes_after_session_end(self) -> None:
+        """Body must finish after session_end (Connection: close), or BFF hangs."""
+        body = {
+            "contract_version": CONTRACT_VERSION,
+            "prompt": "hi",
+            "model_id": "cursor-local",
+            "session_id": "s-close",
+            "invocation_id": "i-close",
+            "agent": {"id": 1, "name": "demo", "system_prompt": "sys"},
+            "mcp_servers": [],
+            "identity": {"subject": "u1", "agent_id": "1", "session_id": "s-close"},
+            "options": {"timeout_s": 5, "max_tool_rounds": 1},
+        }
+        data = json.dumps(body).encode("utf-8")
+        req = Request(
+            self._url("/v1/invoke"),
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer test-agent-token",
+                "Accept": "text/event-stream",
+            },
+            method="POST",
+        )
+        with urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.headers.get("Connection", "").lower(), "close")
+            raw = resp.read().decode("utf-8")
+        self.assertIn("event: session_start", raw)
+        self.assertIn("event: chunk", raw)
+        self.assertIn("event: session_end", raw)

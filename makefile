@@ -32,9 +32,10 @@ help:
 	@echo "  Set LOOM_AWS_CREDS_DIR to your ~/.aws to exercise AWS-backed features."
 
 local.up:
-	$(COMPOSE) up --build -d
+	$(COMPOSE) up --build -d --scale agent-runtime=$(or $(AGENT_RUNTIME_REPLICAS),2)
 	@echo ""
 	@echo "Stack starting. Keycloak's first boot creates its schema and can take a minute."
+	@echo "agent-runtime replicas: $(or $(AGENT_RUNTIME_REPLICAS),2) (override with AGENT_RUNTIME_REPLICAS=N)."
 	@echo "Follow progress with 'make local.logs'."
 
 local.down:

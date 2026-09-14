@@ -56,7 +56,7 @@ salvo impossibilidade (ver [rules.md](rules.md)).
 |---------|--------------|--------|
 | mcp-hub | 8790 | MCP OAuth + tools allowlist / agents |
 | mcp-runtime | (internal) | Supervisor stdio MCP |
-| agent-runtime | 8766 | Loop de agent local |
+| agent-runtime | 8766 (rede Docker; sem publish no host) | Loop de agent local — **2 réplicas** no `make local.up` (`AGENT_RUNTIME_REPLICAS`) |
 | cursor-adapter | 8765 | Provider LiteLLM `cursor-local` |
 
 Lógica de runtime, Popen, tool loop e PATs **não** vão no FastAPI do Loom nem no

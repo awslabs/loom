@@ -83,6 +83,9 @@ services:
       retries: 12
       start_period: 15s
 
+  # Pool of generic workers (ADR 0005). Backend uses http://agent-runtime:8766
+  # (Compose DNS round-robin). No host port publish — required to scale without
+  # clashing on 127.0.0.1:8766. Override count: AGENT_RUNTIME_REPLICAS (make local.up).
   agent-runtime:
     build:
       context: ./local-runtime/services/agent-runtime
@@ -100,8 +103,6 @@ services:
       LITELLM_BASE_URL: http://litellm:4000
       LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-loom-local-dev}
       MCP_RUNTIME_TOKEN: ${MCP_RUNTIME_TOKEN:-loom-mcp-runtime-local}
-    ports:
-      - "127.0.0.1:8766:8766"
     healthcheck:
       test:
         [

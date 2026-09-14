@@ -29,6 +29,8 @@ Todas as specs do fork moram **aqui** (`local-runtime/docs/specs/`). Não criar 
 - [012 — Security](012-local-agent-runtime-security.md)
 - [013 — Observability](013-local-agent-runtime-observability.md)
 - [014 — Orientador / ADO acceptance](014-local-agent-orientador-ado-acceptance.md)
+- [026 — Local agent templates](026-local-agent-templates.md)
+- [027 — Worker pool / escala / sessão](027-local-agent-worker-pool.md)
 
 ### MCP Hub
 

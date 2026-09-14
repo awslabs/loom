@@ -75,6 +75,19 @@ Checklist pós-merge:
 
 ## Registro
 
+### 2026-09-14 — mcp-runtime hexagonal leve (REF-04)
+
+**Contexto:** alinhar supervisor stdio ao layout ports/adapters.
+
+| Zona | Paths | O que mudou |
+|------|-------|-------------|
+| **Extension** | `services/mcp-runtime/mcp_runtime/{domain,application,adapters}/` | ProcessSupervisor + outbound YAML/stdio/secrets |
+| **Docs** | backlog REF-04 done | |
+
+**Impacto no sync upstream:** baixo.
+
+---
+
 ### 2026-09-14 — agent-runtime hexagonal (REF-03)
 
 **Contexto:** mesma disciplina do Hub — domain/application/adapters.

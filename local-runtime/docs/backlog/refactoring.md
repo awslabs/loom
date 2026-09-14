@@ -30,20 +30,6 @@ Fluxo:
 
 ## Itens abertos
 
-### REF-2026-09-14-04 — mcp-runtime: hexagonal leve
-
-| Campo | Valor |
-|-------|--------|
-| **Data** | 2026-09-14 |
-| **Área** | `local-runtime/services/mcp-runtime` |
-| **Paths** | `supervisor.py`, `http_app.py`, `templates.py`, `stdio.py` |
-| **Oportunidade** | Extrair regras de template/allowlist; inbound HTTP fino; outbound process spawn |
-| **Motivo** | Consistência entre sidecars; já relativamente isolado |
-| **Complexidade** | média |
-| **Risco** | médio (stdio children) |
-| **Status** | open |
-| **Notas** | Plano Fase 4. |
-
 ### REF-2026-09-14-05 — cursor-adapter: hexagonal
 
 | Campo | Valor |
@@ -100,3 +86,12 @@ Fluxo:
 | **Área** | `local-runtime/services/agent-runtime` |
 | **Status** | done |
 | **Notas** | Ports `LlmGateway` / `McpToolsClient` / `SessionStore`; use case `invoke`. |
+
+### REF-2026-09-14-04 — mcp-runtime: hexagonal leve
+
+| Campo | Valor |
+|-------|--------|
+| **Data** | 2026-09-14 |
+| **Área** | `local-runtime/services/mcp-runtime` |
+| **Status** | done |
+| **Notas** | Port `ProcessSupervisor`; YAML/stdio/secrets outbound; HTTP inbound DI. |

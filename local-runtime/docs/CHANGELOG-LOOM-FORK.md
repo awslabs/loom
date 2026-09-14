@@ -75,6 +75,19 @@ Checklist pós-merge:
 
 ## Registro
 
+### 2026-09-14 — cursor-adapter hexagonal (REF-05)
+
+**Contexto:** isolar translation/planner do SDK Cursor.
+
+| Zona | Paths | O que mudou |
+|------|-------|-------------|
+| **Extension** | `services/cursor-adapter/cursor_adapter/{domain,application,adapters}/` | Ports + use case chat |
+| **Docs** | backlog REF-05 done | |
+
+**Impacto no sync upstream:** baixo.
+
+---
+
 ### 2026-09-14 — mcp-runtime hexagonal leve (REF-04)
 
 **Contexto:** alinhar supervisor stdio ao layout ports/adapters.

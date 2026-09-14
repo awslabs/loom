@@ -105,7 +105,7 @@ Critério de aceite: mesmos testes verdes; smoke Cursor `tools/list` + `agent__*
 ### Fase 4 — mcp-runtime + cursor-adapter
 
 - [x] mcp-runtime: layout leve + `ProcessSupervisor` port
-- [ ] cursor-adapter: isolar translation pura de SDK I/O
+- [x] cursor-adapter: translation/planner no domain; SDK outbound
 
 ### Fase 5 — plugin UI
 

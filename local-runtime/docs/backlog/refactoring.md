@@ -30,20 +30,6 @@ Fluxo:
 
 ## Itens abertos
 
-### REF-2026-09-14-05 — cursor-adapter: hexagonal
-
-| Campo | Valor |
-|-------|--------|
-| **Data** | 2026-09-14 |
-| **Área** | `local-runtime/services/cursor-adapter` |
-| **Paths** | `translation.py`, `planner.py`, `sdk_runner.py`, `http_app.py`, `sessions.py` |
-| **Oportunidade** | Isolar translation pura; ports para SDK Cursor e sessão |
-| **Motivo** | Bordas SDK/HTTP misturadas; teste unitário de translation |
-| **Complexidade** | média |
-| **Risco** | médio (`cursor-local` path) |
-| **Status** | open |
-| **Notas** | Plano Fase 4. |
-
 ### REF-2026-09-14-06 — plugin: fatiar LocalRuntimePage
 
 | Campo | Valor |
@@ -95,3 +81,12 @@ Fluxo:
 | **Área** | `local-runtime/services/mcp-runtime` |
 | **Status** | done |
 | **Notas** | Port `ProcessSupervisor`; YAML/stdio/secrets outbound; HTTP inbound DI. |
+
+### REF-2026-09-14-05 — cursor-adapter: hexagonal
+
+| Campo | Valor |
+|-------|--------|
+| **Data** | 2026-09-14 |
+| **Área** | `local-runtime/services/cursor-adapter` |
+| **Status** | done |
+| **Notas** | domain translation/planner; ports CursorAgentRunner/SessionStore; use case chat. |

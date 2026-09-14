@@ -55,8 +55,8 @@ Fluxo:
 | **Motivo** | Isolar regras (grants, naming, agents tools) de HTTP/JSON/JWKS; testabilidade; norte do guideline |
 | **Complexidade** | alta |
 | **Risco** | médio (regressão MCP OAuth / tools/list|call) |
-| **Status** | open |
-| **Notas** | Strangler; wire protocol estável. Plano Fase 1. |
+| **Status** | open — **autorizado** (Dev 2026-09-14); execução em `refactor/mcp-hub-hexagonal` |
+| **Notas** | Strangler; wire protocol estável. Plano Fase 1. Decisões: §6 do [plano](local-runtime-guideline-refactor-plan.md). |
 
 ### REF-2026-09-14-03 — agent-runtime: layout hexagonal
 

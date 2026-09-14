@@ -134,18 +134,24 @@ Detalhe tabular em [refactoring.md](refactoring.md).
 
 ---
 
-## 6. Decisões em aberto (precisam do Dev)
+## 6. Decisões (aceitas 2026-09-14)
 
-1. **Primeira fatia autorizada:** só Fase 0 docs, ou já Fase 1 mcp-hub?
-2. **Hub store:** Postgres dedicado do Hub vs schema no PG Loom (via interface / sem ORM Core)?
-3. **HTTP stack:** manter `http.server` nos adapters inbound ou migrar FastAPI/Starlette por serviço?
-4. **Compat:** exigir zero mudança de wire protocol nas Fases 1–3?
+Pacote fechado pelo Dev (seguir recomendações do agente):
+
+| # | Tema | Decisão |
+|---|------|---------|
+| 1 | Primeira fatia | Congelar plano em `main` (PR docs); em seguida **`REF-2026-09-14-02`** (mcp-hub hexagonal mínimo) |
+| 2 | Compat | **Zero breaking change** nas fases 1–3 (paths, JSON-RPC, `agent__*`, env, contract agent-runtime) |
+| 3 | Ordem | Hexagonal fino do Hub **com port `HubStore`** → depois Postgres (`REF-01`) |
+| 4 | Hub store | Postgres **dedicado ao Hub** (DSN/env); preferir DB/schema `mcp_hub` — **não** ORM/schema Core Loom |
+| 5 | HTTP inbound | Manter **`http.server`** na 1ª leva; FastAPI/Starlette só se surgir necessidade real |
+| 6 | Profundidade | **Strangler mínimo** (domain + application + ports + adapters); sem big-bang |
 
 ---
 
-## 7. Próximo passo sugerido
+## 7. Próximo passo
 
-1. Dev responde §6 (ao menos itens 1 e 4).
-2. Commit deste plano na branch `plan/local-runtime-guideline-refactor`.
-3. Abrir PR **docs-only** para `main` do fork (congelar o plano).
-4. Nova branch `refactor/mcp-hub-hexagonal` quando o Dev autorizar `REF-2026-09-14-02`.
+1. ~~Commit do plano na branch `plan/local-runtime-guideline-refactor`~~ (feito)
+2. PR docs-only → merge em `main` do fork
+3. Branch `refactor/mcp-hub-hexagonal` — implementar `REF-2026-09-14-02` sob as decisões acima
+4. Depois: `REF-2026-09-14-01` (adapter Postgres no port `HubStore`)

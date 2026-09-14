@@ -1,4 +1,4 @@
-﻿"""HTTP client to Loom BFF for Hub session and materialize/call."""
+﻿"""HTTP client to Loom BFF for materialize/call (service token + user claims)."""
 from __future__ import annotations
 
 import json
@@ -16,7 +16,7 @@ def service_token() -> str:
     return os.environ.get("MCP_HUB_SERVICE_TOKEN", "").strip()
 
 
-def _request(method: str, path: str, body: dict[str, Any] | None = None, extra_headers: dict[str, str] | None = None) -> tuple[int, dict[str, Any]]:
+def _request(method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
     token = service_token()
     if not token:
         return 503, {"error": "hub_service_token_unset"}
@@ -29,7 +29,6 @@ def _request(method: str, path: str, body: dict[str, Any] | None = None, extra_h
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            **(extra_headers or {}),
         },
     )
     try:
@@ -47,44 +46,41 @@ def _request(method: str, path: str, body: dict[str, Any] | None = None, extra_h
         return 502, {"detail": "loom_unreachable"}
 
 
-def introspect(hub_session_token: str) -> dict[str, Any]:
-    status, payload = _request("POST", "/api/mcp/hub/sessions/introspect", {"hub_session_token": hub_session_token})
-    if status != 200:
-        return {"active": False}
-    return payload
-
-
 def materialize_allowlist(
     *,
-    hub_session_id: str,
+    subject: str,
+    groups: list[str],
+    connection_id: str,
     mcp_client_slug: str,
     client_status: str,
-    allowed_groups: list[str],
     grants: list[dict[str, Any]],
 ) -> tuple[int, dict[str, Any]]:
     return _request(
         "POST",
         "/api/mcp/hub/materialize-allowlist",
         {
-            "hub_session_id": hub_session_id,
+            "subject": subject,
+            "groups": groups,
+            "connection_id": connection_id,
             "mcp_client_slug": mcp_client_slug,
             "client_status": client_status,
-            "allowed_groups": allowed_groups,
             "grants": grants,
         },
     )
 
 
 def tools_call(
-    hub_session_id: str,
+    *,
+    subject: str,
+    groups: list[str],
     tool_name: str,
     arguments: dict[str, Any],
-    *,
     server_id: int | None = None,
     original_tool_name: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     body: dict[str, Any] = {
-        "hub_session_id": hub_session_id,
+        "subject": subject,
+        "groups": groups,
         "tool_name": tool_name,
         "arguments": arguments or {},
     }

@@ -30,6 +30,10 @@ Manager. As senhas locais são `Loom-Local-Dev-1` para os usuários do realm e
   `client_type` do provider no Loom é `public`, então a troca do código acontece
   direto entre o navegador e o Keycloak.
 
+- **Client `loom-mcp-hub`** — OAuth público + PKCE para MCP Clients (Cursor).
+  Audience `loom-mcp-hub` no access token; redirect `cursor://…` e localhost.
+  Ver ADR 0011 / spec 024.
+
 ## Usuários
 
 | Usuário | Grupos |

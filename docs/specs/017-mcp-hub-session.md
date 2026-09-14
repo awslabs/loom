@@ -1,87 +1,74 @@
-# Spec 017 — Hub session (mint / introspect)
+# Spec 017 — Credencial do MCP Hub (validação de token OAuth)
 
 - **Status:** Rascunho
 - **Data:** 2026-09-13
-- **Atualizado:** 2026-09-13 — mint = user only; client via discovery ([ADR 0008](../adr/0008-mcp-hub-clients.md))
-- **Implementa:** [ADR 0007](../adr/0007-mcp-hub.md), [ADR 0008](../adr/0008-mcp-hub-clients.md)
-- **Depende de:** [016](016-mcp-hub-contract.md), [018](018-mcp-hub-allowlist.md), [021](021-mcp-hub-clients.md), [022](022-mcp-hub-client-identification.md), [019](019-mcp-hub-security.md)
+- **Atualizado:** 2026-09-14 — mint removido; OAuth IdP ([ADR 0011](../adr/0011-mcp-hub-oauth-idp.md))
+- **Implementa:** [ADR 0007](../adr/0007-mcp-hub.md), [ADR 0011](../adr/0011-mcp-hub-oauth-idp.md)
+- **Depende de:** [016](016-mcp-hub-contract.md), [024](024-mcp-hub-oauth.md),
+  [018](018-mcp-hub-allowlist.md), [019](019-mcp-hub-security.md),
+  [021](021-mcp-hub-clients.md), [022](022-mcp-hub-client-identification.md)
 
 ## 1. Objetivo
 
-Separar **login IdP** da **credencial MCP**. Sessão Hub autentica o
-**usuário**. O **MCP Client** (Cursor, …) é descoberto no `initialize`
-(022 / 0008), não escolhido no mint.
+Definir como o Hub autentica o **usuário** em cada request MCP.
+Credencial = **access token OAuth** emitido pelo Keycloak para o
+**resource** Hub (024). O **MCP Client** continua sendo descoberto no
+`initialize` (022), não na auth.
 
-## 2. Endpoints BFF (Loom — gancho mínimo)
+**Mint / `hs_…`:** removidos. Sem fallback.
+
+## 2. Entrada
 
 ```text
-POST /api/mcp/hub/sessions
-Authorization: Bearer <JWT usuário IdP>
-Scopes: mcp:read
-Content-Type: application/json
-
-{
-  "client_label": "local-runtime-ui"   # opcional; audit da UI de mint
-}
-
-→ 201
-{
-  "hub_session_token": "hs_…",
-  "hub_session_id": "uuid",
-  "mcp_hub_url": "http://127.0.0.1:8790/mcp",
-  "expires_at": "ISO-8601",
-  "contract_version": "2026-09-hub-1"
-}
-
-POST /api/mcp/hub/sessions/introspect
-Authorization: Bearer <MCP_HUB_SERVICE_TOKEN>
-{ "hub_session_token": "hs_…" }
-
-→ 200
-{
-  "active": true,
-  "hub_session_id": "uuid",
-  "subject": "idp-sub",
-  "idp_type": "keycloak",
-  "scopes": ["mcp:read"],
-  "groups": ["g-users-demo"],
-  "expires_at": "ISO-8601"
-}
-
-→ 200 { "active": false }
-
-DELETE /api/mcp/hub/sessions/{hub_session_id}
-Authorization: Bearer <JWT usuário>
-→ 204
+Authorization: Bearer <access_token>
 ```
 
-`mcp_client_slug` **não** é campo obrigatório do mint. Após discovery, o
-Hub mantém a associação sessão→client no store da extensão (021/022).
-Introspect Loom pode permanecer só user; o Hub já sabe o slug localmente.
+Somente header. Token deve ser JWT validável via JWKS do issuer Keycloak
+(v1).
 
-### Interino
+## 3. Validação (Hub)
 
-Implementação atual pode ainda aceitar `client_label` apenas. União de
-agents na allowlist = interina até 0008.
+Ordem fail-closed:
 
-## 3. Token
+1. Bearer presente e não vazio.
+2. Prefixo `hs_` → **rejeitar** (legado mint).
+3. JWT: assinatura (JWKS), `iss` = issuer configurado, `exp` (clock skew
+   pequeno), `aud` ou claim `resource` contém URL canônica do Hub
+   (`http://127.0.0.1:8790/mcp` em local — 024).
+4. Extrair `sub` (subject) e grupos Loom (`groups` / claim path alinhado
+   ao IdP Loom).
+5. Derivar identidade de sessão **em memória** no Hub para o wire MCP
+   (bind a `initialize` / `hub_session_id` interno opcional) — **não** é
+   token opaco mintido na UI.
 
-Opaco `hs_…`; hash em `mcp_hub_sessions`: `subject`, `idp_type`, TTL,
-`groups_json` / `scopes_json`, `client_label?`. Sem bind de client no
-Postgres Loom (v1).
+Falha em qualquer passo → `401` (+ challenge 024 se aplicável).
 
-## 4. TTL
+### Config Hub
 
-Default 8h (`MCP_HUB_SESSION_TTL_S`), max 24h; refresh = novo mint.
+| Env | Uso |
+|-----|-----|
+| `MCP_HUB_RESOURCE` | URL canônica do resource (default local acima) |
+| `MCP_HUB_OIDC_ISSUER` | Issuer Keycloak |
+| `MCP_HUB_OIDC_AUDIENCE` | Audience esperada (se distinta do resource URL) |
+| JWKS | Discovery do issuer (`/.well-known/openid-configuration`) |
 
-## 5. UI mint
+## 4. Relação com Loom BFF
 
-Plugin: “Mint Hub session” → URL + Bearer. Sem seletor de canal.
-Texto: “Conecte o IDE; o Hub registra o client. Libere tools em MCP Clients.”
+- **Materialize / tools/call:** Hub → Loom com `MCP_HUB_SERVICE_TOKEN` +
+  identidade do user (`sub`, `groups`) derivada do access token
+  validado (header interno ou body). Loom **não** re-emite `hs_…` para o IDE.
+- Endpoints `POST /api/mcp/hub/sessions` (mint) e UI de mint: **removidos**
+  / não suportados.
+
+## 5. TTL / refresh
+
+TTL = `exp` do access token IdP. Refresh = fluxo OAuth do MCP Client
+(refresh_token), não “novo mint” na UI Loom.
 
 ## 6. Critérios de aceite
 
-- [ ] Mint com JWT → `hs_…` + URL (sem slug obrigatório)
-- [ ] Introspect active/inactive
-- [ ] JWT IdP no Hub → 401
-- [ ] Client discovery não depende de campo no mint
+- [ ] Access token válido → initialize / tools/list conforme grants
+- [ ] Token expirado / aud errada / `hs_…` → 401
+- [ ] Groups do token alimentam filtro de perfil (023)
+- [ ] Sem mint no BFF nem no plugin
+- [ ] JWT do client frontend (aud distinto) → 401 no Hub

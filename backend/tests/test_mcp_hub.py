@@ -1,7 +1,6 @@
-﻿"""Tests for MCP Hub sessions, allowlist, and service auth (ADR 0007)."""
+﻿"""Tests for MCP Hub BFF (OAuth era — ADR 0011; mint removed)."""
 import os
 import unittest
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -11,10 +10,8 @@ from sqlalchemy.pool import StaticPool
 from app.main import app
 from app.db import Base, get_db
 from app.dependencies.auth import UserInfo, get_current_user
-from app.models.agent import Agent
-from app.models.mcp import McpServer, McpTool, McpServerAccess
-from app.models.mcp_hub import McpHubSession
-from app.services.mcp_hub import expose_tools, hash_token
+from app.models.mcp import McpServer, McpTool
+from app.services.mcp_hub import expose_tools
 
 
 def _admin() -> UserInfo:
@@ -60,108 +57,47 @@ class TestMcpHub(unittest.TestCase):
         Base.metadata.create_all(bind=self.engine)
         app.dependency_overrides.clear()
 
-    def test_mint_introspect_revoke(self):
-        mint = self.client.post("/api/mcp/hub/sessions", json={"client_label": "test"})
-        self.assertEqual(mint.status_code, 201, mint.text)
-        body = mint.json()
-        self.assertTrue(body["hub_session_token"].startswith("hs_"))
-        self.assertEqual(body["contract_version"], "2026-09-hub-1")
+    def test_hub_info_oauth(self):
+        resp = self.client.get("/api/mcp/hub/info")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["auth"], "oauth")
+        self.assertTrue(body["mcp_hub_url"].endswith("/mcp"))
 
-        intro = self.client.post(
-            "/api/mcp/hub/sessions/introspect",
-            headers={"Authorization": "Bearer test-hub-token"},
-            json={"hub_session_token": body["hub_session_token"]},
+    def test_mint_endpoints_gone(self):
+        self.assertEqual(self.client.post("/api/mcp/hub/sessions", json={}).status_code, 410)
+        self.assertEqual(
+            self.client.post(
+                "/api/mcp/hub/sessions/introspect",
+                headers={"Authorization": "Bearer test-hub-token"},
+                json={"hub_session_token": "hs_x"},
+            ).status_code,
+            410,
         )
-        self.assertEqual(intro.status_code, 200)
-        self.assertTrue(intro.json()["active"])
-        self.assertEqual(intro.json()["hub_session_id"], body["hub_session_id"])
-
-        revoke = self.client.delete(f"/api/mcp/hub/sessions/{body['hub_session_id']}")
-        self.assertEqual(revoke.status_code, 204)
-
-        intro2 = self.client.post(
-            "/api/mcp/hub/sessions/introspect",
-            headers={"Authorization": "Bearer test-hub-token"},
-            json={"hub_session_token": body["hub_session_token"]},
-        )
-        self.assertEqual(intro2.status_code, 200)
-        self.assertFalse(intro2.json()["active"])
+        self.assertEqual(self.client.delete("/api/mcp/hub/sessions/any").status_code, 410)
 
     def test_service_endpoints_fail_closed_without_token(self):
         os.environ["MCP_HUB_SERVICE_TOKEN"] = ""
         resp = self.client.post(
-            "/api/mcp/hub/sessions/introspect",
+            "/api/mcp/hub/materialize-allowlist",
             headers={"Authorization": "Bearer x"},
-            json={"hub_session_token": "hs_x"},
+            json={
+                "subject": "u1",
+                "groups": [],
+                "mcp_client_slug": "cursor",
+                "client_status": "discovered",
+                "grants": [],
+            },
         )
         self.assertEqual(resp.status_code, 503)
 
-    def test_allowlist_empty_without_access(self):
-        mint = self.client.post("/api/mcp/hub/sessions", json={}).json()
-        resp = self.client.get(
-            "/api/mcp/hub/allowlist",
-            headers={
-                "Authorization": "Bearer test-hub-token",
-                "X-Loom-Hub-Session-Id": mint["hub_session_id"],
-            },
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["entries"], [])
-
-    def test_allowlist_with_access_includes_tool(self):
-        agent = Agent(
-            arn="arn:aws:bedrock-agentcore:us-east-1:1:runtime/r1",
-            runtime_id="r1",
-            name="Orientador",
-            region="us-east-1",
-            account_id="1",
-            source="local",
-        )
-        self.session.add(agent)
-        self.session.flush()
-        server = McpServer(
-            name="Grafana",
-            endpoint_url="http://mcp-runtime:8787/s/1/mcp",
-            transport_type="stdio",
-            template_id="grafana",
-            status="active",
-        )
-        self.session.add(server)
-        self.session.flush()
-        self.session.add(McpTool(
-            server_id=server.id,
-            tool_name="search_dashboards",
-            description="Search",
-            input_schema='{"type":"object"}',
-        ))
-        self.session.add(McpServerAccess(
-            server_id=server.id,
-            persona_id=agent.id,
-            access_level="all_tools",
-        ))
-        self.session.commit()
-
-        mint = self.client.post("/api/mcp/hub/sessions", json={}).json()
-        resp = self.client.get(
-            "/api/mcp/hub/allowlist",
-            headers={
-                "Authorization": "Bearer test-hub-token",
-                "X-Loom-Hub-Session-Id": mint["hub_session_id"],
-            },
-        )
-        self.assertEqual(resp.status_code, 200, resp.text)
-        entries = resp.json()["entries"]
-        self.assertEqual(len(entries), 1)
-        names = [t["name"] for t in entries[0]["tools"]]
-        self.assertIn("search_dashboards", names)
-
     def test_tools_call_denied(self):
-        mint = self.client.post("/api/mcp/hub/sessions", json={}).json()
         resp = self.client.post(
             "/api/mcp/hub/tools/call",
             headers={"Authorization": "Bearer test-hub-token"},
             json={
-                "hub_session_id": mint["hub_session_id"],
+                "subject": "u1",
+                "groups": ["g-users-demo"],
                 "tool_name": "nope",
                 "arguments": {},
             },
@@ -204,15 +140,15 @@ class TestMcpHub(unittest.TestCase):
         ))
         self.session.commit()
 
-        mint = self.client.post("/api/mcp/hub/sessions", json={}).json()
         resp = self.client.post(
             "/api/mcp/hub/materialize-allowlist",
             headers={"Authorization": "Bearer test-hub-token"},
             json={
-                "hub_session_id": mint["hub_session_id"],
+                "subject": "user-1",
+                "groups": ["g-users-demo"],
+                "connection_id": "oauth:user-1",
                 "mcp_client_slug": "cursor",
                 "client_status": "enabled",
-                "allowed_groups": [],
                 "grants": [
                     {
                         "server_id": server.id,
@@ -230,12 +166,12 @@ class TestMcpHub(unittest.TestCase):
         self.assertEqual(names, ["search_dashboards"])
 
     def test_materialize_discovered_empty(self):
-        mint = self.client.post("/api/mcp/hub/sessions", json={}).json()
         resp = self.client.post(
             "/api/mcp/hub/materialize-allowlist",
             headers={"Authorization": "Bearer test-hub-token"},
             json={
-                "hub_session_id": mint["hub_session_id"],
+                "subject": "user-1",
+                "groups": ["g-users-demo"],
                 "mcp_client_slug": "cursor",
                 "client_status": "discovered",
                 "grants": [{"server_id": 1, "access_level": "all_tools", "tool_names": []}],
@@ -243,16 +179,6 @@ class TestMcpHub(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["entries"], [])
-
-    def test_introspect_includes_groups(self):
-        mint = self.client.post("/api/mcp/hub/sessions", json={}).json()
-        intro = self.client.post(
-            "/api/mcp/hub/sessions/introspect",
-            headers={"Authorization": "Bearer test-hub-token"},
-            json={"hub_session_token": mint["hub_session_token"]},
-        )
-        self.assertEqual(intro.status_code, 200)
-        self.assertIn("g-admins-super", intro.json().get("groups") or [])
 
 
 if __name__ == "__main__":

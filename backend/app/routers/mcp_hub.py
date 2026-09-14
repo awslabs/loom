@@ -19,16 +19,9 @@ router = APIRouter(prefix="/api/mcp/hub", tags=["mcp-hub"])
 ext_router = APIRouter(prefix="/api/ext/local-runtime", tags=["local-runtime-ext"])
 
 
-class MintRequest(BaseModel):
-    client_label: str | None = Field(None, max_length=64)
-
-
-class IntrospectRequest(BaseModel):
-    hub_session_token: str
-
-
 class HubToolCallRequest(BaseModel):
-    hub_session_id: str
+    subject: str = Field(..., min_length=1)
+    groups: list[str] = Field(default_factory=list)
     tool_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     server_id: int | None = None
@@ -36,10 +29,11 @@ class HubToolCallRequest(BaseModel):
 
 
 class MaterializeRequest(BaseModel):
-    hub_session_id: str
+    subject: str = Field(..., min_length=1)
+    groups: list[str] = Field(default_factory=list)
+    connection_id: str | None = None
     mcp_client_slug: str
     client_status: str = "discovered"
-    allowed_groups: list[str] = Field(default_factory=list)
     grants: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -62,52 +56,52 @@ def _require_service_token(authorization: str | None) -> None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
 
 
-@router.post("/sessions", status_code=status.HTTP_201_CREATED)
-def mint_hub_session(
-    body: MintRequest | None = None,
-    user: UserInfo = Depends(require_scopes("mcp:read")),
-    db: Session = Depends(get_db),
-) -> dict:
-    label = body.client_label if body else None
-    return hub.mint_session(db, user, client_label=label)
+def _user_from_hub_claims(subject: str, groups: list[str]) -> UserInfo:
+    from app.dependencies.auth import derive_scopes
+
+    return UserInfo(
+        sub=subject,
+        username=subject,
+        groups=list(groups or []),
+        scopes=derive_scopes(list(groups or [])),
+        idp_type="keycloak",
+    )
 
 
-@router.post("/sessions/introspect")
-def introspect_hub_session(
-    body: IntrospectRequest,
-    authorization: str | None = Header(default=None),
-    db: Session = Depends(get_db),
-) -> dict:
-    _require_service_token(authorization)
-    return hub.introspect_token(db, body.hub_session_token)
+@router.get("/info")
+def hub_public_info() -> dict:
+    """Public Hub resource URL for IDE OAuth (no mint)."""
+    return {
+        "mcp_hub_url": hub.hub_public_url(),
+        "resource": hub.hub_public_url(),
+        "auth": "oauth",
+        "contract_version": hub.CONTRACT_VERSION,
+    }
 
 
-@router.delete("/sessions/{hub_session_id}", status_code=status.HTTP_204_NO_CONTENT)
-def revoke_hub_session(
-    hub_session_id: str,
-    user: UserInfo = Depends(require_scopes("mcp:read")),
-    db: Session = Depends(get_db),
-) -> None:
-    if not hub.revoke_session(db, hub_session_id, user):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
+@router.post("/sessions", status_code=status.HTTP_410_GONE)
+def mint_hub_session_removed() -> dict:
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="hub_mint_removed_use_oauth",
+    )
 
 
-@router.get("/allowlist")
-def get_hub_allowlist(
-    authorization: str | None = Header(default=None),
-    x_loom_hub_session_id: str | None = Header(default=None, alias="X-Loom-Hub-Session-Id"),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Interim union allowlist. Hub MCP path uses materialize-allowlist instead."""
-    _require_service_token(authorization)
-    if not x_loom_hub_session_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="missing_hub_session_id")
-    user = hub.user_from_hub_session(db, x_loom_hub_session_id)
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session_inactive")
-    payload = hub.build_allowlist(db, user)
-    payload["hub_session_id"] = x_loom_hub_session_id
-    return payload
+@router.post("/sessions/introspect", status_code=status.HTTP_410_GONE)
+def introspect_hub_session_removed() -> dict:
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="hub_mint_removed_use_oauth",
+    )
+
+
+@router.delete("/sessions/{hub_session_id}", status_code=status.HTTP_410_GONE)
+def revoke_hub_session_removed(hub_session_id: str) -> None:
+    _ = hub_session_id
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="hub_mint_removed_use_oauth",
+    )
 
 
 @router.post("/materialize-allowlist")
@@ -117,16 +111,14 @@ def materialize_hub_allowlist(
     db: Session = Depends(get_db),
 ) -> dict:
     _require_service_token(authorization)
-    user = hub.user_from_hub_session(db, body.hub_session_id)
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session_inactive")
+    user = _user_from_hub_claims(body.subject, body.groups)
     return hub.materialize_from_grants(
         db,
         user,
-        hub_session_id=body.hub_session_id,
+        hub_session_id=body.connection_id or f"oauth:{body.subject}",
         mcp_client_slug=body.mcp_client_slug,
         client_status=body.client_status,
-        allowed_groups=body.allowed_groups,
+        allowed_groups=[],
         grants=body.grants,
     )
 
@@ -138,9 +130,7 @@ def hub_tools_call(
     db: Session = Depends(get_db),
 ) -> dict:
     _require_service_token(authorization)
-    user = hub.user_from_hub_session(db, body.hub_session_id)
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session_inactive")
+    user = _user_from_hub_claims(body.subject, body.groups)
     result = hub.call_hub_tool(
         db,
         user,

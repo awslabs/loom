@@ -6,11 +6,10 @@ type Props = {
   canWrite: boolean;
 };
 
-type HubMint = {
-  hub_session_token: string;
-  hub_session_id: string;
+type HubInfo = {
   mcp_hub_url: string;
-  expires_at: string;
+  resource: string;
+  auth: string;
   contract_version: string;
 };
 
@@ -106,7 +105,7 @@ function buildRulesFromGrants(
  * Channel → pick IdP profile on demand → load/save only that profile (ADR 0010).
  */
 export function LocalRuntimePage({ canRead, canWrite }: Props) {
-  const [mint, setMint] = useState<HubMint | null>(null);
+  const [hubInfo, setHubInfo] = useState<HubInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [clients, setClients] = useState<McpHubClient[]>([]);
@@ -180,6 +179,8 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
         if (nextClients[0]) {
           setSelectedSlug(nextClients[0].slug);
         }
+        const info = await apiFetch<HubInfo>("/api/mcp/hub/info");
+        setHubInfo(info);
       } catch (err) {
         setError(err instanceof ApiError ? err.detail : "Failed to load Hub clients");
       }
@@ -209,26 +210,6 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
     setProfileLoaded(false);
     if (!profile || !selectedSlug) return;
     await loadProfileGrants(selectedSlug, profile, servers);
-  }
-
-  async function mintHubSession() {
-    setBusy(true);
-    setError(null);
-    try {
-      const data = await apiFetch<HubMint>("/api/mcp/hub/sessions", {
-        method: "POST",
-        body: JSON.stringify({ client_label: "local-runtime-ui" }),
-      });
-      setMint(data);
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(`Mint failed (${err.status}): ${err.detail.slice(0, 200)}`);
-      } else {
-        setError(err instanceof Error ? err.message : "Mint failed");
-      }
-    } finally {
-      setBusy(false);
-    }
   }
 
   async function setClientStatus(slug: string, next: "enabled" | "disabled") {
@@ -336,39 +317,38 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
       </div>
 
       <section className="rounded-lg border bg-card p-4 space-y-3 text-sm">
-        <h2 className="font-medium">MCP Hub session</h2>
+        <h2 className="font-medium">MCP Hub (OAuth)</h2>
         <p className="text-muted-foreground">
-          Mint after IdP login, put the URL + Bearer in your IDE MCP config, connect once
-          so the Hub registers the channel, then configure profile grants below.
+          No mint. Point the IDE at the Hub URL only — Cursor authenticates via Keycloak
+          (Authorization Code + PKCE). After connect, the channel appears below for profile
+          grants.
         </p>
-        {canRead ? (
-          <button
-            type="button"
-            className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm disabled:opacity-50"
-            disabled={busy}
-            onClick={() => void mintHubSession()}
-          >
-            {busy ? "Minting…" : "Mint Hub session"}
-          </button>
+        {error ? <p className="text-destructive text-xs">{error}</p> : null}
+        {hubInfo ? (
+          <div className="space-y-2 rounded-md bg-muted/40 p-3 font-mono text-xs break-all">
+            <div>
+              <div className="text-muted-foreground mb-1">Resource URL (mcp.json)</div>
+              <div>{hubInfo.mcp_hub_url}</div>
+            </div>
+            <pre className="whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
+{`{
+  "mcpServers": {
+    "loom-hub": {
+      "url": "${hubInfo.mcp_hub_url}"
+    }
+  }
+}`}
+            </pre>
+            <div className="text-muted-foreground">
+              auth={hubInfo.auth} · {hubInfo.contract_version} · PRM at{" "}
+              http://127.0.0.1:8790/.well-known/oauth-protected-resource
+            </div>
+          </div>
+        ) : canRead ? (
+          <p className="text-muted-foreground text-xs">Loading Hub info…</p>
         ) : (
           <p className="text-muted-foreground">Requires mcp:read.</p>
         )}
-        {error ? <p className="text-destructive text-xs">{error}</p> : null}
-        {mint ? (
-          <div className="space-y-2 rounded-md bg-muted/40 p-3 font-mono text-xs break-all">
-            <div>
-              <div className="text-muted-foreground mb-1">URL</div>
-              <div>{mint.mcp_hub_url}</div>
-            </div>
-            <div>
-              <div className="text-muted-foreground mb-1">Bearer (Hub session)</div>
-              <div>{mint.hub_session_token}</div>
-            </div>
-            <div className="text-muted-foreground">
-              expires {mint.expires_at} · {mint.contract_version}
-            </div>
-          </div>
-        ) : null}
       </section>
 
       <section className="rounded-lg border bg-card p-4 space-y-3 text-sm">

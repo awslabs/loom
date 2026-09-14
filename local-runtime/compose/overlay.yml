@@ -127,6 +127,12 @@ services:
       MCP_HUB_SERVICE_TOKEN: ${MCP_HUB_SERVICE_TOKEN:-loom-mcp-hub-local}
       LOOM_BACKEND_URL: http://backend:8000
       MCP_HUB_STORE_PATH: /data/hub_clients.json
+      MCP_HUB_RESOURCE: ${MCP_HUB_PUBLIC_URL:-http://127.0.0.1:8790/mcp}
+      MCP_HUB_PUBLIC_BASE: http://127.0.0.1:8790
+      # Token iss is browser hostname; JWKS fetched on Docker network.
+      MCP_HUB_OIDC_ISSUER: ${MCP_HUB_OIDC_ISSUER:-http://localhost:8081/realms/loom}
+      MCP_HUB_OIDC_AUDIENCE: ${MCP_HUB_OIDC_AUDIENCE:-loom-mcp-hub}
+      MCP_HUB_OIDC_JWKS_URL: ${MCP_HUB_OIDC_JWKS_URL:-http://keycloak:8080/realms/loom/protocol/openid-connect/certs}
     volumes:
       - mcp-hub-data:/data
     ports:

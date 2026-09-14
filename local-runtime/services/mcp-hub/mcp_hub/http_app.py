@@ -1,4 +1,4 @@
-﻿"""User-facing MCP Hub HTTP facade (ADR 0007 / 0008 / specs 016-022)."""
+﻿"""User-facing MCP Hub HTTP facade (ADR 0007 / 0008 / 0011 / specs 016-024)."""
 from __future__ import annotations
 
 import json
@@ -12,6 +12,7 @@ from mcp_hub import loom_client, store
 from mcp_hub.access import grants_for_user
 from mcp_hub.identity import parse_client_info
 from mcp_hub.naming import expose_tools
+from mcp_hub import oauth
 
 logger = logging.getLogger("mcp_hub")
 
@@ -32,15 +33,29 @@ def _bearer(handler: BaseHTTPRequestHandler) -> str:
     return ""
 
 
-def _is_hub_session(token: str) -> bool:
-    return bool(token) and token.startswith("hs_") and token.count(".") < 2
-
-
 def _method_not_allowed(handler: BaseHTTPRequestHandler, allow: str = "POST") -> None:
     handler.send_response(405)
     handler.send_header("Allow", allow)
     handler.send_header("Content-Length", "0")
     handler.end_headers()
+
+
+def _unauthorized_mcp(handler: BaseHTTPRequestHandler, *, jsonrpc: bool = False) -> None:
+    handler.send_response(401)
+    handler.send_header("WWW-Authenticate", oauth.www_authenticate_value())
+    if jsonrpc:
+        raw = json.dumps({
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32001, "message": "unauthorized"},
+        }).encode("utf-8")
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.end_headers()
+        handler.wfile.write(raw)
+    else:
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
 
 
 def _require_service(handler: BaseHTTPRequestHandler) -> bool:
@@ -60,11 +75,27 @@ def _read_json(handler: BaseHTTPRequestHandler) -> Any:
     return json.loads(raw.decode("utf-8") or "{}")
 
 
-def _build_session_allowlist(token: str, hub_session_id: str, groups: list[str]) -> tuple[str, dict[str, Any], dict[str, tuple[int, str]]]:
-    slug = store.session_client_slug(hub_session_id)
+def _require_user(handler: BaseHTTPRequestHandler) -> dict[str, Any] | None:
+    token = _bearer(handler)
+    if not token:
+        _unauthorized_mcp(handler, jsonrpc=False)
+        return None
+    identity = oauth.validate_access_token(token)
+    if identity is None:
+        _unauthorized_mcp(handler, jsonrpc=False)
+        return None
+    return identity
+
+
+def _build_session_allowlist(
+    identity: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, tuple[int, str]]]:
+    connection_id = str(identity["connection_id"])
+    groups = list(identity.get("groups") or [])
+    slug = store.session_client_slug(connection_id)
     if not slug:
         empty = {
-            "hub_session_id": hub_session_id,
+            "connection_id": connection_id,
             "mcp_client_slug": None,
             "client_status": "unbound",
             "entries": [],
@@ -73,7 +104,7 @@ def _build_session_allowlist(token: str, hub_session_id: str, groups: list[str])
     client = store.get_client(slug, include_grants=True)
     if client is None:
         empty = {
-            "hub_session_id": hub_session_id,
+            "connection_id": connection_id,
             "mcp_client_slug": slug,
             "client_status": "missing",
             "entries": [],
@@ -82,32 +113,32 @@ def _build_session_allowlist(token: str, hub_session_id: str, groups: list[str])
     status = str(client.get("status") or "discovered")
     if status != "enabled":
         empty = {
-            "hub_session_id": hub_session_id,
+            "connection_id": connection_id,
             "mcp_client_slug": slug,
             "client_status": status,
             "entries": [],
         }
         return slug, empty, {}
-    # Channel enabled → resolve tools for this user's IdP profile before list/call.
     profile_grants = grants_for_user(groups, list(client.get("grants") or []))
     if not profile_grants:
         empty = {
-            "hub_session_id": hub_session_id,
+            "connection_id": connection_id,
             "mcp_client_slug": slug,
             "client_status": status,
             "entries": [],
         }
         return slug, empty, {}
     code, payload = loom_client.materialize_allowlist(
-        hub_session_id=hub_session_id,
+        subject=str(identity["sub"]),
+        groups=groups,
+        connection_id=connection_id,
         mcp_client_slug=slug,
         client_status=status,
-        allowed_groups=[],
         grants=profile_grants,
     )
     if code != 200:
         empty = {
-            "hub_session_id": hub_session_id,
+            "connection_id": connection_id,
             "mcp_client_slug": slug,
             "client_status": status,
             "entries": [],
@@ -129,17 +160,31 @@ class HubHandler(BaseHTTPRequestHandler):
         if path == "/health":
             _json(self, 200, {"status": "ok"})
             return
+        if path == "/.well-known/oauth-protected-resource":
+            _json(self, 200, oauth.prm_document())
+            return
         if path == "/v1/health":
             if not loom_client.service_token():
                 _json(self, 503, {"status": "fail_closed"})
                 return
             token = _bearer(self)
-            if not _is_hub_session(token) and token != loom_client.service_token():
-                _json(self, 401, {"error": {"message": "unauthorized"}})
+            if token == loom_client.service_token():
+                _json(self, 200, {"status": "ok", "contract_version": "2026-09-hub-1", "auth": "oauth"})
                 return
-            _json(self, 200, {"status": "ok", "contract_version": "2026-09-hub-1"})
+            identity = oauth.validate_access_token(token) if token else None
+            if identity is None:
+                _unauthorized_mcp(self)
+                return
+            _json(self, 200, {"status": "ok", "contract_version": "2026-09-hub-1", "auth": "oauth"})
             return
         if path in ("/mcp", "/"):
+            # Optional auth probe: unauthenticated → 401 challenge (MCP OAuth).
+            if not _bearer(self):
+                _unauthorized_mcp(self)
+                return
+            if oauth.validate_access_token(_bearer(self)) is None:
+                _unauthorized_mcp(self)
+                return
             _method_not_allowed(self)
             return
         if path == "/v1/clients":
@@ -153,7 +198,6 @@ class HubHandler(BaseHTTPRequestHandler):
             if not _require_service(self):
                 return
             rest = path.removeprefix("/v1/clients/").strip("/")
-            # /v1/clients/{slug}/profile-grants?group=…  (on-demand; empty → 200 [])
             if rest.endswith("/profile-grants") or rest.endswith("/grants"):
                 slug = rest.removesuffix("/profile-grants").removesuffix("/grants").strip("/")
                 if not slug or "/" in slug:
@@ -166,7 +210,6 @@ class HubHandler(BaseHTTPRequestHandler):
                     return
                 payload = store.get_profile_grants(slug, group)
                 if payload is None:
-                    # Missing client only. Empty profile grants → 200 + [].
                     _json(self, 404, {"error": {"message": "client_not_found"}})
                     return
                 _json(self, 200, payload)
@@ -274,8 +317,12 @@ class HubHandler(BaseHTTPRequestHandler):
             _json(self, 503, {"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "hub_unavailable"}})
             return
         token = _bearer(self)
-        if not _is_hub_session(token):
-            _json(self, 401, {"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message": "unauthorized"}})
+        if not token:
+            _unauthorized_mcp(self, jsonrpc=True)
+            return
+        identity = oauth.validate_access_token(token)
+        if identity is None:
+            _unauthorized_mcp(self, jsonrpc=True)
             return
         try:
             body = _read_json(self)
@@ -283,7 +330,7 @@ class HubHandler(BaseHTTPRequestHandler):
             _json(self, 400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse_error"}})
             return
         if isinstance(body, list):
-            responses = [self._handle_one(token, item) for item in body if isinstance(item, dict)]
+            responses = [self._handle_one(identity, item) for item in body if isinstance(item, dict)]
             _json(self, 200, responses)
             return
         if not isinstance(body, dict):
@@ -293,28 +340,26 @@ class HubHandler(BaseHTTPRequestHandler):
             self.send_response(202)
             self.end_headers()
             return
-        _json(self, 200, self._handle_one(token, body))
+        _json(self, 200, self._handle_one(identity, body))
 
-    def _handle_one(self, token: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _handle_one(self, identity: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
         req_id = body.get("id")
         method = body.get("method")
         params = body.get("params") or {}
+        connection_id = str(identity["connection_id"])
+        groups = list(identity.get("groups") or [])
         if method == "initialize":
-            info = loom_client.introspect(token)
-            if not info.get("active"):
-                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32001, "message": "unauthorized"}}
-            hub_session_id = str(info["hub_session_id"])
             slug, name, version, family = parse_client_info(params if isinstance(params, dict) else {})
             row = store.upsert_from_initialize(
-                hub_session_id=hub_session_id,
+                hub_session_id=connection_id,
                 slug=slug,
                 declared_name=name,
                 declared_version=version,
                 declared_family=family,
             )
             logger.info(
-                "hub_initialize session=%s slug=%s family=%s status=%s name=%s",
-                hub_session_id,
+                "hub_initialize connection=%s slug=%s family=%s status=%s name=%s",
+                connection_id,
                 slug,
                 family,
                 row.get("status"),
@@ -332,28 +377,21 @@ class HubHandler(BaseHTTPRequestHandler):
         if method == "notifications/initialized":
             return {"jsonrpc": "2.0", "id": req_id, "result": {}}
         if method == "tools/list":
-            info = loom_client.introspect(token)
-            if not info.get("active"):
-                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32001, "message": "unauthorized"}}
-            groups = list(info.get("groups") or [])
-            _slug, allow, _mapping = _build_session_allowlist(token, str(info["hub_session_id"]), groups)
+            _slug, allow, _mapping = _build_session_allowlist(identity)
             tools, _ = expose_tools(allow.get("entries") or [])
             return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": tools}}
         if method == "tools/call":
-            info = loom_client.introspect(token)
-            if not info.get("active"):
-                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32001, "message": "unauthorized"}}
-            groups = list(info.get("groups") or [])
-            _slug, allow, mapping = _build_session_allowlist(token, str(info["hub_session_id"]), groups)
+            _slug, allow, mapping = _build_session_allowlist(identity)
             name = str((params or {}).get("name") or "")
             arguments = (params or {}).get("arguments") or {}
             if name not in mapping:
                 return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32003, "message": "tool_not_allowed"}}
             server_id, original = mapping[name]
             status, result = loom_client.tools_call(
-                str(info["hub_session_id"]),
-                name,
-                arguments if isinstance(arguments, dict) else {},
+                subject=str(identity["sub"]),
+                groups=groups,
+                tool_name=name,
+                arguments=arguments if isinstance(arguments, dict) else {},
                 server_id=server_id,
                 original_tool_name=original,
             )
@@ -371,10 +409,22 @@ def serve(host: str | None = None, port: int | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     if not loom_client.service_token():
         logger.error("MCP_HUB_SERVICE_TOKEN unset — fail-closed")
+    if not oauth.oidc_issuer():
+        logger.error("MCP_HUB_OIDC_ISSUER unset — IDE OAuth will fail-closed")
+    elif oauth.warm_jwks():
+        logger.info("jwks warm ok issuer=%s", oauth.oidc_issuer())
+    else:
+        logger.warning("jwks warm failed — will retry on first request")
     try:
         os.makedirs(os.path.dirname(store.store_path()) or ".", exist_ok=True)
     except OSError:
         pass
     server = ThreadingHTTPServer((bind_host, bind_port), HubHandler)
-    logger.info("mcp-hub listening on %s:%s store=%s", bind_host, bind_port, store.store_path())
+    logger.info(
+        "mcp-hub listening on %s:%s store=%s resource=%s auth=oauth",
+        bind_host,
+        bind_port,
+        store.store_path(),
+        oauth.resource_url(),
+    )
     server.serve_forever()

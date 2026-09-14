@@ -1,45 +1,22 @@
 # MCP Hub
 
-User-facing MCP facade (ADR 0007 / 0008 / 0010). Discovers MCP Clients
-(channels) on `initialize` (`clientInfo`). Admin grants catalog tools
-**per IdP profile** (`g-users-*` / `g-admins-*`), All Tools or Selected
-Tools. At `tools/list` the Hub filters grants to the session user's
-profile before materializing. Phase 1 = tools only.
+User-facing MCP facade (ADR 0007 / 0008 / 0010 / **0011**). Discovers MCP
+Clients on `initialize`. Admin grants catalog tools **per IdP profile**.
+IDE auth = **OAuth IdP** (Keycloak) — **no mint**, no `hs_…` Bearer in
+`mcp.json`.
 
 ```text
-IDE
-  → POST http://127.0.0.1:8790/mcp   (Bearer <hub_session_token>)
-    → mcp-hub
-         resolve canal (client slug)
-         resolve perfil (session.groups → grants)
-         → Loom BFF materialize / tools/call
-           → mcp-runtime / remote MCP
+IDE (URL only)
+  → 401 + Protected Resource Metadata
+  → Keycloak Authorization Code + PKCE
+  → Bearer access_token (aud=loom-mcp-hub)
+  → mcp-hub validates JWKS → grants for user groups
+      → Loom BFF materialize / tools/call (service token)
 ```
 
 Host port loopback-only (`127.0.0.1:8790`). Health: `GET /health`.
+PRM: `GET /.well-known/oauth-protected-resource`.
 Store: `MCP_HUB_STORE_PATH` (default `/data/hub_clients.json`).
-
-Transport: Streamable HTTP **POST/JSON**; `GET /mcp` → `405 Allow: POST`.
-
-## Flow
-
-1. Loom UI **Local runtime → Mint Hub session** (user auth; groups on session).
-2. Configure IDE with URL + Bearer; connect once (registers channel).
-3. Local runtime: select **channel** → select **IdP profile** (required) →
-   Hub loads that profile’s grants on demand → Save (All / Selected).
-4. Enable channel when ready.
-5. IDE `tools/list` shows only tools granted to **that user's profile**
-   on that channel.
-
-List clients returns summaries (`granted_profiles`, `grant_count`) without
-embedding all grants. On-demand:
-
-```text
-GET/PUT /v1/clients/{slug}/profile-grants?group=… | { group, grants }
-```
-
-Empty profile → `200` + `grants: []`. Plugin via
-`/api/ext/local-runtime/mcp-clients/{slug}/profile-grants`.
 
 ## Cursor `mcp.json`
 
@@ -47,24 +24,29 @@ Empty profile → `200` + `grants: []`. Plugin via
 {
   "mcpServers": {
     "loom-hub": {
-      "url": "http://127.0.0.1:8790/mcp",
-      "headers": {
-        "Authorization": "Bearer ${env:LOOM_HUB_SESSION_TOKEN}"
-      }
+      "url": "http://127.0.0.1:8790/mcp"
     }
   }
 }
 ```
 
-Bearer must be `hs_…` (Hub session), not IdP JWT. Project `.cursor/mcp.json`
-is gitignored. After changing profile grants, fully quit Cursor to refresh
-cached tool lists.
+Do **not** put `Authorization` headers. Cursor runs OAuth against Keycloak
+client `loom-mcp-hub` (realm import). After connect, configure profile
+grants in Local runtime.
 
-## Ops
+If Keycloak was created before this client existed, either
+`make local.reset` (fresh import) or run
+`scripts/ensure-kc-mcp-hub-client.sh` against the running stack.
 
-- `MCP_HUB_SERVICE_TOKEN` — Hub ↔ Loom
-- `LOOM_BACKEND_URL` — Hub → backend
-- Admin APIs on Hub `/v1/clients*` (service token); Loom proxies at
-  `/api/ext/local-runtime/mcp-clients*`
-- Contract: `2026-09-hub-1`
-- Docs: ADR 0010, specs 018 / 021 / 023
+## Env
+
+| Variable | Purpose |
+|----------|---------|
+| `MCP_HUB_SERVICE_TOKEN` | Hub ↔ Loom only |
+| `LOOM_BACKEND_URL` | Hub → backend |
+| `MCP_HUB_RESOURCE` | Canonical resource URL (aud/resource check) |
+| `MCP_HUB_OIDC_ISSUER` | Token `iss` (browser Keycloak URL) |
+| `MCP_HUB_OIDC_AUDIENCE` | Default `loom-mcp-hub` |
+| `MCP_HUB_OIDC_JWKS_URL` | JWKS reachable from container |
+
+Contract: `2026-09-hub-1`. Docs: ADR 0011, specs 017 / 024.

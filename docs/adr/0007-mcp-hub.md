@@ -2,12 +2,15 @@
 
 - **Status:** Proposta (Fase 1: só tools; agents fora de escopo)
 - **Data:** 2026-09-13
+- **Atualizado:** 2026-09-14 — auth IDE = OAuth IdP ([ADR 0011](0011-mcp-hub-oauth-idp.md)); mint removido
 - **Decisores:** Mantenedores da plataforma / extensão local
 - **Relacionada a:**
   [ADR 0001 — IdP](0001-keycloak-as-identity-provider.md),
   [ADR 0004 — Local MCP Runtime](0004-local-mcp-runtime.md),
   [ADR 0005 — Local Agent Runtime](0005-local-agent-runtime.md),
   [ADR 0006 — Extensão local-runtime](0006-local-runtime-extension-repo.md),
+  [ADR 0008 — MCP Clients](0008-mcp-hub-clients.md),
+  [ADR 0011 — OAuth Hub](0011-mcp-hub-oauth-idp.md),
   [Spec 015 — Grafana/Rancher stdio](../specs/015-grafana-rancher-mcp-stdio.md)
 
 ## Problema
@@ -41,16 +44,17 @@ user-facing*, com o Loom como única autoridade de identidade e autorização.
 
 ```text
 Cliente MCP (Cursor / IDE)
-    │  streamable HTTP + Bearer (Hub session)
+    │  streamable HTTP + Bearer access_token (OAuth IdP — ADR 0011)
     ▼
 mcp-hub  (local-runtime, data plane)
-    │  resolve allowlist / proxy tools/call
-    │  NÃO valida JWT do IdP
+    │  valida JWT (JWKS) + allowlist / proxy tools/call
+    │  PRM + 401 challenge; NÃO mint; NÃO aceita hs_…
     ▼
 Loom FastAPI (control plane)
-    │  IdP, mint/introspect Hub session, McpServerAccess, catálogo
+    │  catálogo, materialize, tools/call, grants
     ▼
-mcp-runtime / MCP HTTP remotos  (já existentes)
+Keycloak (AS)  ←── browser OAuth PKCE do IDE
+mcp-runtime / MCP HTTP remotos
 ```
 
 ### Princípios
@@ -58,69 +62,63 @@ mcp-runtime / MCP HTTP remotos  (já existentes)
 1. **Um catálogo.** O Hub não cadastra servidores. Lê o catálogo Loom e
    encaminha para as fachadas já existentes (`stdio` via mcp-runtime,
    `sse` / `streamable_http` remotos).
-2. **Login = IdP do Loom.** O usuário autentica no control plane (fluxo
-   browser / device). O Hub **nunca** fala com Keycloak/Entra/Okta.
-3. **Hub session opaca.** Após login, o Loom emite um token de sessão Hub
-   (TTL, `sub`, escopos mínimos, binding opcional a client_id). O cliente
-   MCP usa esse Bearer. O Hub introspecta/valida a sessão **só** via API
-   Loom (ou cache assinado pelo Loom).
-4. **Autorização (Fase 1 interina):** união de agents invocáveis.
-   **Default duradouro:** [ADR 0008](0008-mcp-hub-clients.md) — MCP Client
-   **descoberto** no `initialize` (`clientInfo`); admin enable+grants na
-   extensão; mint só autentica o user. Ver também [ADR 0009](0009-mcp-hub-client-identification.md).
+2. **Login = IdP do Loom (Keycloak).** O MCP Client faz OAuth Authorization
+   Code + PKCE; token no secret store do IDE ([ADR 0011](0011-mcp-hub-oauth-idp.md)).
+   **Sem mint** e **sem fallback** `hs_…`.
+3. **Hub como resource server.** Publica PRM; valida access token (JWKS /
+   audience = URL canônica do Hub). Service token Hub↔Loom separado.
+4. **Autorização:** [ADR 0008](0008-mcp-hub-clients.md) + grants por perfil
+   ([ADR 0010](0010-mcp-hub-profile-grants.md)); discovery `clientInfo`
+   ([ADR 0009](0009-mcp-hub-client-identification.md)).
 5. **Só tools MCP.** Sem `list_agents` / `invoke_agent` / A2A nesta fase.
 6. **Nomes sem prefixo de produto.** Tools do Hub não usam prefixo `loom_`.
-   Em colisão entre servidores, namespacar pelo **servidor/template**
-   (`grafana_…`, `azure-devops_…`), não por `loom_`.
-7. **Extensão ADR 0006.** Código e compose em `local-runtime/services/mcp-hub`;
-   UI mínima (URL do Hub, mint de sessão) no plugin. Ganchos no core só
-   para mint/introspect + leitura de ACL (BFF).
-8. **Fail-closed.** Sessão expirada / sem ACL → `tools/list` vazio ou
-   erro de auth; `tools/call` fora da allowlist → 403 (igual mcp-runtime).
+   Em colisão entre servidores, namespacar pelo **servidor/template**.
+7. **Extensão ADR 0006.** Código em `local-runtime/services/mcp-hub`;
+   plugin documenta URL + OAuth (sem botão mint). BFF: materialize/call,
+   **não** mint de sessão IDE.
+8. **Fail-closed.** Token inválido / sem ACL → list vazio ou 401/403;
+   call fora da allowlist → 403.
 
 ### Como funciona (C4 nível 2)
 
 ```mermaid
 flowchart TB
-  user(["Usuario<br/>login IdP"])
+  user(["Usuario"])
   ide(["Cliente MCP<br/>Cursor / IDE"])
 
   subgraph loom["Loom - stack local"]
     direction TB
-    fe["Frontend / plugin<br/>mint Hub session"]
-    be["Backend FastAPI<br/>IdP, ACL, mint/introspect"]
-    db[("PostgreSQL<br/>agents, mcp_*, access")]
-    hub["mcp-hub<br/>compose<br/>MCP streamable-HTTP"]
-    mr["mcp-runtime<br/>stdio facade"]
+    be["Backend FastAPI<br/>catálogo, materialize, call"]
+    db[("PostgreSQL")]
+    hub["mcp-hub<br/>PRM + JWT validate + MCP"]
+    mr["mcp-runtime"]
   end
 
-  idp{{"IdP ativo<br/>Keycloak / Entra / …"}}
-  remote{{"MCP HTTP remoto<br/>catalogo"}}
+  idp{{"Keycloak AS<br/>OAuth PKCE"}}
+  remote{{"MCP HTTP remoto"}}
 
+  ide -->|"1 URL /mcp"| hub
+  hub -->|"401 + PRM"| ide
+  ide -->|"2 authorize PKCE"| idp
   user --> idp
-  user --> fe
-  fe -->|"Bearer JWT usuario"| be
-  be -->|"valida IdP"| idp
+  ide -->|"3 Bearer access_token"| hub
+  hub -->|"JWKS"| idp
+  hub -->|"service token + user ctx"| be
   be --> db
-  fe -->|"Hub session opaca"| user
-  ide -->|"MCP + Bearer Hub session"| hub
-  hub -->|"introspect + allowlist"| be
-  hub -->|"tools/list / tools/call filtrados"| mr
-  hub -->|"tools/call"| remote
+  be --> mr
+  be --> remote
 ```
 
-### Fluxo de sessão (Fase 1)
+### Fluxo de sessão (Fase 1 + ADR 0011)
 
-1. Usuário autentica no Loom (IdP).
-2. UI/plugin (ou endpoint BFF) chama `POST /api/…/hub/sessions` com JWT
-   do usuário → recebe `hub_session_token` + `mcp_hub_url` + `expires_at`.
-3. Cliente MCP configura URL do Hub + Bearer = Hub session.
-4. `initialize` / `tools/list`: Hub pede allowlist ao Loom (ou usa snapshot
-   assinado na sessão); agrega tools dos servidores permitidos.
-5. `tools/call`: Hub verifica nome ∈ allowlist; encaminha ao endpoint
-   interno do servidor (mcp-runtime ou remoto) com identidade de serviço
-   + `X-Loom-Allowed-Tools` / headers de IdentityContext já usados hoje.
-6. Expiração / logout: introspect falha → Hub recusa.
+1. IDE configura **só** a URL do Hub (`mcp.json` sem Bearer fixo).
+2. Primeiro request → `401` + Protected Resource Metadata (024).
+3. IDE completa OAuth no Keycloak (PKCE, `resource` = Hub).
+4. IDE envia `Authorization: Bearer <access_token>` em `/mcp`.
+5. Hub valida JWT; `initialize` descobre MCP Client; allowlist por perfil.
+6. Refresh = OAuth do client; **não** há mint na UI Loom.
+
+Detalhe de auth: [ADR 0011](0011-mcp-hub-oauth-idp.md).
 
 ### Fora de escopo (Fase 1)
 
@@ -150,31 +148,29 @@ A2A; decisão em ADR futura.
 ## Consequências
 
 - Novo serviço compose `mcp-hub` + health/port loopback; overlay ADR 0006.
-- Endpoints BFF no Loom: mint + introspect de Hub session (escopo API
-  dedicado, ex. `mcp:hub` ou reuso de `mcp:read` + `invoke` — detalhe na
-  spec).
-- Snapshot vs live ACL: spec deve fixar se a allowlist é congelada no mint
-  ou reavaliada a cada `tools/list` (recomendação: **reavaliar** no list/call
-  para revogação rápida; mint só prova identidade).
+- Auth IDE = OAuth IdP ([ADR 0011](0011-mcp-hub-oauth-idp.md)); BFF expõe
+  `info` / materialize / tools-call (service token Hub↔Loom). Endpoints de
+  mint retornam **410**.
+- Allowlist **reavaliada** a cada `tools/list` / `tools/call` (grants por
+  perfil IdP — [ADR 0010](0010-mcp-hub-profile-grants.md)).
 - Colisões de nomes de tools entre servidores exigem regra de namespacing
   estável na spec.
-- Testes: usuário sem access → list vazio/403; tool allowlisted → call ok;
-  sessão expirada → 401; JWT IdP direto no Hub → recusado.
-- Documentar URL do Hub e mint no plugin Local Runtime (não no core além
-  do BFF).
+- Testes: usuário sem grant → list vazio/403; tool grantada → call ok;
+  token expirado / `hs_…` → 401; audience errada → 401.
+- Plugin Local Runtime documenta URL do Hub + OAuth (sem botão mint).
 
 ## Specs a seguir
 
-1. [016 — Contrato MCP](../specs/016-mcp-hub-contract.md) (`initialize` / `tools/list` / `tools/call` + naming)
-2. [017 — Hub session](../specs/017-mcp-hub-session.md) (mint / introspect)
-3. [018 — Allowlist](../specs/018-mcp-hub-allowlist.md) (união interina; **default: [ADR 0008](0008-mcp-hub-clients.md)**)
+1. [016 — Contrato MCP](../specs/016-mcp-hub-contract.md)
+2. [017 — Credencial / sessão OAuth](../specs/017-mcp-hub-session.md) · [024 — OAuth](../specs/024-mcp-hub-oauth.md)
+3. [018 — Allowlist](../specs/018-mcp-hub-allowlist.md) (**default: [ADR 0008](0008-mcp-hub-clients.md)**)
 4. [019 — Segurança](../specs/019-mcp-hub-security.md)
 5. [020 — Observabilidade](../specs/020-mcp-hub-observability.md)
 6. [ADR 0008 — MCP Clients](0008-mcp-hub-clients.md)
 7. [ADR 0009 — Identificação MCP Client](0009-mcp-hub-client-identification.md)
 8. [ADR 0010 — Grants por perfil](0010-mcp-hub-profile-grants.md)
-9. [021 — MCP Clients](../specs/021-mcp-hub-clients.md) · [022 — Identificação](../specs/022-mcp-hub-client-identification.md) · [023 — Perfil](../specs/023-mcp-hub-profile-grants.md)
+9. [ADR 0011 — OAuth IdP](0011-mcp-hub-oauth-idp.md)
+10. [021](../specs/021-mcp-hub-clients.md) · [022](../specs/022-mcp-hub-client-identification.md) · [023](../specs/023-mcp-hub-profile-grants.md)
 
-Implementação **não** começa até as specs **016–018** serem aceitas.
 Na segurança (019), v1 prefere `tools/call` via BFF Loom para não guardar
 secrets de MCP remotos no Hub.

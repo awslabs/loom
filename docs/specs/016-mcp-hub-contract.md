@@ -2,31 +2,37 @@
 
 - **Status:** Rascunho
 - **Data:** 2026-09-13
-- **Implementa:** [ADR 0007](../adr/0007-mcp-hub.md)
-- **Depende de:** [017 — sessão](017-mcp-hub-session.md), [018 — allowlist](018-mcp-hub-allowlist.md), [019 — segurança](019-mcp-hub-security.md)
+- **Atualizado:** 2026-09-14 — auth OAuth IdP ([ADR 0011](../adr/0011-mcp-hub-oauth-idp.md)); mint removido
+- **Implementa:** [ADR 0007](../adr/0007-mcp-hub.md), [ADR 0011](../adr/0011-mcp-hub-oauth-idp.md)
+- **Depende de:** [017 — credencial](017-mcp-hub-session.md), [024 — OAuth](024-mcp-hub-oauth.md),
+  [018 — allowlist](018-mcp-hub-allowlist.md), [019 — segurança](019-mcp-hub-security.md)
 
 ## 1. Objetivo
 
 Definir o endpoint MCP que o IDE consome: **um** servidor streamable-HTTP
-que agrega tools do catálogo Loom filtradas pela conta (Hub session).
-Fase 1 = **somente tools MCP**. Sem invoke de agents.
+que agrega tools do catálogo Loom filtradas pelo **perfil IdP** do user
+(ADR 0010). Fase 1 = **somente tools MCP**. Sem invoke de agents.
+
+Auth do IDE = OAuth IdP ([024](024-mcp-hub-oauth.md)); **sem mint**.
 
 `contract_version`: `"2026-09-hub-1"`. Mudança incompatível → nova versão.
 
 ## 2. Onde vive
 
 ```text
-MCP  http://mcp-hub:8790/mcp     (rede Docker; host 127.0.0.1:8790)
-Auth Authorization: Bearer <hub_session_token>
+MCP  http://127.0.0.1:8790/mcp     (rede Docker; host loopback)
+Auth Authorization: Bearer <access_token OAuth>   # 017 / 024; nunca hs_…
 
 POST /mcp                        JSON-RPC (tools); respostas application/json
-GET  /mcp                        405 Allow: POST  (sem SSE standalone; exigido pelo
-                                 cliente Streamable HTTP do Cursor — 404 quebra)
-DELETE /mcp                      405 Allow: POST  (sessões Hub são stateless no wire)
+GET  /mcp                        405 Allow: POST  (probe Streamable HTTP)
+DELETE /mcp                      405 Allow: POST
 
+GET  /.well-known/oauth-protected-resource   # PRM (024)
 GET  /health                     (público)
-GET  /v1/health                  (Bearer Hub session ou token de serviço ops)
+GET  /v1/health                  (Bearer access token ou token de serviço ops)
 ```
+
+`mcp.json` (IDE): **só URL** do resource; auth via fluxo OAuth do client.
 
 Código: `local-runtime/services/mcp-hub/`. Overlay ADR 0006.
 Não é segundo catálogo; só fachada.
@@ -37,7 +43,7 @@ Não é segundo catálogo; só fachada.
 |--------|----------------|
 | `initialize` | Handshake MCP; `serverInfo.name` = `loom-mcp-hub` (nome do processo, não prefixo de tools). Declara capabilities de tools. |
 | `notifications/initialized` | Aceito; no-op. |
-| `tools/list` | Introspect sessão → allowlist viva (018) → agrega schemas → aplica naming ( §5 ). |
+| `tools/list` | Validar access token (017) → allowlist viva (018) → schemas → naming (§5). |
 | `tools/call` | Nome ∈ allowlist → resolve `server_id` + tool original → proxy ao endpoint do catálogo (mcp-runtime ou remoto) com service auth + `X-Loom-Allowed-Tools`. Fora da allowlist → erro MCP / 403. |
 | `ping` / `resources/*` / `prompts/*` | Fora de escopo v1 (recusar ou capabilities vazias). |
 

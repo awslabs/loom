@@ -21,23 +21,22 @@ admin liberar tools.
 | Plano | Fonte | Anti-spoof? | Uso |
 |-------|--------|-------------|-----|
 | **A — Declarada / discovery** | `initialize.clientInfo` | Não | UPSERT MCP Client; logs; chave de grants |
-| **B — User autenticado** | Hub session `hs_…` | Sim (IdP + token) | Acesso ao Hub |
+| **B — User autenticado** | Access token OAuth (ADR 0011) | Sim (IdP + PKCE) | Acesso ao Hub |
 | **C — Policy** | `enabled` + grants **por perfil IdP** (ADR 0010) | Sim (admin) | Allowlist |
 
 Fluxo no Hub `initialize`:
 
-1. Validar Bearer (sessão user ativa).
+1. Validar Bearer access token (017 / 024) — **não** `hs_…`.
 2. Ler `clientInfo` → normalizar slug/family (spec 022).
 3. UPSERT MCP Client na extensão (`status=discovered` se novo).
-4. Associar `hub_session_id` → `mcp_client_slug` (memória/store).
+4. Associar identidade da conexão → `mcp_client_slug` (store).
 5. Responder `serverInfo` como hoje.
 
 **Não** auto-enable nem auto-grant. Sem `clientInfo` → client
-`unknown` / slug estável por sessão (detalhe 022) — ainda deny tools até
-admin agir.
+`unknown` / slug estável (022) — ainda deny tools até admin agir.
 
-Authz de tools = C, não A sozinho. OAuth por produto (futuro) pode
-promover A→prova de app.
+Authz de tools = C, não A sozinho. OAuth do **user** é B (0011);
+prova criptográfica do **binário** do IDE permanece fora do v1.
 
 ## Spec
 

@@ -82,8 +82,9 @@ Checklist pós-merge:
 | Zona | Paths | O que mudou |
 |------|-------|-------------|
 | **Extension** | `services/mcp-hub/mcp_hub/{domain,application,adapters}/` | Layout hexagonal + ports + FileHubStore/Loom/OAuth classes |
+| **Extension** | `application/use_cases/{session_allowlist,tools}.py` | Use cases + DI em `serve()` / `HubHandler` |
 | **Extension** | shims `access.py`…`http_app.py` | Compat de imports |
-| **Docs** | plano / backlog REF-02 | Decisões locked; execução iniciada |
+| **Docs** | plano / backlog REF-02 | Fase 1 itens 1–8 |
 
 **Impacto no sync upstream:** baixo.
 

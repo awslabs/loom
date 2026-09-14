@@ -85,8 +85,8 @@ Escopo (strangler; wire estável):
 4. [x] Outbound: `file_store`, `loom_http`, `oauth_jwks` (+ classes adapter)
 5. [x] Inbound: `http_app` sob `adapters/inbound/` (ainda orquestra use cases inline)
 6. [x] Shims de compat nos imports antigos + testes verdes
-7. [ ] Extrair use cases (`tools_list` / `tools_call`) para `application/use_cases/` (próximo PR)
-8. [ ] Injetar ports no handler (em vez de módulos globais) — próximo PR
+7. [x] Extrair use cases (`tools_list` / `tools_call`) para `application/use_cases/`
+8. [x] Injetar ports no handler (composition root em `serve()`)
 
 Critério de aceite: mesmos testes verdes; smoke Cursor `tools/list` + `agent__*`.
 

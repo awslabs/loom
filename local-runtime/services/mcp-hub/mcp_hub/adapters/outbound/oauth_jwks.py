@@ -197,3 +197,6 @@ class OAuthJwksValidator:
 
     def warm_jwks(self) -> bool:
         return warm_jwks()
+
+    def prm_document(self) -> dict[str, Any]:
+        return prm_document()

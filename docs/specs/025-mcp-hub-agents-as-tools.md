@@ -2,6 +2,7 @@
 
 - **Status:** Rascunho
 - **Data:** 2026-09-14
+- **Atualizado:** 2026-09-14 — `wait=accepted` default + `agent_run_status` / `agent_run_result`
 - **Implementa:** [ADR 0012](../adr/0012-mcp-hub-agents-as-tools.md)
 - **Depende de:**
   [016](016-mcp-hub-contract.md),
@@ -58,33 +59,62 @@ que o default seja `false`.)
 Exemplo: agent “Orientador Acadêmico” id=12 → `agent__orientador-academico`
 (ou `agent__orientador-academico__12` se colidir).
 
-## 4. Schema da tool
+## 4. Tools e schemas
+
+### 4.1 Por agent — `agent__{slug}`
 
 ```text
-name: agent__{slug}
-description: <agent.description ou name>
 inputSchema:
   type: object
   required: [prompt]
   properties:
     prompt:     { type: string }
     session_id: { type: string, description: "opcional; continua conversa" }
+    wait:       { type: string, enum: ["accepted", "complete"], default: "accepted" }
 ```
 
-Resultado MCP (v1):
+**`wait=accepted` (default)** — result imediato:
 
 ```text
 {
-  "content": [{ "type": "text", "text": "<resposta agregada>" }],
+  "content": [{ "type": "text", "text": "Run accepted. session_id=…" }],
   "structuredContent": {
+    "status": "accepted",
     "session_id": "...",
-    "agent_id": 12,
-    "status": "ok" | "error"
+    "invocation_id": "...",
+    "agent_id": 12
   }
 }
 ```
 
-`isError: true` se RBAC negar, agent inexistente, ou invoke falhar.
+**`wait=complete`** — atalho síncrono (timeout BFF; se estourar, devolve
+`status=timeout` + `session_id` para poll — não perde a run):
+
+```text
+structuredContent: {
+  "status": "ok" | "error" | "timeout",
+  "session_id": "...",
+  "agent_id": 12,
+  "text": "<agregado se ok>"
+}
+```
+
+### 4.2 Monitoramento (sempre se `agents_enabled`)
+
+```text
+agent_run_status
+  input:  { session_id }
+  output: { status, session_id, invocation_id?, updated_at, preview? }
+
+agent_run_result
+  input:  { session_id }
+  output: { status: "ok", text, session_id } | erro se não complete
+```
+
+RBAC: só o `subject` dono da sessão (ou `g-admins-super`) lê status/result.
+
+`isError: true` se RBAC negar, agent/sessão inexistente, ou invoke falhar
+na aceitação.
 
 ## 5. RBAC (core Loom)
 
@@ -133,7 +163,7 @@ Authorization: Bearer <service>
 Só agents que passam RBAC + estão invocáveis (ex. `source=local` ready,
 ou AgentCore/harness com endpoint; excluir soft-deleted / inactive).
 
-### 6.2 Invoke
+### 6.2 Invoke (aceitar run)
 
 ```text
 POST /api/mcp/hub/agents/invoke
@@ -143,22 +173,47 @@ Authorization: Bearer <service>
   "groups": ["g-users-demo"],
   "agent_id": 12,
   "prompt": "...",
-  "session_id": null
+  "session_id": null,
+  "mode": "async" | "sync",
+  "timeout_s": 120
 }
-→ 200 {
-  "text": "...",
+→ 202/200 {
+  "status": "accepted" | "ok" | "error" | "timeout",
   "session_id": "...",
-  "status": "ok"
+  "invocation_id": "...",
+  "text": null | "..."
 }
 → 403 { "detail": "agent_forbidden" }
 → 404 { "detail": "agent_not_found" }
 ```
 
-Implementação: rebuild `UserInfo` → checks → **reusar** caminho de
-`invocations` (local_invoke / harness / AgentCore). Buffer de eventos SSE
-até conclusão ou timeout (configurável; default alinhado ao Chat).
+- `mode=async` (default do Hub): cria sessão/invocation, dispara dispatch
+  **sem** bloquear a resposta MCP; run vive no BFF/runtime.
+- `mode=sync`: buffer SSE até complete|timeout|error; em timeout a run
+  **continua** e o client usa poll.
 
-Hub **não** encaminha o stream SSE bruto ao IDE na v1 (tool result finito).
+### 6.3 Status / result
+
+```text
+GET /api/mcp/hub/agents/runs/{session_id}
+  ?subject=...   # ou body/header claims alinhados ao Hub
+→ 200 {
+  "session_id", "invocation_id", "agent_id",
+  "status": "pending"|"streaming"|"complete"|"error",
+  "preview": "...",      # opcional
+  "text": "..." | null,  # preenchido se complete
+  "error_message": null
+}
+→ 403 / 404
+```
+
+Implementação: reusar tabelas/estado de `invocations` (paridade Chat).
+Hub **não** armazena o transcript; só proxy.
+
+### 6.4 Progress (opcional)
+
+Com `mode=sync` / `wait=complete`, enquanto a call MCP estiver aberta o Hub
+pode mapear eventos SSE → `notifications/progress`. Não substitui 6.3.
 
 ## 7. Hub runtime
 
@@ -166,20 +221,23 @@ Hub **não** encaminha o stream SSE bruto ao IDE na v1 (tool result finito).
 
 ```text
 A = tools MCP de profile grants (023 / 018)
-B = [] 
+B = []
 if client.enabled and client.agents_enabled:
-  B = materialize-agents(subject, groups) → exposed tools
+  B = materialize-agents → agent__*
+    ∪ [ agent_run_status, agent_run_result ]
 return A ∪ B
 ```
 
 ### 7.2 `tools/call`
 
 ```text
-if name.startswith("agent__"):
+if name in (agent_run_status, agent_run_result):
+  GET agents/runs/{session_id} → mapear MCP result
+elif name.startswith("agent__"):
   if not client.agents_enabled: → erro
-  resolve agent_id (mapa da última materialize / lookup BFF)
-  POST agents/invoke
-  mapear resposta → MCP tool result
+  wait = args.wait or "accepted"
+  POST agents/invoke mode=async|sync
+  mapear → MCP tool result (accepted / ok / timeout / error)
 else:
   caminho MCP server atual
 ```
@@ -196,25 +254,28 @@ Local runtime → MCP Client selecionado:
 
 ## 9. Observabilidade
 
-Logs / metrics mínimos (alinhar 020):
-
 ```text
 hub_agents_list_count
-hub_agent_invoke_total{agent_id,status}
-hub_agent_invoke_latency_ms
+hub_agent_invoke_total{agent_id,mode,status}
+hub_agent_run_poll_total{status}
+hub_agent_invoke_latency_ms          # sync only
+hub_agent_run_duration_ms            # accept → complete
 ```
 
-Correlação: `subject`, `connection_id`, `mcp_client_slug`, `agent_id`.
+Correlação: `subject`, `connection_id`, `mcp_client_slug`, `agent_id`,
+`session_id`, `invocation_id`.
+
+Monitoramento humano: UI Loom (invocations/Chat) usa a **mesma** sessão.
 
 ## 10. Segurança
 
 - Deny-by-default: `agents_enabled=false`.
-- BFF revalida RBAC mesmo se o Hub errar o filtro.
+- BFF revalida RBAC no accept e em cada poll.
 - Service token nunca no IDE.
-- Não aceitar `agent_id` arbitrário sem check de group.
-- Timeout e tamanho máximo do texto agregado (evitar hang no IDE).
-- Untagged agents: permitido com `invoke` (paridade Chat); documentar
-  risco operacional (preferir sempre tagar).
+- `session_id` não é secreto global — exige match de `subject` (ou super).
+- `wait=complete`: timeout obrigatório; run não é cancelada no timeout
+  (cliente deve poll ou cancel explícito futuro).
+- Untagged agents: permitido com `invoke` (paridade Chat); preferir tagar.
 
 ## 11. C4 — Containers
 
@@ -228,7 +289,7 @@ flowchart TB
   end
 
   subgraph core["Loom core"]
-    bff["FastAPI<br/>materialize-agents · agents/invoke"]
+    bff["FastAPI<br/>invoke async · runs/{id}"]
     inv["invocations / local_invoke"]
     db[("agents + tags")]
   end
@@ -256,24 +317,52 @@ sequenceDiagram
   BFF-->>Hub: MCP tools A
   alt agents_enabled
     Hub->>BFF: materialize-agents
-    BFF-->>Hub: agent tools B
+    BFF-->>Hub: agent tools B + status/result
   end
   Hub-->>IDE: A ∪ B
 ```
 
+## 12b. C4 — Sequência run async
+
+```mermaid
+sequenceDiagram
+  participant IDE
+  participant Hub
+  participant BFF
+  participant RT as Runtime
+
+  IDE->>Hub: agent__x wait=accepted
+  Hub->>BFF: invoke async
+  BFF-->>Hub: accepted + session_id
+  Hub-->>IDE: accepted
+  par background
+    BFF->>RT: SSE invoke
+  and poll
+    IDE->>Hub: agent_run_status
+    Hub->>BFF: GET runs/id
+    BFF-->>IDE: streaming|complete
+    IDE->>Hub: agent_run_result
+    Hub->>BFF: GET runs/id
+    BFF-->>IDE: text
+  end
+```
+
 ## 13. Aceite
 
-- [ ] Client `agents_enabled=false` → nenhum `agent__*` no list
+- [ ] Client `agents_enabled=false` → nenhum `agent__*` / status / result
 - [ ] `g-users-demo` vê só agents `loom:group=demo` (+ untagged se política)
-- [ ] `g-users-test` não chama agent `demo` (403)
-- [ ] Call Orientador local → tool result com texto
+- [ ] Default `wait=accepted` → result rápido com `session_id`
+- [ ] Run longa: poll `agent_run_status` → `complete` → `agent_run_result`
+- [ ] `wait=complete` + timeout → `timeout` + `session_id` ainda polável
+- [ ] Subject A não lê `session_id` de subject B
 - [ ] Tools MCP de servers inalteradas com toggle agents on/off
 - [ ] Sem UI de grants de agent por perfil
-- [ ] ADR 0012 + esta spec referenciados no README Hub
 
 ## 14. Fora de escopo (v1)
 
-- Gateway A2A
-- Stream MCP nativo da resposta do agent
+- Gateway A2A / task protocol completo
+- Stream SSE bruto MCP da resposta do agent
 - Grants canal × agent
 - Auto-enable `agents_enabled` ao enable do client
+- Cancel MCP dedicado (pode reusar cancel de invocations depois)
+- Webhook push para o IDE

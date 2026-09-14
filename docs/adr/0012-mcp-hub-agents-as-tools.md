@@ -2,6 +2,7 @@
 
 - **Status:** Aceito
 - **Data:** 2026-09-14
+- **Atualizado:** 2026-09-14 — run async + poll (prática de mercado)
 - **Decisores:** Mantenedores da plataforma / extensão local
 - **Relacionada a:**
   [ADR 0005 — Local Agent Runtime](0005-local-agent-runtime.md),
@@ -51,13 +52,29 @@ Agent (core Loom)
 Não há matriz de grants de agent por perfil/canal. Dois users no mesmo
 Cursor veem agents diferentes **só** porque os groups JWT diferem.
 
-### Naming e shape da tool
+### Naming e shape das tools
 
-- Nome estável: `agent__{slug}` (slug derivado do agent; colisão →
-  `agent__{slug}__{id}`). **Sem** prefixo `loom_`.
-- Input mínimo: `{ "prompt": string, "session_id"?: string }`.
-- Output: texto agregado da invocação (+ `session_id` se houver).
-- Não expor como `list_agents` / skill A2A; é **tool MCP** no Hub.
+**Por agent (discovery no IDE):**
+
+- Nome: `agent__{slug}` (colisão → `agent__{slug}__{id}`). Sem `loom_`.
+- Input: `{ "prompt": string, "session_id"?: string, "wait"?: "accepted" | "complete" }`.
+  - Default `wait=accepted` (job async — prática de mercado).
+  - `wait=complete` = atalho síncrono para agents curtos (timeout limitado).
+
+**Correlação / monitoramento (sempre presentes se `agents_enabled`):**
+
+| Tool | Papel |
+|------|--------|
+| `agent_run_status` | Poll: `{ session_id }` → status Loom (`pending`/`streaming`/`complete`/`error`) + trecho parcial opcional |
+| `agent_run_result` | `{ session_id }` → texto final quando `complete`; 409 se ainda running |
+
+Fonte de verdade = **InvocationSession / Invocation** do core (mesmo Chat).
+Duração arbitrariamente longa: o IDE **não** precisa manter `tools/call`
+aberto.
+
+**Progress MCP (opcional, UX):** se `wait=complete` e a call ainda aberta,
+Hub pode emitir `notifications/progress` enquanto consome SSE — complemento,
+não substituto do poll.
 
 ### Resolução em `tools/list`
 
@@ -65,25 +82,30 @@ Cursor veem agents diferentes **só** porque os groups JWT diferem.
 1. JWT válido; canal bound (ADR 0009); client status = enabled
 2. Materializar tools MCP via profile grants (ADR 0010)  → set A
 3. Se agents_enabled:
-     BFF lista agents invocáveis para subject/groups
-     → set B = [ agent__slug … ]
+     BFF lista agents invocáveis → set B = [ agent__slug … ]
+     + tools fixas agent_run_status, agent_run_result
    senão B = []
 4. tools/list = A ∪ B
 ```
 
-### Resolução em `tools/call`
+### Resolução em `tools/call` (agent)
 
 ```text
-name começa com agent__  ?
-  sim → POST BFF /api/mcp/hub/agents/invoke
-         (service token + subject/groups)
-         → rebuild UserInfo; require invoke + user_can_invoke_agent
-         → reusar dispatch de invocations (local / harness / AgentCore)
-         → buffer SSE → resultado MCP
-  não → caminho MCP tools/call atual (ADR 0007/0010)
+agent__* (wait=accepted | default):
+  POST BFF agents/invoke  { mode: "async" }
+  → cria/reusa session; dispara invoke em background no BFF
+  → tool result imediato: { status: "accepted", session_id, invocation_id }
+
+agent__* (wait=complete):
+  POST BFF agents/invoke  { mode: "sync", timeout_s }
+  → buffer SSE até complete|timeout|error
+  → tool result com texto (ou erro timeout + session_id para poll)
+
+agent_run_status / agent_run_result:
+  GET BFF agents/runs/{session_id}  (+ RBAC: subject dono da sessão)
 ```
 
-Hub **não** executa LLM. Secrets e runtime ficam no BFF / agent-runtime.
+Hub **não** executa LLM. Runtime e estado ficam no BFF / agent-runtime.
 
 ### Política de tags (alinhar ao invoke)
 
@@ -107,9 +129,9 @@ No editor do MCP Client (além de profile grants de servers):
 
 | Extensão (`mcp-hub` + plugin) | Loom core |
 |-------------------------------|-----------|
-| Flag `agents_enabled` no store do client | RBAC tags + invoke |
-| Prefix `agent__*` no list/call | `GET/POST` materialize agents + `agents/invoke` |
-| Sem grants de agent | Dispatch SSE → texto (local_invoke / AgentCore) |
+| Flag `agents_enabled` no store do client | RBAC tags + invoke + sessions |
+| Prefix `agent__*` + status/result tools | `materialize-agents`, `agents/invoke`, `agents/runs/{id}` |
+| Sem grants de agent | Dispatch async (default) / sync opcional |
 
 ## C4 — Contexto (L1)
 
@@ -156,7 +178,7 @@ flowchart TB
   ar -->|"LLM"| remote
 ```
 
-## C4 — Fluxo de chamada agent (L3 lógico)
+## C4 — Fluxo agent async (L3 lógico) — default
 
 ```mermaid
 sequenceDiagram
@@ -165,18 +187,21 @@ sequenceDiagram
   participant BFF as Backend
   participant RT as agent-runtime / AgentCore
 
-  IDE->>Hub: tools/call agent__orientador
-  Hub->>Hub: JWT + client.agents_enabled?
-  alt agents_enabled = false
-    Hub-->>IDE: erro MCP / 403
-  else enabled
-    Hub->>BFF: POST /api/mcp/hub/agents/invoke
-    BFF->>BFF: invoke scope + user_can_invoke_agent
-    BFF->>RT: stream invoke
-    RT-->>BFF: SSE events
-    BFF-->>Hub: texto + session_id
-    Hub-->>IDE: tool result
-  end
+  IDE->>Hub: tools/call agent__orientador wait=accepted
+  Hub->>BFF: POST agents/invoke mode=async
+  BFF->>BFF: RBAC + cria session/invocation
+  BFF-->>Hub: accepted + session_id
+  Hub-->>IDE: tool result accepted
+  Note over BFF,RT: invoke corre em background
+  BFF->>RT: stream invoke
+  IDE->>Hub: tools/call agent_run_status
+  Hub->>BFF: GET agents/runs/{session_id}
+  BFF-->>Hub: streaming|complete + preview?
+  Hub-->>IDE: status
+  IDE->>Hub: tools/call agent_run_result
+  Hub->>BFF: GET result
+  BFF-->>Hub: text final
+  Hub-->>IDE: tool result
 ```
 
 ## Alternativas consideradas
@@ -189,6 +214,8 @@ sequenceDiagram
 | 4 | Hub chama agent-runtime direto | **Rejeitada** — BFF é autoridade de RBAC/secrets |
 | 5 | Reusar `McpServerAccess` | **Rejeitada** — ACL agent→MCP, não user→agent |
 | 6 | Tool única `invoke_agent` com `agent_id` | Possível; v1 prefere **uma tool por agent** (`agent__slug`) para discovery no IDE |
+| 7 | Só buffer SSE síncrono (call aberta até o fim) | **Rejeitada como default** — timeout do IDE; não escala. Fica atalho `wait=complete` |
+| 8 | Só progress notifications sem job id | **Rejeitada** — sem correlação se o socket cair |
 
 ## Consequências
 

@@ -98,9 +98,9 @@ Critério de aceite: mesmos testes verdes; smoke Cursor `tools/list` + `agent__*
 
 ### Fase 3 — agent-runtime
 
-- Separar domain de sessão/erro de contrato vs loop I/O
-- Ports: `LlmGateway`, `McpToolsClient`, `SessionStore`
-- Manter contract version `2026-09-local-1` estável
+- [x] Separar domain de sessão/contrato vs loop I/O
+- [x] Ports: `LlmGateway`, `McpToolsClient`, `SessionStore`
+- [x] Manter contract version `2026-09-local-1` estável
 
 ### Fase 4 — mcp-runtime + cursor-adapter
 

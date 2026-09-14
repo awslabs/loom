@@ -10,4 +10,18 @@ Separate process from Loom FastAPI. Implements the invoke contract in
 ```text
 make local.agent-runtime.test
 ```
+
+## Package layout (hexagonal strangler)
+
+```text
+agent_runtime/
+  domain/              # contract, errors (pure)
+  application/         # ports, wiring, use_cases/invoke
+  adapters/
+    inbound/http_app   # HTTP + SSE
+    outbound/          # litellm_http, mcp_http, memory_sessions
+  loop.py / http_app.py  # compat shims
+```
+
+Contract version unchanged: `2026-09-local-1`.
 """

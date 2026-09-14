@@ -30,20 +30,6 @@ Fluxo:
 
 ## Itens abertos
 
-### REF-2026-09-14-03 — agent-runtime: layout hexagonal
-
-| Campo | Valor |
-|-------|--------|
-| **Data** | 2026-09-14 |
-| **Área** | `local-runtime/services/agent-runtime` |
-| **Paths** | `agent_runtime/loop.py`, `http_app.py` |
-| **Oportunidade** | Separar domínio de sessão/contrato vs I/O LiteLLM/MCP; ports `LlmGateway`, `McpToolsClient` |
-| **Motivo** | `loop.py` concentra orquestração + HTTP; alinha guideline e facilita testes |
-| **Complexidade** | alta |
-| **Risco** | médio (invoke local / contract version) |
-| **Status** | open |
-| **Notas** | Após ou em paralelo controlado à Fase 1. Plano Fase 3. |
-
 ### REF-2026-09-14-04 — mcp-runtime: hexagonal leve
 
 | Campo | Valor |
@@ -105,3 +91,12 @@ Fluxo:
 | **Área** | `local-runtime/services/mcp-hub` |
 | **Status** | done |
 | **Notas** | Ver branch `refactor/mcp-hub-hexagonal`. |
+
+### REF-2026-09-14-03 — agent-runtime: layout hexagonal
+
+| Campo | Valor |
+|-------|--------|
+| **Data** | 2026-09-14 |
+| **Área** | `local-runtime/services/agent-runtime` |
+| **Status** | done |
+| **Notas** | Ports `LlmGateway` / `McpToolsClient` / `SessionStore`; use case `invoke`. |

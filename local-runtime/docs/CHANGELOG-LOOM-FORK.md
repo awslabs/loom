@@ -75,6 +75,19 @@ Checklist pós-merge:
 
 ## Registro
 
+### 2026-09-14 — agent-runtime hexagonal (REF-03)
+
+**Contexto:** mesma disciplina do Hub — domain/application/adapters.
+
+| Zona | Paths | O que mudou |
+|------|-------|-------------|
+| **Extension** | `services/agent-runtime/agent_runtime/{domain,application,adapters}/` | Ports LLM/MCP/Session + use case invoke |
+| **Docs** | backlog REF-03 done, plano Fase 3 | |
+
+**Impacto no sync upstream:** baixo.
+
+---
+
 ### 2026-09-14 — Hub store Postgres (REF-01)
 
 **Contexto:** paridade produção; port `HubStore` + DB dedicado.

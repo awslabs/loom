@@ -113,7 +113,6 @@ flowchart TB
   AR --> LL
   AR --> MCPR
   AC --> BR
-  AC -->|provider=litellm| LL
   LL --> PROV
   LL -->|cursor-local| CA
   CA --> CURSOR
@@ -121,11 +120,10 @@ flowchart TB
 ```
 
 Invoke no BFF escolhe o **adapter** (`local` | `agentcore` | `harness`) — ver
-[ADR 0005](../adr/0005-local-agent-runtime.md). LiteLLM é o único gateway de
-modelo do control plane / agent-runtime
-([spec 003](../specs/003-litellm-as-sole-llm-gateway.md)) e fala com
-**OpenAI, Anthropic e afins** (mais `cursor-local`). Bedrock permanece no
-caminho **AgentCore**, não como backend do LiteLLM neste fork.
+[ADR 0005](../adr/0005-local-agent-runtime.md). LiteLLM serve o **caminho local**
+(agent-runtime / BFF) com OpenAI, Anthropic e `cursor-local`
+([spec 003](../specs/003-litellm-as-sole-llm-gateway.md)). AgentCore usa
+**Bedrock** no data plane AWS — sem seta LiteLLM ↔ AgentCore neste desenho.
 
 ### Endpoints (configuráveis)
 

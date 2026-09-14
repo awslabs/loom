@@ -27,6 +27,7 @@ type McpHubClient = {
   declared_version: string;
   declared_family: string;
   status: "discovered" | "enabled" | "disabled";
+  agents_enabled?: boolean;
   allowed_groups?: string[];
   granted_profiles?: string[];
   grant_count?: number;
@@ -228,6 +229,31 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
     }
   }
 
+  async function setAgentsEnabled(slug: string, agentsEnabled: boolean) {
+    setBusy(true);
+    setError(null);
+    try {
+      const patch: { agents_enabled: boolean; status?: "enabled" } = {
+        agents_enabled: agentsEnabled,
+      };
+      // Channel-level flag — independent of IdP profile. Turning agents on
+      // also enables a discovered/disabled channel so tools/list can merge them.
+      const client = clients.find((c) => c.slug === slug);
+      if (agentsEnabled && client && client.status !== "enabled") {
+        patch.status = "enabled";
+      }
+      await apiFetch(`/api/ext/local-runtime/mcp-clients/${encodeURIComponent(slug)}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+      await refreshClients();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : "Failed to update agents_enabled");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function deleteClient(slug: string) {
     if (!window.confirm(`Delete MCP client "${slug}"?`)) return;
     setBusy(true);
@@ -335,7 +361,11 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
 {`{
   "mcpServers": {
     "loom-hub": {
-      "url": "${hubInfo.mcp_hub_url}"
+      "url": "${hubInfo.mcp_hub_url}",
+      "auth": {
+        "CLIENT_ID": "loom-mcp-hub",
+        "scopes": ["openid", "profile"]
+      }
     }
   }
 }`}
@@ -385,7 +415,8 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
                     <span className="text-muted-foreground font-normal">({c.slug})</span>
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    status={c.status} · family={c.declared_family} · grant rows=
+                    status={c.status} · family={c.declared_family} · agents=
+                    {c.agents_enabled ? "on" : "off"} · grant rows=
                     {c.grant_count ?? 0}
                     {(c.granted_profiles || c.allowed_groups || []).length > 0
                       ? ` · profiles=${(c.granted_profiles || c.allowed_groups || []).join(",")}`
@@ -427,6 +458,26 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
 
         {selected ? (
           <div className="rounded-md border bg-muted/20 p-3 space-y-3">
+            <div className="rounded-md border bg-background p-3 space-y-2">
+              <h3 className="text-sm font-medium">Channel settings</h3>
+              <p className="text-xs text-muted-foreground">
+                Applies immediately on toggle — no profile and no Save button. Agent
+                visibility still follows <code>loom:group</code> RBAC.
+              </p>
+              <label className="flex items-center gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={Boolean(selected.agents_enabled)}
+                  disabled={busy || !canWrite}
+                  onChange={(e) => void setAgentsEnabled(selected.slug, e.target.checked)}
+                />
+                <span>
+                  Expose Loom agents (<code>agents_enabled</code>)
+                  {busy ? " · saving…" : selected.agents_enabled ? " · on" : " · off"}
+                </span>
+              </label>
+            </div>
+
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div className="space-y-2 min-w-0 flex-1">
                 <h3 className="text-sm font-medium">
@@ -454,6 +505,7 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
                 {!selectedProfile ? (
                   <p className="text-xs text-muted-foreground">
                     Select a profile to load its grants or start registering tools for it.
+                    The Save button appears after a profile is loaded.
                   </p>
                 ) : loadingProfile ? (
                   <p className="text-xs text-muted-foreground">Loading {selectedProfile}…</p>
@@ -471,7 +523,7 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
                   disabled={savingGrants || loadingProfile}
                   onClick={() => void saveGrants()}
                 >
-                  {savingGrants ? "Saving…" : "Save"}
+                  {savingGrants ? "Saving…" : "Save profile grants"}
                 </button>
               ) : null}
             </div>

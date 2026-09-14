@@ -146,6 +146,24 @@ class TestStore(unittest.TestCase):
         self.assertEqual(len(full["grants"]), 1)
         self.assertEqual(full["grants"][0]["group"], "g-users-test")
 
+    def test_agents_enabled_default_and_patch(self):
+        store.upsert_from_initialize(
+            hub_session_id="s1",
+            slug="cursor",
+            declared_name="cursor",
+            declared_version="1",
+            declared_family="cursor",
+        )
+        row = store.get_client("cursor")
+        assert row is not None
+        self.assertFalse(row.get("agents_enabled"))
+        patched = store.patch_client("cursor", {"agents_enabled": True, "status": "enabled"})
+        assert patched is not None
+        self.assertTrue(patched.get("agents_enabled"))
+        summary = store.get_client("cursor")
+        assert summary is not None
+        self.assertTrue(summary.get("agents_enabled"))
+
 
 if __name__ == "__main__":
     unittest.main()

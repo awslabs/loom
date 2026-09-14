@@ -1,0 +1,21 @@
+---
+description: Read local-runtime/docs hub (RULES + guides); do not duplicate fork docs
+alwaysApply: true
+---
+
+# Fork docs (pointer)
+
+**Read and follow** the IDE-agnostic documentation hub:
+
+1. `local-runtime/docs/README.md` — index
+2. `local-runtime/docs/guide/rules.md` — placement policy (Core vs extension)
+3. Guides under `local-runtime/docs/guide/` as needed for the task
+4. `local-runtime/docs/CHANGELOG-LOOM-FORK.md` when changing Loom core paths
+
+Do **not** copy policy or how-to into this file. If this note and
+`local-runtime/docs/` disagree, **the docs win**.
+
+**Hard gate:** do not edit Loom core paths without an explicit Dev approval
+after stating reasons (see `guide/rules.md`). Do not refactor unless the Dev
+asks; log opportunities in `local-runtime/docs/backlog/refactoring.md`.
+Update `guide/architecture.md` when containers, auth flows, or data stores change.

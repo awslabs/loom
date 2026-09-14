@@ -1,0 +1,350 @@
+# Arquitetura (C4 + modelo de dados)
+
+Visão atual do **fork** Loom + `local-runtime` (co-located).  
+Atualizar **sempre** que a arquitetura mudar — ver [rules.md](rules.md) § Manutenção desta arquitetura.
+
+| Nível C4 | Conteúdo |
+|----------|----------|
+| **L1 Context** | Sistema no mundo (pessoas + sistemas externos) |
+| **L2 Containers** | Processos / deployables |
+| **L3 Components** | Peças internas dos containers críticos |
+| **Dados** | Postgres (Loom) + store Hub + IdP |
+
+Diagramas em **Mermaid portátil** (`flowchart` / `erDiagram`) — equivalentes C4.
+Não usar sintaxe `C4Context`/`C4Container`/`C4Component` (muitos previews não renderizam).
+
+**Produção vs local:** URLs, portas e secrets vêm de **variáveis de ambiente / compose**
+(`MCP_HUB_*`, `AGENT_RUNTIME_*`, `LOOM_DATABASE_URL`, issuer IdP, etc.). Nada disso
+é contrato fixo da arquitetura — o diagrama descreve **papéis e relações**.
+
+Relacionados: [ADR 0006](../adr/0006-local-runtime-extension-repo.md), [overview](overview.md),
+[scalability-reliability.md](scalability-reliability.md),
+[CHANGELOG-LOOM-FORK.md](../CHANGELOG-LOOM-FORK.md).
+
+**Última revisão:** 2026-09-14 (Mermaid portátil; endpoints via env)
+
+---
+
+## L1 — System Context
+
+```mermaid
+flowchart TB
+  subgraph People
+    DEV[Developer / Operator]
+    ADM[Admin IdP]
+  end
+
+  SYS[Loom + local-runtime<br/>agents, MCP catalog, Hub, runtimes]
+
+  IDP[Identity Provider<br/>OIDC / OAuth AS]
+  IDE[Cursor IDE<br/>MCP client]
+  LLM[LLM providers<br/>via LiteLLM gateway]
+  MCPX[MCP servers externos<br/>ADO, Grafana, Rancher, …]
+
+  DEV -->|HTTPS UI| SYS
+  DEV --> IDE
+  IDE -->|MCP OAuth + tools| SYS
+  SYS -->|discover JWKS token| IDP
+  IDE -->|PKCE client loom-mcp-hub| IDP
+  ADM --> IDP
+  SYS --> LLM
+  SYS -->|tools allowlisted| MCPX
+```
+
+---
+
+## L2 — Containers
+
+```mermaid
+flowchart TB
+  USER[User browser / IDE]
+
+  subgraph LoomExt[Loom-ext deployables]
+    FE[Frontend SPA<br/>Extension Host + plugin]
+    BE[Backend BFF<br/>FastAPI]
+    PG[(PostgreSQL<br/>estado Loom)]
+    HUB[mcp-hub<br/>MCP resource server]
+    HSTORE[(Hub store<br/>clients / grants)]
+    MCPR[mcp-runtime<br/>stdio supervisor]
+    AR[agent-runtime<br/>agent loop]
+    CA[cursor-adapter]
+    LL[LiteLLM proxy]
+    IDPL[IdP deploy<br/>ex. Keycloak ou Entra]
+  end
+
+  MCPX[MCP externos]
+
+  USER --> FE
+  USER -->|MCP OAuth| HUB
+  FE -->|REST + user JWT| BE
+  BE --> PG
+  BE -->|OIDC bootstrap / JWKS config| IDPL
+  BE -->|service token| HUB
+  BE -->|service token| MCPR
+  BE -->|service token| AR
+  BE --> LL
+  HUB -->|materialize / tools / agents| BE
+  HUB --> HSTORE
+  HUB -->|validate access_token| IDPL
+  AR --> LL
+  AR --> MCPR
+  LL --> CA
+  MCPR --> MCPX
+```
+
+### Endpoints (configuráveis)
+
+Contrato = **nome do serviço + env**. Valores abaixo são só referência do compose
+local de desenvolvimento; em produção use DNS/TLS e secrets store.
+
+| Papel | Env / config típica | Exemplo local (não normativo) |
+|-------|---------------------|-------------------------------|
+| UI | frontend origin | `http://localhost:5173` |
+| BFF | API base | `http://localhost:8000` |
+| MCP Hub resource | `MCP_HUB_PUBLIC_URL` | `http://127.0.0.1:8790/mcp` |
+| Hub → BFF | `MCP_HUB_INTERNAL_URL` + `MCP_HUB_SERVICE_TOKEN` | service network |
+| mcp-runtime | `MCP_RUNTIME_URL` + `MCP_RUNTIME_TOKEN` | service network |
+| agent-runtime | `AGENT_RUNTIME_URL` + `AGENT_RUNTIME_TOKEN` | service network |
+| LiteLLM | discovery / proxy URL | compose service |
+| Postgres | `LOOM_DATABASE_URL` | compose service |
+| IdP | issuer / JWKS from `identity_providers` or env bootstrap | Keycloak ou Entra |
+
+---
+
+## L3 — Components (recortes críticos)
+
+### L3a — MCP Hub
+
+```mermaid
+flowchart LR
+  subgraph hub[mcp-hub]
+    HTTP[http_app<br/>MCP JSON-RPC + management]
+    OAUTH[oauth<br/>JWT / JWKS]
+    STORE[store<br/>Hub persistence]
+    LOOMC[loom_client<br/>BFF HTTP]
+    ACC[access / naming]
+  end
+  BE[Loom Backend]
+  IDP[IdP JWKS]
+
+  HTTP --> OAUTH
+  HTTP --> STORE
+  HTTP --> ACC
+  HTTP --> LOOMC
+  OAUTH --> IDP
+  LOOMC -->|service token| BE
+```
+
+Fluxo: IDE OAuth → JWT → `tools/list` (grants + `agent__*` se habilitado) → `tools/call` → BFF.
+
+### L3b — Backend BFF (fork-relevant)
+
+```mermaid
+flowchart TB
+  subgraph be[Backend FastAPI]
+    AUTH[auth / idp ACL]
+    MCPR[routers mcp* / hub proxy]
+    INV[invocations / local_invoke]
+    HSVC[mcp_hub* services]
+    ORM[SQLAlchemy models]
+  end
+  MCPR --> AUTH
+  MCPR --> HSVC
+  HSVC --> ORM
+  INV --> ORM
+  INV --> AUTH
+```
+
+### L3c — Frontend + plugin
+
+```mermaid
+flowchart LR
+  subgraph fe[SPA]
+    HOST[extensions host]
+    PAGES[host pages<br/>Chat Agents MCP]
+    PLUG[LocalRuntimePage plugin]
+  end
+  HOST --> PLUG
+  PLUG -.->|apiFetch + AuthProvider| PAGES
+```
+
+---
+
+## Modelo de dados
+
+Legenda de **origem**:
+
+| Tag | Significado |
+|-----|-------------|
+| **Core Loom** | Schema da plataforma [awslabs/loom](https://github.com/awslabs/loom) — tabelas/conceitos upstream |
+| **Fork (PG)** | Objetos ou colunas no **mesmo Postgres do backend Loom**, introduzidos/estendidos por este fork (ainda em `backend/` — Zona Core no changelog) |
+| **local-runtime** | Persistência **fora** do Postgres Loom (sidecars / IdP local) |
+
+Criação no backend: `init_db()` → `create_all` + `_migrate_add_columns` (sem Alembic). Boot do backend.
+
+---
+
+### 1) Core Loom — PostgreSQL (plataforma)
+
+Tabelas upstream típicas (não é inventário exaustivo de colunas):
+
+| Área | Tabelas |
+|------|---------|
+| Agents / invoke | `agents`, `agent_config_entries`, `invocation_sessions`, `invocations` |
+| MCP catalog | `mcp_servers`, `mcp_tools`, `mcp_server_access` |
+| Memória / A2A | `memories`, `a2a_agents`, `a2a_agent_skills`, `a2a_agent_access` |
+| Authz / creds | `authorizer_configs`, `authorizer_credentials`, `credential_providers` |
+| Políticas / tags | `tag_profiles`, `tag_policies`, `approval_*`, `permission_requests` |
+| Ops | `audit_*`, `site_settings`, `managed_roles`, `vpc_configs`, `agent_integrations` |
+
+#### ER — agents / invoke (**Core Loom**)
+
+```mermaid
+erDiagram
+    agents ||--o{ agent_config_entries : has
+    agents ||--o{ invocation_sessions : has
+    invocation_sessions ||--o{ invocations : has
+    agents {
+        int id PK
+        string arn
+        string source
+        string allowed_model_ids
+        string tags
+    }
+    invocation_sessions {
+        string session_id PK
+        int agent_id FK
+        string user_id
+        string status
+    }
+    invocations {
+        string invocation_id PK
+        string session_id FK
+        string status
+        text prompt_text
+        text response_text
+    }
+```
+
+#### ER — MCP catalog (**Core Loom** + extensão de colunas no fork)
+
+Tabelas `mcp_*` são **Core Loom**. Colunas de runtime/template no fork: ver §2.
+
+```mermaid
+erDiagram
+    mcp_servers ||--o{ mcp_tools : has
+    mcp_servers ||--o{ mcp_server_access : grants
+    mcp_servers {
+        int id PK
+        string name
+        string status
+    }
+    mcp_tools {
+        int id PK
+        int server_id FK
+        string tool_name
+    }
+    mcp_server_access {
+        int id PK
+        int server_id FK
+    }
+```
+
+---
+
+### 2) Fork (PG) — customizações no Postgres do Loom
+
+Objetos/colunas que **não** devem ser tratados como “só local-runtime”: vivem no BFF e no schema Loom (impacto em sync `upstream`).
+
+| Objeto | Tipo | Notas |
+|--------|------|--------|
+| `identity_providers` | **Tabela nova (fork)** | ACL multi-IdP (Keycloak/Entra/…) |
+| `mcp_hub_sessions` | **Tabela nova (fork)** | Legado mint Hub (`hs_…`); fluxo atual = JWT IdP |
+| `mcp_servers.template_id` | **Coluna (fork)** | Templates stdio (`azure-devops`, grafana, …) |
+| `mcp_servers.runtime_endpoint_url` | **Coluna (fork)** | URL facade mcp-runtime |
+| `mcp_servers.runtime_state` | **Coluna (fork)** | Estado do runtime local |
+| `mcp_servers.template_params` / `secret_refs` | **Colunas (fork)** | Params + refs de segredo |
+| `mcp_servers.delegation_mode` / OBO fields | **Colunas (fork)** | Delegação m2m/obo |
+| Seeds Orientador (`agents` source=local) | **Dados (fork)** | Linhas/config; tabela `agents` continua Core |
+
+```mermaid
+erDiagram
+    identity_providers {
+        int id PK
+        string provider_type
+        string issuer_url
+        string client_id
+        string jwks_uri
+        text group_mappings
+    }
+    mcp_hub_sessions {
+        string id PK
+        string token_hash
+        string subject
+        datetime expires_at
+        datetime revoked_at
+    }
+```
+
+`mcp_hub_sessions`: mint removido (ADR 0011). Tabela pode permanecer até limpeza **autorizada** pelo Dev.
+
+---
+
+### 3) local-runtime — stores fora do Postgres Loom
+
+| Store | Onde | Conteúdo |
+|-------|------|----------|
+| **`hub_clients.json`** | Volume `mcp-hub` (`MCP_HUB_STORE_PATH`) | Canais MCP, `agents_enabled`, profile grants, session bindings |
+| **Keycloak DB** | Container Keycloak | Realm `loom`, users/groups, client `loom-mcp-hub` |
+| **Templates YAML** | `local-runtime/templates/` (ro no mcp-runtime) | Allowlist de servers stdio — arquivos, não SQL |
+
+#### JSON Hub (**local-runtime** only)
+
+```text
+{
+  "version": 1,
+  "clients": {
+    "<slug>": {
+      "slug", "status", "agents_enabled",
+      "declared_*", "display_name",
+      "profile_grants": { "<idp-group>": [ { server_id, access_level, tool_names } ] }
+    }
+  },
+  "session_bindings": { ... }
+}
+```
+
+Não misturar este JSON com migrations do Postgres.
+
+---
+
+### 4) Relação lógica entre origens
+
+| Conceito | Origem | Liga a |
+|----------|--------|--------|
+| `profile_grants[].server_id` | **local-runtime** JSON | **Core** `mcp_servers.id` |
+| `agents_enabled` | **local-runtime** JSON | **Core** `agents` + RBAC tags (invoke via BFF) |
+| Runs `agent__*` | BFF cria **Core** `invocation_sessions` / `invocations` | — |
+| IdP ativo | **Fork (PG)** `identity_providers` | Keycloak/Entra (**local-runtime** / SaaS) |
+| Template stdio | **Fork** colunas em `mcp_servers` | **local-runtime** YAML + mcp-runtime |
+
+```text
+                    ┌──────────────────────────┐
+                    │  local-runtime           │
+                    │  hub_clients.json        │
+                    │  templates/*.yaml        │
+                    │  Keycloak (realm)        │
+                    └────────────┬─────────────┘
+                                 │ server_id / OAuth
+                    ┌────────────▼─────────────┐
+                    │  Postgres Loom           │
+                    │  Core tables             │
+                    │  + Fork tables/columns   │
+                    └──────────────────────────┘
+```
+
+---
+
+## Manutenção
+
+Qualquer mudança de containers, portas, fluxos auth, stores ou tabelas **deve** atualizar este arquivo no mesmo PR/entrega — e marcar se a mudança é **Core Loom**, **Fork (PG)** ou **local-runtime**. Regra canônica em [rules.md](rules.md).

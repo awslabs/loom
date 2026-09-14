@@ -144,6 +144,15 @@ export function fetchLitellmModels(): Promise<ModelOption[]> {
   return apiFetch<ModelOption[]>("/api/agents/models/litellm");
 }
 
+/** Bedrock + LiteLLM catalogs. `/models` is Bedrock-only; LiteLLM is on-demand. */
+export async function fetchAllModelOptions(): Promise<ModelOption[]> {
+  const [bedrockModels, litellmModels] = await Promise.all([
+    fetchModels().catch(() => [] as ModelOption[]),
+    fetchLitellmModels().catch(() => [] as ModelOption[]),
+  ]);
+  return [...bedrockModels, ...litellmModels];
+}
+
 export function fetchProviders(): Promise<Provider[]> {
   return apiFetch<Provider[]>("/api/agents/providers");
 }

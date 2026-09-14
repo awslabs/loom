@@ -1,57 +1,26 @@
 # Project Steering
 
-## Directory Structure
-- `agents/`: Individual agent logic directories.
-  - `agent_name/`: Logic, tests, and local dependencies.
-- `backend/`: Backend business logic exposed via API.
-- `etc/`: Configuration management.
-  - `environment.sh`: Source of truth for all injectable parameters.
-- `frontend/`: Frontend used for interacting with the backend.
-- `iac/`: Infrastructure as Code (AWS CloudFormation and AWS SAM).
-- `makefile`: Root orchestration for builds, deployments, and local runs.
+**Documentation and fork policy live under `local-runtime/docs/`.** Do not
+duplicate that content here.
 
-## Build & Command Tooling
-- Primary Interface: Always check the `makefile` for available commands before suggesting custom scripts.
-- Config Injection: Commands must source `etc/environment.sh`.
-- Dependency Management (Python): Use `uv`. 
-  - Commands: `uv pip install`, `uv venv`. 
-  - Each agent in `agents/` should have its own `.venv` managed via `uv`.
-- Dependency Management (TypeScript): Use `npm`.
-  - Ensure `node_modules` stay within the relevant directory.
-- Formatting JSON outputs: Prefer `jq` over `python -m json.tool`
+## Required reading (agents)
 
-## Coding Standards
-### Python
-- Use Type Hints for all function signatures.
-- Prefer `unittest` for testing within agent subdirectories.
-- Prefer SQLAlchemy when interacting with relational databases, instead of writing direct SQL statements.
-- Follow PEP 8 style guidelines.
+1. [`local-runtime/docs/README.md`](local-runtime/docs/README.md) — docs hub
+2. [`local-runtime/docs/guide/rules.md`](local-runtime/docs/guide/rules.md) — Core vs extension
+3. Task guides as needed:
+   - [`guide/getting-started.md`](local-runtime/docs/guide/getting-started.md)
+   - [`guide/development.md`](local-runtime/docs/guide/development.md)
+   - [`guide/mcp-hub.md`](local-runtime/docs/guide/mcp-hub.md)
+   - [`guide/upstream-sync.md`](local-runtime/docs/guide/upstream-sync.md)
+4. Core path changes → log in
+   [`local-runtime/docs/CHANGELOG-LOOM-FORK.md`](local-runtime/docs/CHANGELOG-LOOM-FORK.md)
 
-### TypeScript
-- Use ESM (ECMAScript Modules).
-- Strict typing required (no `any` unless absolutely necessary).
+Cursor uses the same hub via `.cursor/rules/prefer-local-runtime-extension.mdc`
+(pointer only). If a pointer and `local-runtime/docs/` disagree, **the docs win**.
 
-### AWS / IaC
-- Follow the principle of least privilege in IAM templates within `iac/`.
-- Use environment-based naming conventions (e.g., `resource-name-${STAGE}`).
-- Deployments use the SAM CLI.
-
-### Backends
-- Use Python and FastAPI for backend APIs.
-- Build unit tests for ensuring that responses match expected outcomes.
-
-### Frontends
-- Use Typescript and shadcn, Tailwind CSS, and Vite for frontend user experience.
-
-## Security Scans
-- Before committing code, verify that no credentials, tokens, or secrets are stored in files tracked by git.
-- Sensitive data should only exist in:
-  - `.env` files (ensure these are in `.gitignore`)
-  - `etc/environment.sh` (if used for local development only and gitignored)
-  - AWS Secrets Manager or Parameter Store for production
-- Use tools like `git-secrets` to scan for accidentally committed secrets.
-- Review diffs before pushing to ensure no API keys, passwords, or tokens are included.
-
-## Deployment Workflow
-1. Update parameters in `etc/environment.sh`.
-2. Execute via `make <target>`.
+**Hard gate:** do not change Loom core without explicit Dev authorization; see
+[`guide/rules.md`](local-runtime/docs/guide/rules.md). Do not refactor unless
+asked; log ideas in
+[`backlog/refactoring.md`](local-runtime/docs/backlog/refactoring.md).
+Keep [`guide/architecture.md`](local-runtime/docs/guide/architecture.md) in
+sync when architecture changes.

@@ -48,6 +48,17 @@ def agent_runtime_token() -> str:
     return os.getenv("AGENT_RUNTIME_TOKEN", "").strip()
 
 
+# Local LiteLLM mock models — skip agent-runtime (it has no handler and hangs).
+_LITELLM_MOCK_MODELS = frozenset({"orientador-academico", "mock-echo"})
+
+
+def _uses_litellm_mock(agent: Agent, runtime_model_id: str | None = None) -> bool:
+    try:
+        return resolve_local_model_id(agent, runtime_model_id) in _LITELLM_MOCK_MODELS
+    except LocalInvokeError:
+        return False
+
+
 def mcp_runtime_token() -> str:
     return os.getenv("MCP_RUNTIME_TOKEN", "").strip()
 
@@ -247,8 +258,10 @@ async def invoke_local_agent_stream(
     session.status = "streaming"
     db.commit()
 
-    # Prefer agent-runtime BFF when configured (ADR 0005).
-    if agent_runtime_base_url():
+    # Prefer agent-runtime BFF when configured (ADR 0005), except local
+    # LiteLLM mock models (orientador-academico / mock-echo) which hang on
+    # agent-runtime and must hit the proxy directly.
+    if agent_runtime_base_url() and not _uses_litellm_mock(agent, runtime_model_id):
         config = _agent_config(agent)
         try:
             model_id = resolve_local_model_id(agent, runtime_model_id)

@@ -1,21 +1,30 @@
 # local-runtime — Loom extension (ADR 0006)
 
-Out-of-tree data plane + UI plugin for local MCP and (later) agent runtime.
+Out-of-tree data plane + UI plugin for local MCP, agent runtime, and MCP Hub.
 
 ```text
 local-runtime/
 ├── plugin/                 # @loom-ext/local-runtime — UI only (Loom bundle)
-├── services/
-│   ├── mcp-runtime/        # stdio MCP facade
-│   ├── cursor-adapter/     # LiteLLM CustomLLM
-│   └── agent-runtime/      # deferred (ADR 0005)
+├── services/               # mcp-hub, mcp-runtime, cursor-adapter, agent-runtime
 ├── templates/              # MCP allowlist YAML
-└── compose/overlay.yml     # merged by `make local.up`
+├── compose/overlay.yml     # merged by `make local.up`
+└── docs/                   # fork docs (rules, guides, changelog) — start here
 ```
+
+## Documentation
+
+**Start here:** [docs/README.md](docs/README.md)
+
+- [Getting started](docs/guide/getting-started.md)
+- [Rules (Core vs extension)](docs/guide/rules.md)
+- [Development](docs/guide/development.md)
+- [MCP Hub](docs/guide/mcp-hub.md)
+- [Upstream sync](docs/guide/upstream-sync.md)
+- [Fork changelog](docs/CHANGELOG-LOOM-FORK.md)
 
 ## Run with Loom
 
-From the Loom repository root:
+From the monorepo root:
 
 ```bash
 make local.up
@@ -25,10 +34,5 @@ Uses `docker-compose.yml` + `local-runtime/compose/overlay.yml`.
 
 ## UI plugin
 
-The Loom frontend Extension Host loads `@loom-ext/local-runtime` (Vite alias /
-Docker mount). Sidebar: **Local runtime** (requires `mcp:read`).
-
-## Docs
-
-- [ADR 0006](../docs/adr/0006-local-runtime-extension-repo.md) (in Loom tree while co-located)
-- Agent runtime: see `services/agent-runtime/README.md`
+The Loom frontend Extension Host loads `@loom-ext/local-runtime`. Sidebar:
+**Local runtime** (requires `mcp:read`).

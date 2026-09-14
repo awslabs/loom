@@ -85,6 +85,7 @@ def client_summary(row: dict[str, Any]) -> dict[str, Any]:
     out["granted_profiles"] = profiles
     out["grant_count"] = len(grants)
     out["allowed_groups"] = profiles
+    out["agents_enabled"] = bool(out.get("agents_enabled", False))
     return out
 
 
@@ -190,6 +191,7 @@ def upsert_from_initialize(
                 "declared_version": declared_version,
                 "declared_family": declared_family,
                 "status": "discovered",
+                "agents_enabled": False,
                 "allowed_groups": [],
                 "grants": [],
                 "first_seen_at": now,
@@ -241,6 +243,8 @@ def patch_client(slug: str, patch: dict[str, Any]) -> dict[str, Any] | None:
             row["display_name"] = patch["display_name"][:128]
         if "allowed_groups" in patch and isinstance(patch["allowed_groups"], list):
             row["allowed_groups"] = [str(g) for g in patch["allowed_groups"][:64]]
+        if "agents_enabled" in patch:
+            row["agents_enabled"] = bool(patch["agents_enabled"])
         _save(data)
         return deepcopy(row)
 

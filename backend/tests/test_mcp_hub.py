@@ -10,8 +10,10 @@ from sqlalchemy.pool import StaticPool
 from app.main import app
 from app.db import Base, get_db
 from app.dependencies.auth import UserInfo, get_current_user
+from app.models.agent import Agent
 from app.models.mcp import McpServer, McpTool
 from app.services.mcp_hub import expose_tools
+from app.services import mcp_hub_agents as hub_agents
 
 
 def _admin() -> UserInfo:
@@ -179,6 +181,90 @@ class TestMcpHub(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["entries"], [])
+
+    def test_materialize_agents_rbac(self):
+        demo = Agent(
+            arn="arn:aws:bedrock-agentcore:us-east-1:1:runtime/demo",
+            runtime_id="demo",
+            name="Orientador Demo",
+            region="us-east-1",
+            account_id="1",
+            source="local",
+            tags='{"loom:group":"demo"}',
+            available_qualifiers='["DEFAULT"]',
+        )
+        other = Agent(
+            arn="arn:aws:bedrock-agentcore:us-east-1:1:runtime/test",
+            runtime_id="test",
+            name="Other",
+            region="us-east-1",
+            account_id="1",
+            source="local",
+            tags='{"loom:group":"test"}',
+            available_qualifiers='["DEFAULT"]',
+        )
+        self.session.add_all([demo, other])
+        self.session.commit()
+
+        resp = self.client.post(
+            "/api/mcp/hub/materialize-agents",
+            headers={"Authorization": "Bearer test-hub-token"},
+            json={"subject": "u1", "groups": ["t-user", "g-users-demo"]},
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        names = {a["exposed_name"] for a in body["agents"]}
+        self.assertEqual(names, {"agent__orientador-demo"})
+        self.assertEqual(len(body["monitor_tools"]), 2)
+
+        # direct helper: test-user group should not see demo
+        from app.dependencies.auth import UserInfo, derive_scopes
+
+        user = UserInfo(
+            sub="u2",
+            username="u2",
+            groups=["t-user", "g-users-test"],
+            scopes=derive_scopes(["t-user", "g-users-test"]),
+            idp_type="keycloak",
+        )
+        mat = hub_agents.materialize_agents(self.session, user)
+        exposed = {a["exposed_name"] for a in mat["agents"]}
+        self.assertNotIn("agent__orientador-demo", exposed)
+        self.assertIn("agent__other", exposed)
+
+    def test_agent_run_forbidden_without_ownership(self):
+        agent = Agent(
+            arn="arn:aws:bedrock-agentcore:us-east-1:1:runtime/a",
+            runtime_id="a",
+            name="A",
+            region="us-east-1",
+            account_id="1",
+            source="local",
+            tags='{"loom:group":"demo"}',
+            available_qualifiers='["DEFAULT"]',
+        )
+        self.session.add(agent)
+        self.session.commit()
+        from app.models.session import InvocationSession
+        from datetime import datetime
+
+        sess = InvocationSession(
+            agent_id=agent.id,
+            session_id="sess-1",
+            qualifier="DEFAULT",
+            status="complete",
+            created_at=datetime.utcnow(),
+            user_id="owner",
+        )
+        self.session.add(sess)
+        self.session.commit()
+
+        resp = self.client.post(
+            "/api/mcp/hub/agents/runs/sess-1",
+            headers={"Authorization": "Bearer test-hub-token"},
+            json={"subject": "other", "groups": ["t-user", "g-users-demo"]},
+        )
+        self.assertEqual(resp.status_code, 403)
 
 
 if __name__ == "__main__":

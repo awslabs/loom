@@ -16,7 +16,13 @@ def service_token() -> str:
     return os.environ.get("MCP_HUB_SERVICE_TOKEN", "").strip()
 
 
-def _request(method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+def _request(
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    timeout: float = 60,
+) -> tuple[int, dict[str, Any]]:
     token = service_token()
     if not token:
         return 503, {"error": "hub_service_token_unset"}
@@ -32,7 +38,7 @@ def _request(method: str, path: str, body: dict[str, Any] | None = None) -> tupl
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8") or "{}"
             return resp.status, json.loads(raw)
     except urllib.error.HTTPError as exc:
@@ -89,3 +95,54 @@ def tools_call(
     if original_tool_name is not None:
         body["original_tool_name"] = original_tool_name
     return _request("POST", "/api/mcp/hub/tools/call", body)
+
+
+def materialize_agents(*, subject: str, groups: list[str]) -> tuple[int, dict[str, Any]]:
+    return _request(
+        "POST",
+        "/api/mcp/hub/materialize-agents",
+        {
+            "subject": subject,
+            "groups": groups,
+            "contract_version": "2026-09-hub-1",
+        },
+    )
+
+
+def agents_invoke(
+    *,
+    subject: str,
+    groups: list[str],
+    agent_id: int,
+    prompt: str,
+    session_id: str | None = None,
+    mode: str = "async",
+    timeout_s: int = 120,
+) -> tuple[int, dict[str, Any]]:
+    return _request(
+        "POST",
+        "/api/mcp/hub/agents/invoke",
+        {
+            "subject": subject,
+            "groups": groups,
+            "agent_id": agent_id,
+            "prompt": prompt,
+            "session_id": session_id,
+            "mode": mode,
+            "timeout_s": timeout_s,
+        },
+        timeout=float(timeout_s + 30) if mode == "sync" else 60.0,
+    )
+
+
+def agents_run(
+    *,
+    subject: str,
+    groups: list[str],
+    session_id: str,
+) -> tuple[int, dict[str, Any]]:
+    return _request(
+        "POST",
+        f"/api/mcp/hub/agents/runs/{session_id}",
+        {"subject": subject, "groups": groups},
+    )

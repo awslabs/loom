@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.services import mcp_hub as hub
+from app.services import mcp_hub_agents as hub_agents
 from app.services import mcp_hub_proxy as hub_proxy
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,28 @@ class ClientPatchRequest(BaseModel):
     status: str | None = None
     display_name: str | None = None
     allowed_groups: list[str] | None = None
+    agents_enabled: bool | None = None
+
+
+class MaterializeAgentsRequest(BaseModel):
+    subject: str = Field(..., min_length=1)
+    groups: list[str] = Field(default_factory=list)
+    contract_version: str | None = None
+
+
+class HubAgentInvokeRequest(BaseModel):
+    subject: str = Field(..., min_length=1)
+    groups: list[str] = Field(default_factory=list)
+    agent_id: int
+    prompt: str = Field(..., min_length=1)
+    session_id: str | None = None
+    mode: str = Field(default="async")
+    timeout_s: int = Field(default=120, ge=5, le=600)
+
+
+class HubAgentRunQuery(BaseModel):
+    subject: str = Field(..., min_length=1)
+    groups: list[str] = Field(default_factory=list)
 
 
 class ClientGrantsRequest(BaseModel):
@@ -141,6 +164,62 @@ def hub_tools_call(
     )
     if result.get("denied"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=result.get("error") or "denied")
+    return result
+
+
+@router.post("/materialize-agents")
+def materialize_hub_agents(
+    body: MaterializeAgentsRequest,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    _require_service_token(authorization)
+    user = _user_from_hub_claims(body.subject, body.groups)
+    return hub_agents.materialize_agents(db, user)
+
+
+@router.post("/agents/invoke")
+async def hub_agents_invoke(
+    body: HubAgentInvokeRequest,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    _require_service_token(authorization)
+    user = _user_from_hub_claims(body.subject, body.groups)
+    mode = body.mode if body.mode in ("async", "sync") else "async"
+    result = await hub_agents.start_agent_run(
+        db,
+        user,
+        agent_id=body.agent_id,
+        prompt=body.prompt,
+        session_id=body.session_id,
+        mode=mode,
+        timeout_s=body.timeout_s,
+    )
+    if result.get("denied"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=result.get("error") or "denied")
+    if result.get("error") == "agent_not_found":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="agent_not_found")
+    if result.get("error"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error"))
+    return result
+
+
+@router.post("/agents/runs/{session_id}")
+def hub_agents_run_status(
+    session_id: str,
+    body: HubAgentRunQuery,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    """POST with claims (Hub cannot easily put subject on GET via urllib helpers)."""
+    _require_service_token(authorization)
+    user = _user_from_hub_claims(body.subject, body.groups)
+    result = hub_agents.get_run(db, user, session_id)
+    if result.get("denied"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=result.get("error") or "denied")
+    if result.get("error") == "not_found":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
     return result
 
 

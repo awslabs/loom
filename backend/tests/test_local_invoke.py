@@ -243,6 +243,14 @@ class TestLocalInvokeEndpoint(unittest.TestCase):
             yield "event: chunk\ndata: {\"text\":\"via runtime\"}\n\n"
             yield "event: session_end\ndata: {\"session_id\":\"s\"}\n\n"
 
+        # Mock LiteLLM models skip agent-runtime; use a non-mock model_id.
+        for entry in self.agent.config_entries:
+            if entry.key == "AGENT_CONFIG_JSON" and entry.value:
+                cfg = json.loads(entry.value)
+                cfg["model_id"] = "cursor-local"
+                entry.value = json.dumps(cfg)
+        self.session.commit()
+
         with patch.dict(
             "os.environ",
             {

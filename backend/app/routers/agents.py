@@ -222,6 +222,8 @@ class AgentResponse(BaseModel):
     model_id: str | None = None
     allowed_model_ids: list[str] = []
     provider: str = "bedrock"
+    template_id: str | None = None
+    system_prompt: str | None = None
     base_url: str | None = None
     deployed_at: str | None = None
     harness_id: str | None = None
@@ -342,6 +344,8 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     model_id = None
     provider = "bedrock"
     base_url = None
+    template_id = None
+    system_prompt = None
     memory_names: list[str] = []
     mcp_names: list[str] = []
     a2a_names: list[str] = []
@@ -353,6 +357,8 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
                 model_id = config.get("model_id")
                 provider = config.get("provider") or "bedrock"
                 base_url = config.get("base_url") or None
+                template_id = config.get("template_id") or None
+                system_prompt = config.get("system_prompt") or None
 
                 # Extract integration names from config
                 integrations = config.get("integrations", {})
@@ -440,6 +446,8 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
         allowed_model_ids=allowed_models,
         provider=provider,
         base_url=base_url,
+        template_id=template_id,
+        system_prompt=system_prompt,
         active_session_count=compute_active_session_count(agent.id, db),
         memory_names=memory_names,
         mcp_names=mcp_names,

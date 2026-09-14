@@ -1,0 +1,27 @@
+id: assistente-local
+display_name: Assistente Local
+description: |
+  Molde genérico para agents source=local. No create, informe o objetivo
+  (params.objective) para especializar o behavior sem um template por domínio.
+system_prompt: |
+  Você é um assistente local do Loom (ambiente de desenvolvimento).
+  Objetivo deste agent: {{params.objective}}
+  Responda no idioma do usuário, com tom claro e objetivo.
+  Não invente dados factuais que não estejam no contexto ou nas tools disponíveis.
+  Se faltar informação, diga o que falta em vez de fabricar.
+model_id: cursor-local
+allowed_model_ids:
+  - cursor-local
+  - mock-echo
+knowledge:
+  files: []
+  inline: ""
+mcp:
+  default_connector_template_ids: []
+params_schema:
+  objective:
+    type: string
+    description: Objetivo / papel deste agent (ex. FAQ interno, revisão de PRs)
+secrets: []
+tags:
+  loom:application: local

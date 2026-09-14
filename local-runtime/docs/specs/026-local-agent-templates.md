@@ -1,8 +1,8 @@
 # Spec 026 — Templates de agents locais
 
-- **Status:** A1 implementado (loader + `guia-biblioteca.yaml`; A2+ pendente)
+- **Status:** A2 em curso (create/edit local via BFF/UI; A1 loader ok)
 - **Data:** 2026-09-14
-- **Atualizado:** 2026-09-14 — A1 loader/tests
+- **Atualizado:** 2026-09-14 — A2 create `/api/agents/local` + template genérico `assistente-local`
 - **Implementa:** [ADR 0013](../adr/0013-local-agent-templates-worker-pool.md)
 - **Depende de:** [ADR 0005](../adr/0005-local-agent-runtime.md),
   [Spec 011 — contrato](011-local-agent-runtime-contract.md),
@@ -30,34 +30,26 @@ local-runtime/services/agent-runtime/templates/*.yaml
 
 ## 3. Schema YAML (v1)
 
-Exemplo **fictício** (não é um agent de produção do fork):
+Exemplo **genérico** (um molde → vários agents com objetivos diferentes via `params`):
 
 ```yaml
-id: guia-biblioteca                 # slug estável = template_id
-display_name: Guia da Biblioteca
+id: assistente-local
+display_name: Assistente Local
 description: |
-  Atendente fictício de uma biblioteca municipal de demonstração.
+  Molde genérico para agents source=local.
 system_prompt: |
-  Você é o Guia da Biblioteca Municipal de Demonstração.
-  Responda em português do Brasil, tom cordial e objetivo.
-  Quando pedirem dados do acervo demo, use knowledge.files
-  (se o modelo tiver tools de FS) ou knowledge.inline se estiver setado.
-  Não invente empréstimos reais nem altere fichas de leitores.
-model_id: cursor-local              # default LiteLLM model id
+  Você é um assistente local do Loom.
+  Objetivo deste agent: {{params.objective}}
+model_id: cursor-local
 allowed_model_ids:
   - cursor-local
   - mock-echo
-knowledge:                          # opcional — NÃO é AgentCore Memory
-  files:                            # paths relativos ao workspace do adapter (dev)
-    - acervo-faq.txt
-  inline: ""                        # trecho opcional injetado no system prompt no resolve
-mcp:
-  # template_ids ou nomes do catálogo Loom que o BFF pode anexar por default
-  default_connector_template_ids: []
-params_schema: {}                   # params de instanciação (futuro)
-secrets: []                         # refs env (futuro)
+params_schema:
+  objective:
+    type: string
+    description: Objetivo / papel deste agent
 tags:
-  loom:application: demo
+  loom:application: local
 ```
 
 Regras:
@@ -105,13 +97,12 @@ templates/*.yaml  →  create / seed / update  →  row em agents + AGENT_CONFIG
 invoke usa a config materializada; “reset to template” relê o YAML
 ```
 
-## 6. UX (alvo A2)
+## 6. UX (alvo A2) — implementado
 
-- Create local: escolher template → params → Save (sem Agent Behavior
-  do formulário harness como único caminho).
-- Detail local: editar behavior = editar override do prompt (ou
-  “reset to template”).
-- Lista: badge `LOCAL` + nome do template.
+- Agents → Add → aba **Local**: escolher template → params (`objective`) → Create
+- Detail local: editar behavior + **Reset to template**
+- APIs: `GET /api/agents/local-templates`, `POST /api/agents/local`,
+  `POST /api/agents/{id}/local-behavior`
 
 ## 7. Migração de seeds existentes
 
@@ -126,11 +117,17 @@ invoke usa a config materializada; “reset to template” relê o YAML
 ## 8. Critérios de aceite (A1)
 
 - [x] Diretório `templates/` + pelo menos um YAML de exemplo
-      (ex. `guia-biblioteca.yaml`)
+      (ex. `assistente-local.yaml`)
 - [x] Loader allowlist (id desconhecido → erro claro)
 - [x] Teste unitário: parse + reject schema inválido
 - [x] Docs: ADR 0013 + este spec + entrada changelog
 - [x] Sem mudança obrigatória de Core nesta fase
+
+### A2
+
+- [x] Create local via BFF/UI a partir do template
+- [x] Edit behavior + reset to template no Detail
+- [x] Template genérico com `params.objective`
 
 ## 9. Não fazer
 

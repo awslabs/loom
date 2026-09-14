@@ -8,11 +8,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
+from agent_runtime.adapters.outbound.yaml_agent_templates import (
+    get_template,
+    public_templates,
+)
 from agent_runtime.application.ports import LlmGateway, McpToolsClient, SessionStore
 from agent_runtime.application.use_cases.invoke import run_invoke
 from agent_runtime.application.wiring import default_llm, default_mcp, default_sessions
+from agent_runtime.domain.agent_template import materialize_agent_config
 from agent_runtime.domain.contract import CONTRACT_VERSION, SUPPORTED_CONTRACTS, validate_payload
-from agent_runtime.domain.errors import AgentRuntimeError
+from agent_runtime.domain.errors import AgentRuntimeError, TemplateError
 
 logger = logging.getLogger("agent_runtime")
 
@@ -61,6 +66,34 @@ class RuntimeHandler(BaseHTTPRequestHandler):
                 "contract_versions": sorted(SUPPORTED_CONTRACTS),
             })
             return
+        if path == "/v1/templates" or path.startswith("/v1/templates/"):
+            if not _authorized(self):
+                _json(self, 401, {"error": {"message": "unauthorized", "code": "runtime_auth"}})
+                return
+            if path == "/v1/templates":
+                _json(self, 200, {"templates": public_templates()})
+                return
+            template_id = path.rstrip("/").split("/")[-1]
+            if template_id == "materialize":
+                _json(self, 405, {"error": {"message": "use POST", "code": "method_not_allowed"}})
+                return
+            try:
+                template = get_template(template_id)
+            except TemplateError as exc:
+                _json(self, 404, {"error": {"message": str(exc), "code": "unknown_template"}})
+                return
+            _json(self, 200, {
+                "id": template.id,
+                "display_name": template.display_name,
+                "description": template.description,
+                "model_id": template.model_id,
+                "allowed_model_ids": list(template.allowed_model_ids),
+                "params_schema": template.params_schema,
+                "secrets": list(template.secrets),
+                "tags": dict(template.tags),
+                "knowledge_files": list(template.knowledge_files),
+            })
+            return
         _json(self, 404, {"error": {"message": "not_found"}})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -80,6 +113,25 @@ class RuntimeHandler(BaseHTTPRequestHandler):
             session_id = path.split("/")[3]
             cancelled = self.sessions.cancel(session_id)
             _json(self, 200, {"cancelled": cancelled, "session_id": session_id})
+            return
+
+        if path.startswith("/v1/templates/") and path.endswith("/materialize"):
+            template_id = path.split("/")[3]
+            try:
+                template = get_template(template_id)
+                config = materialize_agent_config(
+                    template,
+                    params=body.get("params") if isinstance(body, dict) else None,
+                    system_prompt_override=(
+                        body.get("system_prompt_override")
+                        if isinstance(body, dict)
+                        else None
+                    ),
+                )
+            except TemplateError as exc:
+                _json(self, 400, {"error": {"message": str(exc), "code": "template_error"}})
+                return
+            _json(self, 200, {"template_id": template_id, "config": config})
             return
 
         if path != "/v1/invoke":

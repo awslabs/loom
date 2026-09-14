@@ -8,6 +8,7 @@ from typing import Any
 from agent_runtime.domain.errors import TemplateError
 
 TEMPLATE_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
+PARAM_PLACEHOLDER = re.compile(r"\{\{params\.([A-Za-z_][A-Za-z0-9_]*)\}\}")
 
 
 @dataclass(frozen=True)
@@ -126,17 +127,50 @@ def parse_agent_template(data: dict[str, Any]) -> AgentTemplate:
     )
 
 
+def validate_params(template: AgentTemplate, params: dict[str, Any] | None) -> dict[str, str]:
+    """Require every params_schema key; reject extras and shell metacharacters."""
+    raw = params or {}
+    if not isinstance(raw, dict):
+        raise TemplateError("params must be a mapping")
+    cleaned: dict[str, str] = {}
+    schema = template.params_schema
+    for key in schema:
+        if key not in raw or raw[key] in (None, ""):
+            raise TemplateError(f"missing param {key!r}")
+        value = str(raw[key]).strip()
+        if any(token in value for token in (";", "|", "&", "`", "$", "\n")):
+            raise TemplateError(f"param {key!r} contains forbidden characters")
+        cleaned[key] = value
+    extra = set(raw) - set(schema)
+    if extra:
+        raise TemplateError(f"unexpected params: {sorted(extra)}")
+    return cleaned
+
+
+def _apply_params(text: str, params: dict[str, str], *, kind: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in params:
+            raise TemplateError(f"{kind} references unknown param {name!r}")
+        return params[name]
+
+    return PARAM_PLACEHOLDER.sub(_replace, text)
+
+
 def resolve_system_prompt(
     template: AgentTemplate,
     *,
+    params: dict[str, str] | None = None,
     override: str | None = None,
 ) -> str:
-    """Effective system prompt: persisted override wins; else template + inline knowledge."""
+    """Effective system prompt: override wins; else template with params + inline."""
     if isinstance(override, str) and override.strip():
         return override.strip()
-    prompt = template.system_prompt
+    cleaned = params if params is not None else validate_params(template, {})
+    prompt = _apply_params(template.system_prompt, cleaned, kind="system_prompt")
     inline = template.knowledge_inline.strip()
     if inline:
+        inline = _apply_params(inline, cleaned, kind="knowledge.inline")
         return f"{prompt.rstrip()}\n\n{inline}"
     return prompt
 
@@ -144,16 +178,19 @@ def resolve_system_prompt(
 def materialize_agent_config(
     template: AgentTemplate,
     *,
+    params: dict[str, Any] | None = None,
     system_prompt_override: str | None = None,
 ) -> dict[str, Any]:
     """Shape suitable for AGENT_CONFIG_JSON materialization (Spec 026 §5)."""
+    cleaned = validate_params(template, params)
     return {
         "template_id": template.id,
+        "template_params": cleaned,
         "model_id": template.model_id,
         "provider": "litellm",
         "base_url": "",
         "system_prompt": resolve_system_prompt(
-            template, override=system_prompt_override
+            template, params=cleaned, override=system_prompt_override
         ),
         "allowed_model_ids": list(template.allowed_model_ids),
         "knowledge": {

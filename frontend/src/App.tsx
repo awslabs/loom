@@ -775,6 +775,7 @@ function AppContent() {
                   onRegister={registerAgent}
                   onDeploy={deployAgent}
                   onDeployHarness={deployHarnessAgent}
+                  onLocalCreated={fetchAgents}
                   onSelectAgent={handleSelectAgent}
                   onRefreshAgent={refreshAgent}
                   onDelete={handleDelete}

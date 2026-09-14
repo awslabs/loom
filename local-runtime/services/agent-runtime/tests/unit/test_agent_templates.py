@@ -11,6 +11,7 @@ from agent_runtime.domain.agent_template import (
     materialize_agent_config,
     parse_agent_template,
     resolve_system_prompt,
+    validate_params,
 )
 from agent_runtime.domain.errors import TemplateError
 
@@ -19,19 +20,27 @@ class TestAgentTemplates(unittest.TestCase):
     def test_templates_dir_points_at_service_allowlist(self) -> None:
         root = Path(__file__).resolve().parents[2] / "templates"
         self.assertEqual(templates_dir().resolve(), root.resolve())
-        self.assertTrue((root / "guia-biblioteca.yaml").is_file())
+        self.assertTrue((root / "assistente-local.yaml").is_file())
 
-    def test_loads_guia_biblioteca(self) -> None:
-        template = get_template("guia-biblioteca")
-        self.assertEqual(template.display_name, "Guia da Biblioteca")
+    def test_loads_assistente_local(self) -> None:
+        template = get_template("assistente-local")
+        self.assertEqual(template.display_name, "Assistente Local")
         self.assertEqual(template.model_id, "cursor-local")
-        self.assertIn("cursor-local", template.allowed_model_ids)
-        self.assertIn("acervo-faq.txt", template.knowledge_files)
-        self.assertIn("Biblioteca Municipal", template.system_prompt)
+        self.assertIn("objective", template.params_schema)
 
-    def test_load_templates_includes_example(self) -> None:
-        found = load_templates()
-        self.assertIn("guia-biblioteca", found)
+    def test_materialize_applies_objective(self) -> None:
+        template = get_template("assistente-local")
+        config = materialize_agent_config(
+            template, params={"objective": "Responder FAQ interno da equipe"}
+        )
+        self.assertEqual(config["template_id"], "assistente-local")
+        self.assertIn("FAQ interno", config["system_prompt"])
+        self.assertEqual(config["template_params"]["objective"], "Responder FAQ interno da equipe")
+
+    def test_rejects_missing_required_param(self) -> None:
+        template = get_template("assistente-local")
+        with self.assertRaises(TemplateError):
+            validate_params(template, {})
 
     def test_rejects_unknown_template(self) -> None:
         with self.assertRaises(TemplateError) as ctx:
@@ -54,41 +63,24 @@ class TestAgentTemplates(unittest.TestCase):
                 "system_prompt": "ok",
             })
 
-    def test_rejects_model_not_in_allowed(self) -> None:
-        with self.assertRaises(TemplateError):
-            parse_agent_template({
-                "id": "demo-agent",
-                "model_id": "cursor-local",
-                "allowed_model_ids": ["mock-echo"],
-                "system_prompt": "ok",
-            })
-
-    def test_resolve_prompt_override_and_inline(self) -> None:
-        base = parse_agent_template({
-            "id": "demo-agent",
-            "model_id": "mock-echo",
-            "system_prompt": "Base prompt.",
-            "knowledge": {"inline": "FAQ: horário 9–17."},
-        })
-        self.assertIn("FAQ:", resolve_system_prompt(base))
-        self.assertEqual(
-            resolve_system_prompt(base, override="  Override only.  "),
-            "Override only.",
+    def test_override_wins_over_template(self) -> None:
+        template = get_template("assistente-local")
+        text = resolve_system_prompt(
+            template,
+            params={"objective": "X"},
+            override="  Prompt customizado.  ",
         )
+        self.assertEqual(text, "Prompt customizado.")
 
-    def test_materialize_config_shape(self) -> None:
-        template = get_template("guia-biblioteca")
-        config = materialize_agent_config(template)
-        self.assertEqual(config["template_id"], "guia-biblioteca")
-        self.assertEqual(config["provider"], "litellm")
-        self.assertTrue(config["system_prompt"])
-        self.assertEqual(config["knowledge"]["files"], ["acervo-faq.txt"])
-
-    def test_public_templates_omit_secret_values(self) -> None:
+    def test_public_templates_omit_system_prompt(self) -> None:
         rows = public_templates()
-        self.assertTrue(any(row["id"] == "guia-biblioteca" for row in rows))
+        self.assertTrue(any(row["id"] == "assistente-local" for row in rows))
         for row in rows:
             self.assertNotIn("system_prompt", row)
+            self.assertIn("params_schema", row)
+
+    def test_load_templates_includes_example(self) -> None:
+        self.assertIn("assistente-local", load_templates())
 
 
 if __name__ == "__main__":

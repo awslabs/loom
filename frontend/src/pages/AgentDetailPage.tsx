@@ -18,6 +18,7 @@ import { InvokePanel } from "@/components/InvokePanel";
 import { LatencySummary } from "@/components/LatencySummary";
 import { SessionTable } from "@/components/SessionTable";
 import { DeploymentPanel } from "@/components/DeploymentPanel";
+import { updateLocalAgentBehavior } from "@/api/agents";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
 import { RegistryActions } from "@/components/RegistryActions";
 import { ExternalIntegrationSection } from "@/components/ExternalIntegrationSection";
@@ -207,6 +208,9 @@ export function AgentDetailPage({
               <div className="pt-2">
                 <RegisteredAgentModelConfig agent={agent} onPatchAgent={onPatchAgent} />
               </div>
+            )}
+            {agent.source === "local" && onRefreshAgents && (
+              <LocalAgentBehaviorSection agent={agent} onRefreshAgents={onRefreshAgents} />
             )}
           </CardContent>
         </Card>
@@ -455,6 +459,74 @@ function ToolUseBlock({ tools, isActive }: { tools: { name: string; index: numbe
       {tools.map((t, i) => (
         <div key={i} className="pl-[18px] font-medium text-foreground/70">{formatToolName(t.name)}</div>
       ))}
+    </div>
+  );
+}
+
+function LocalAgentBehaviorSection({
+  agent,
+  onRefreshAgents,
+}: {
+  agent: AgentResponse;
+  onRefreshAgents: () => void;
+}) {
+  const [draft, setDraft] = useState(agent.system_prompt ?? "");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setDraft(agent.system_prompt ?? "");
+  }, [agent.id, agent.system_prompt]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await updateLocalAgentBehavior(agent.id, { system_prompt: draft });
+      onRefreshAgents();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reset = async () => {
+    setSaving(true);
+    try {
+      await updateLocalAgentBehavior(agent.id, { reset_to_template: true });
+      onRefreshAgents();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="pt-3 space-y-2 border-t">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium text-foreground">Behavior (system prompt)</span>
+        {agent.template_id ? (
+          <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+            template: {agent.template_id}
+          </Badge>
+        ) : null}
+      </div>
+      <Textarea
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        rows={6}
+        className="text-xs font-mono"
+      />
+      <div className="flex gap-2">
+        <Button size="sm" className="h-6 text-xs" onClick={() => void save()} disabled={saving}>
+          Save behavior
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 text-xs"
+          onClick={() => void reset()}
+          disabled={saving || !agent.template_id}
+        >
+          Reset to template
+        </Button>
+      </div>
     </div>
   );
 }

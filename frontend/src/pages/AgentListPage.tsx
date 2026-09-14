@@ -14,6 +14,7 @@ import {
 import { MultiSelect } from "@/components/ui/multi-select";
 import { AddFilterDropdown } from "@/components/ui/add-filter-dropdown";
 import { AgentRegistrationForm } from "@/components/AgentRegistrationForm";
+import { LocalAgentCreateForm } from "@/components/LocalAgentCreateForm";
 import { AgentCard } from "@/components/AgentCard";
 import { SortableCardGrid, SortButton, loadSortDirection, toggleSortDirection, saveSortDirection, type SortDirection } from "@/components/SortableCardGrid";
 import { SortableTableHead, sortRows } from "@/components/SortableTableHead";
@@ -27,7 +28,7 @@ import { listTagPolicies, getRegistryConfig } from "@/api/settings";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
 import type { AgentDeployRequest, AgentHarnessDeployRequest, AgentResponse, TagPolicy } from "@/api/types";
 
-type BuilderTab = "register" | "deploy";
+type BuilderTab = "register" | "deploy" | "local";
 
 interface AgentListPageProps {
   agents: AgentResponse[];
@@ -37,6 +38,7 @@ interface AgentListPageProps {
   onRegister: (arn: string, modelId?: string) => Promise<unknown>;
   onDeploy?: (request: AgentDeployRequest, existingAgentId?: number) => Promise<unknown>;
   onDeployHarness?: (request: AgentHarnessDeployRequest, existingAgentId?: number) => Promise<unknown>;
+  onLocalCreated?: () => Promise<unknown> | unknown;
   onSelectAgent: (id: number) => void;
   onRefreshAgent: (id: number) => void;
   onDelete: (id: number, cleanupAws: boolean) => void;
@@ -56,6 +58,7 @@ export function AgentListPage({
   onRegister,
   onDeploy,
   onDeployHarness,
+  onLocalCreated,
   onSelectAgent,
   onRefreshAgent: _onRefreshAgent,
   onDelete,
@@ -225,14 +228,14 @@ export function AgentListPage({
           <Card>
             <CardContent className="pt-4 space-y-3">
               <div className="flex rounded-md border text-sm w-fit" role="tablist">
-                {(["deploy", "register"] as const).map((tab) => (
+                {(["deploy", "register", "local"] as const).map((tab, index, arr) => (
                   <button
                     key={tab}
                     type="button"
                     role="tab"
                     aria-selected={activeTab === tab}
                     className={`px-4 py-1.5 transition-colors ${
-                      tab === "deploy" ? "rounded-l-md" : "rounded-r-md"
+                      index === 0 ? "rounded-l-md" : index === arr.length - 1 ? "rounded-r-md" : ""
                     } ${
                       activeTab === tab
                         ? "bg-primary text-primary-foreground"
@@ -240,21 +243,31 @@ export function AgentListPage({
                     }`}
                     onClick={() => setActiveTab(tab)}
                   >
-                    {tab === "deploy" ? "Deploy" : "Import"}
+                    {tab === "deploy" ? "Deploy" : tab === "register" ? "Import" : "Local"}
                   </button>
                 ))}
               </div>
 
-              <AgentRegistrationForm
-                mode={activeTab}
-                onRegister={handleRegister}
-                onDeploy={onDeploy ? handleDeploy : undefined}
-                onDeployHarness={onDeployHarness ? handleDeployHarness : undefined}
-                isLoading={submitting}
-                groupRestriction={groupRestriction}
-                ownerRestriction={ownerRestriction}
-                exportAgentId={exportAgentId}
-              />
+              {activeTab === "local" ? (
+                <LocalAgentCreateForm
+                  onCreated={async () => {
+                    await onLocalCreated?.();
+                    setShowAddForm(false);
+                  }}
+                  isLoading={submitting}
+                />
+              ) : (
+                <AgentRegistrationForm
+                  mode={activeTab}
+                  onRegister={handleRegister}
+                  onDeploy={onDeploy ? handleDeploy : undefined}
+                  onDeployHarness={onDeployHarness ? handleDeployHarness : undefined}
+                  isLoading={submitting}
+                  groupRestriction={groupRestriction}
+                  ownerRestriction={ownerRestriction}
+                  exportAgentId={exportAgentId}
+                />
+              )}
             </CardContent>
           </Card>
         )}

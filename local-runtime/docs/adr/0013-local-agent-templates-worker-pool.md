@@ -92,7 +92,7 @@ flowchart TB
 ```mermaid
 flowchart LR
   subgraph catalog["Catalogo — N agents"]
-    a1["Guia Biblioteca<br/>source=local"]
+    a1["Assistente Local<br/>source=local"]
     a2["Outro local"]
   end
 
@@ -118,11 +118,11 @@ Allowlist YAML sob a extension (dono: **agent-runtime**), análogo a
   MCP/templates referenciáveis, params/secrets schema;
 - create/edit local = escolher template + params (aí entra behavior na
   UX), sem depender do formulário AgentCore;
-- seed de demo migra para template (ex. `guia-biblioteca`).
+- seed de demo migra para template (ex. `assistente-local` + params).
 
 ```mermaid
 flowchart TB
-  yaml["guia-biblioteca.yaml<br/>system_prompt, model_id, knowledge"]
+  yaml["assistente-local.yaml<br/>system_prompt + params.objective"]
   reg["agents row<br/>source=local<br/>template_id"]
   inv["Invoke"]
   bff["BFF resolve<br/>prompt efetivo"]
@@ -204,8 +204,8 @@ flowchart TB
 | Fase | Entrega |
 |------|---------|
 | **A0** | Pool no compose (`AGENT_RUNTIME_REPLICAS≥2`); SSE `Connection: close` — *feito / em curso* |
-| **A1** | Spec templates + schema YAML + template de exemplo (`guia-biblioteca`) — **feito** (loader) |
-| **A2** | Registro create local a partir de template (BFF/UI — Core só com ok do Dev) |
+| **A1** | Spec templates + schema YAML + template de exemplo — **feito** (loader) |
+| **A2** | Registro create local a partir de template (BFF/UI) — **feito** (`assistente-local` + `/api/agents/local`) |
 | **A3** | Deployment K8s do mesmo contrato HTTP + HPA |
 | **A4** | (Opcional) isolamento mais forte / multi-tenant limits |
 

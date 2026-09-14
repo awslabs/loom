@@ -144,6 +144,46 @@ export function fetchLitellmModels(): Promise<ModelOption[]> {
   return apiFetch<ModelOption[]>("/api/agents/models/litellm");
 }
 
+export interface LocalAgentTemplate {
+  id: string;
+  display_name: string;
+  description?: string;
+  model_id: string;
+  allowed_model_ids: string[];
+  params_schema: Record<string, { type?: string; description?: string }>;
+  secrets?: { name: string; env: string }[];
+  tags?: Record<string, string>;
+  knowledge_files?: string[];
+}
+
+export function fetchLocalAgentTemplates(): Promise<{ templates: LocalAgentTemplate[] }> {
+  return apiFetch<{ templates: LocalAgentTemplate[] }>("/api/agents/local-templates");
+}
+
+export function createLocalAgent(body: {
+  template_id: string;
+  name: string;
+  description?: string;
+  params?: Record<string, string>;
+  system_prompt_override?: string;
+  tags?: Record<string, string>;
+}): Promise<AgentResponse> {
+  return apiFetch<AgentResponse>("/api/agents/local", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateLocalAgentBehavior(
+  id: number,
+  body: { system_prompt?: string; reset_to_template?: boolean },
+): Promise<AgentResponse> {
+  return apiFetch<AgentResponse>(`/api/agents/${id}/local-behavior`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 /** Bedrock + LiteLLM catalogs. `/models` is Bedrock-only; LiteLLM is on-demand. */
 export async function fetchAllModelOptions(): Promise<ModelOption[]> {
   const [bedrockModels, litellmModels] = await Promise.all([

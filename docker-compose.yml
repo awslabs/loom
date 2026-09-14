@@ -1,0 +1,181 @@
+# Local development stack for Loom.
+#
+# LOCAL DEVELOPMENT ONLY. Every credential in this file is a throwaway development
+# value and must never be reused in a deployed environment, where they belong in AWS
+# Secrets Manager. All URLs are plain http, which is only acceptable because nothing
+# here leaves the developer's machine.
+#
+# Run it with `make local.up` from the repository root.
+#
+# What works fully offline: login through Keycloak, group-to-scope authorization, the
+# whole UI, admin settings, persistence, the LiteLLM proxy, and invoke of source=local
+# agents (seeded Orientador Acadêmico → LiteLLM mock). Still needs real AWS: deploying
+# and invoking AgentCore/harness/register agents, memory, S3.
+# cursor-adapter and mcp-runtime live in local-runtime/compose/overlay.yml
+# (make local.up merges both compose files). Completions still need CURSOR_API_KEY.
+# Stdio MCP children need a template + MCP_RUNTIME_TOKEN in the overlay.
+
+name: loom
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    # Docker Desktop and WSL stop the daemon when the host session ends; without a restart
+    # policy the whole stack has to be brought up by hand every time.
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: loom
+      POSTGRES_PASSWORD: loom-local-dev
+      POSTGRES_DB: loom
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Creates the separate keycloak role and database on first initialisation only.
+      - ./etc/docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loom -d loom"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.6
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak-local-dev
+      # Fixes the issuer to the URL the browser uses. Tokens carry this as `iss`, so the
+      # backend reaches Keycloak at a different address (see LOOM_IDP_BOOTSTRAP_INTERNAL_BASE_URL).
+      # Leave KC_HOSTNAME_BACKCHANNEL_DYNAMIC off: with it on, discovery advertises the
+      # token endpoint at the address the backend used to fetch it, which the browser
+      # cannot resolve. The backend rewrites only the JWKS URL onto its internal base.
+      KC_HOSTNAME: http://localhost:8081
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./etc/docker/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      # Checks the realm's discovery document rather than just the port, so dependents
+      # only start once the realm import has actually finished.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080; printf 'GET /realms/loom/.well-known/openid-configuration HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q jwks_uri <&3"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  backend:
+    # The build context must be the repository root: the Dockerfile also copies
+    # agents/*/src, which the agent artifact builder resolves relative to /.
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOOM_DATABASE_URL: postgresql+psycopg2://loom:loom-local-dev@postgres:5432/loom
+      LOOM_BACKEND_PORT: "8000"
+      LOOM_FRONTEND_PORT: "5173"
+      LOOM_ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      LOOM_OIDC_REDIRECT_URI: http://localhost:5173/oauth/callback
+      # Seeds the active identity provider. Without this the first provider could only be
+      # registered through an endpoint that already requires an authenticated admin.
+      LOOM_IDP_BOOTSTRAP_NAME: keycloak-local
+      LOOM_IDP_BOOTSTRAP_TYPE: keycloak
+      LOOM_IDP_BOOTSTRAP_ISSUER_URL: http://localhost:8081/realms/loom
+      LOOM_IDP_BOOTSTRAP_INTERNAL_BASE_URL: http://keycloak:8080/realms/loom
+      LOOM_IDP_BOOTSTRAP_CLIENT_ID: loom-frontend
+      LOOM_IDP_BOOTSTRAP_CLIENT_TYPE: public
+      LOOM_IDP_BOOTSTRAP_AUDIENCE: loom-frontend
+      LOOM_IDP_BOOTSTRAP_GROUP_CLAIM_PATH: groups
+      LOOM_IDP_BOOTSTRAP_SCOPES: openid profile email
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      # LiteLLM is the only LLM gateway the backend talks to (ADR 0003). Discovery
+      # is the in-compose URL; the agent-facing URL is the host port for Settings.
+      LOOM_LITELLM_PROXY_BASE_URL: http://localhost:4000
+      LOOM_LITELLM_DISCOVERY_BASE_URL: http://litellm:4000
+      LOOM_LITELLM_PROXY_API_KEY: ${LITELLM_MASTER_KEY:-sk-loom-local-dev}
+      # MCP_RUNTIME_* injected by local-runtime/compose/overlay.yml
+      # Bind-mounted source lives on a filesystem whose change events do not reach the
+      # container, so the reloader has to poll.
+      WATCHFILES_FORCE_POLLING: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app:ro
+      # Point LOOM_AWS_CREDS_DIR at your real ~/.aws to exercise AWS-backed features.
+      - ${LOOM_AWS_CREDS_DIR:-./etc/docker/aws}:/home/appuser/.aws:ro
+
+  frontend:
+    image: node:20-alpine
+    restart: unless-stopped
+    working_dir: /app
+    command:
+      - sh
+      - -c
+      # Checks the executable rather than the package directory: an install interrupted
+      # halfway leaves the directory behind without a usable binary.
+      - "if [ ! -x node_modules/.bin/vite ]; then npm ci --no-audit --no-fund; fi && npm run dev -- --host 0.0.0.0 --port 5173"
+    depends_on:
+      - backend
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+      VITE_USE_POLLING: "true"
+      # Extension Host resolves @loom-ext/local-runtime to this mount.
+      LOOM_EXT_LOCAL_RUNTIME: /app/extensions/local-runtime
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - ./local-runtime/plugin:/app/extensions/local-runtime:ro
+      # Keeps the host's node_modules (possibly built for another platform) out of the way.
+      - frontend-node-modules:/app/node_modules
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    restart: unless-stopped
+    command: ["--config", "/litellm/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    depends_on:
+      cursor-adapter:
+        condition: service_healthy
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-loom-local-dev}
+      CURSOR_ADAPTER_URL: http://cursor-adapter:8765
+      # Do not bind-mount over /app — that hides the image entrypoint.
+      PYTHONPATH: /litellm
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./etc/docker/litellm:/litellm:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; r=urllib.request.Request('http://127.0.0.1:4000/health/liveliness'); sys.exit(0 if urllib.request.urlopen(r, timeout=3).status==200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  postgres-data:
+  frontend-node-modules:

@@ -292,7 +292,7 @@ class TestIdentityProviderCRUD(unittest.TestCase):
 
     @patch("app.routers.identity_providers.delete_secret")
     @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
-    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    @patch("app.services.idp_discovery.fetch_discovery", return_value=MOCK_DISCOVERY)
     def test_create_idp(self, mock_disc, mock_store, mock_del):
         resp = self.client.post("/api/settings/identity-providers", json=self._idp_payload())
         self.assertEqual(resp.status_code, 201)
@@ -306,7 +306,7 @@ class TestIdentityProviderCRUD(unittest.TestCase):
 
     @patch("app.routers.identity_providers.delete_secret")
     @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
-    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    @patch("app.services.idp_discovery.fetch_discovery", return_value=MOCK_DISCOVERY)
     def test_list_and_get_idp(self, mock_disc, mock_store, mock_del):
         self.client.post("/api/settings/identity-providers", json=self._idp_payload())
 
@@ -325,7 +325,7 @@ class TestIdentityProviderCRUD(unittest.TestCase):
 
     @patch("app.routers.identity_providers.delete_secret")
     @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
-    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    @patch("app.services.idp_discovery.fetch_discovery", return_value=MOCK_DISCOVERY)
     def test_update_idp(self, mock_disc, mock_store, mock_del):
         resp = self.client.post("/api/settings/identity-providers", json=self._idp_payload())
         idp_id = resp.json()["id"]
@@ -336,7 +336,7 @@ class TestIdentityProviderCRUD(unittest.TestCase):
 
     @patch("app.routers.identity_providers.delete_secret")
     @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
-    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    @patch("app.services.idp_discovery.fetch_discovery", return_value=MOCK_DISCOVERY)
     def test_delete_idp(self, mock_disc, mock_store, mock_del):
         resp = self.client.post("/api/settings/identity-providers", json=self._idp_payload())
         idp_id = resp.json()["id"]
@@ -351,7 +351,7 @@ class TestIdentityProviderCRUD(unittest.TestCase):
 
     @patch("app.routers.identity_providers.delete_secret")
     @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
-    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    @patch("app.services.idp_discovery.fetch_discovery", return_value=MOCK_DISCOVERY)
     def test_only_one_active_idp(self, mock_disc, mock_store, mock_del):
         """Creating a second active IdP should deactivate the first."""
         self.client.post("/api/settings/identity-providers", json=self._idp_payload(name="idp-1", status="active"))
@@ -366,7 +366,7 @@ class TestIdentityProviderCRUD(unittest.TestCase):
         self.assertEqual(len(inactive), 1)
         self.assertEqual(inactive[0]["name"], "idp-1")
 
-    @patch("app.routers.identity_providers.fetch_discovery", side_effect=OIDCDiscoveryError("unreachable"))
+    @patch("app.services.idp_discovery.fetch_discovery", side_effect=OIDCDiscoveryError("unreachable"))
     def test_create_idp_discovery_failure(self, mock_disc):
         resp = self.client.post("/api/settings/identity-providers", json=self._idp_payload(client_secret=None))
         self.assertEqual(resp.status_code, 422)

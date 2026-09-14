@@ -150,6 +150,9 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
                   delegation_mode: editingServer.delegation_mode ?? undefined,
                   obo_grant_type: editingServer.obo_grant_type ?? undefined,
                   supports_elicitation: editingServer.supports_elicitation,
+                  template_id: editingServer.template_id ?? undefined,
+                  template_params: editingServer.template_params ?? undefined,
+                  secret_refs: editingServer.secret_refs ?? undefined,
                 }}
               />
             </CardContent>
@@ -324,7 +327,7 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
               <CardContent className="space-y-2 text-xs text-muted-foreground">
                 <div className="rounded border bg-input-bg p-3 space-y-0.5">
                   <div className="truncate" title={server.endpoint_url}><span className="text-muted-foreground/70">Endpoint:</span> {server.endpoint_url}</div>
-                  <div><span className="text-muted-foreground/70">Transport:</span> {server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</div>
+                  <div><span className="text-muted-foreground/70">Transport:</span> {server.transport_type === "stdio" ? "Stdio (local)" : server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</div>
                   <div><span className="text-muted-foreground/70">Authentication:</span> {server.auth_type === "oauth2" ? "OAuth2" : server.auth_type === "api_key" ? "API Key" : "None"}</div>
                   <div><span className="text-muted-foreground/70">Elicitation:</span> {server.supports_elicitation ? "Supported" : "Not supported"}</div>
                   {server.created_at && (
@@ -389,7 +392,7 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
                 >
                   <TableCell className="font-medium text-sm">{server.name}</TableCell>
                   <TableCell className="text-xs text-muted-foreground truncate">{server.endpoint_url}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{server.transport_type === "stdio" ? "Stdio (local)" : server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">{server.auth_type === "oauth2" ? "OAuth2" : server.auth_type === "api_key" ? "API Key" : "None"}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     <RegistryStatusBadge status={server.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />

@@ -5,7 +5,7 @@ import { Loader2, Pencil, Check, X } from "lucide-react";
 import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatTimestamp } from "@/lib/format";
 import { statusVariant } from "@/lib/status";
-import { fetchModels } from "@/api/agents";
+import { fetchAllModelOptions } from "@/api/agents";
 import type { AgentResponse, ModelOption } from "@/api/types";
 import { groupModels } from "@/lib/models";
 
@@ -48,7 +48,7 @@ export function DeploymentPanel({ agent, onPatchAgent }: DeploymentPanelProps) {
   const [allModels, setAllModels] = useState<ModelOption[]>([]);
 
   useEffect(() => {
-    fetchModels().then(setAllModels).catch(() => {});
+    fetchAllModelOptions().then(setAllModels).catch(() => {});
   }, []);
 
   const handleEditModels = () => {

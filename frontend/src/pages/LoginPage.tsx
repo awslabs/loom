@@ -4,13 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { CognitoAuthResult } from "@/api/auth";
-
-const PROVIDER_LABELS: Record<string, string> = {
-  entra_id: "Microsoft Entra ID",
-  okta: "Okta",
-  auth0: "Auth0",
-  generic_oidc: "Single Sign-On",
-};
+import { providerLabel as descriptorLabel, usesRedirectLogin } from "@/auth/providers";
 
 export function LoginPage() {
   const { login, loginWithOIDC, completeNewPassword, authConfig, logoutIdP } = useAuth();
@@ -26,8 +20,8 @@ export function LoginPage() {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
 
-  const isExternalOIDC = authConfig?.provider_type && authConfig.provider_type !== "cognito";
-  const providerLabel = PROVIDER_LABELS[authConfig?.provider_type ?? ""] ?? "Single Sign-On";
+  const isExternalOIDC = usesRedirectLogin(authConfig);
+  const providerLabel = descriptorLabel(authConfig);
   const hasBothProviders = isExternalOIDC && authConfig?.user_pool_id;
   const lastOidcProvider = isExternalOIDC ? localStorage.getItem("loom_last_oidc_provider") : null;
   const lastOidcUser = isExternalOIDC && lastOidcProvider === authConfig?.provider_type

@@ -135,8 +135,16 @@ def _migrate_add_columns(eng) -> None:
         ("identity_providers", "token_endpoint", "VARCHAR"),
         ("identity_providers", "discovery_scopes", "TEXT"),
         ("identity_providers", "client_type", "VARCHAR"),
+        ("identity_providers", "internal_base_url", "VARCHAR"),
+        ("identity_providers", "end_session_endpoint", "VARCHAR"),
+        ("identity_providers", "refresh_enabled", "VARCHAR"),
+        ("identity_providers", "managed_by", "VARCHAR"),
         ("mcp_servers", "supports_elicitation", "VARCHAR"),
         ("mcp_servers", "runtime_endpoint_url", "VARCHAR"),
+        ("mcp_servers", "template_id", "VARCHAR"),
+        ("mcp_servers", "template_params", "TEXT"),
+        ("mcp_servers", "secret_refs", "TEXT"),
+        ("mcp_servers", "runtime_state", "VARCHAR"),
         ("mcp_servers", "delegation_mode", "VARCHAR DEFAULT 'm2m'"),
         ("a2a_agents", "delegation_mode", "VARCHAR DEFAULT 'm2m'"),
         ("mcp_servers", "obo_grant_type", "VARCHAR"),
@@ -279,3 +287,19 @@ def init_db() -> None:
     _backfill_session_users(engine)
     _seed_default_tags(engine)
     _seed_demo_tag_profiles(engine)
+    _bootstrap_identity_provider(engine)
+    _seed_local_demo_agents(engine)
+
+
+def _bootstrap_identity_provider(eng) -> None:
+    """Seed the active identity provider from environment configuration, if any."""
+    from app.services.idp_bootstrap import bootstrap_identity_provider
+
+    bootstrap_identity_provider(eng)
+
+
+def _seed_local_demo_agents(eng) -> None:
+    """Seed the local-only educational agent used to exercise LiteLLM invoke."""
+    from app.services.local_agents import seed_local_demo_agents
+
+    seed_local_demo_agents(eng)

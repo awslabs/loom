@@ -1,0 +1,2 @@
+Placeholder so the backend container always has a directory to mount at ~/.aws.
+Set LOOM_AWS_CREDS_DIR to your real ~/.aws when you need AWS-backed features.

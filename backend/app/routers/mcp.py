@@ -18,11 +18,23 @@ from app.services.mcp import test_mcp_connection as svc_test_connection
 from app.services.mcp import fetch_mcp_tools as svc_fetch_tools
 from app.services.mcp import invoke_mcp_tool as svc_invoke_tool
 from app.services.mcp import resolve_api_key
+from app.services.mcp_access import require_access_or_403, assert_tool_allowed, McpAccessDenied
+from app.services.mcp_runtime_client import (
+    McpRuntimeError,
+    ensure_stdio,
+    facade_url,
+    provision,
+    restart as runtime_restart,
+    stdio_user_message,
+    stop as runtime_stop,
+)
+from app.services.mcp_templates import catalog_secret_refs, public_templates, validate_or_400
 from app.services.secrets import store_secret, delete_secret
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mcp/servers", tags=["mcp"])
+templates_router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
 
 # ---------------------------------------------------------------------------
@@ -31,9 +43,12 @@ router = APIRouter(prefix="/api/mcp/servers", tags=["mcp"])
 class McpServerCreateRequest(BaseModel):
     name: str = Field(..., description="Server display name")
     description: str | None = Field(None, description="Server description")
-    endpoint_url: str = Field(..., description="MCP server endpoint URL")
-    transport_type: str = Field(..., description="Transport type: 'sse' or 'streamable_http'")
-    auth_type: str = Field(default="none", description="Auth type: 'none' or 'oauth2'")
+    endpoint_url: str | None = Field(None, description="MCP server endpoint URL")
+    transport_type: str = Field(..., description="Transport type: 'sse', 'streamable_http', or 'stdio'")
+    auth_type: str = Field(default="none", description="Auth type: 'none', 'oauth2', 'api_key', or 'loom'")
+    template_id: str | None = Field(None, description="Allowlisted template id (required for stdio)")
+    template_params: dict | None = Field(None, description="Non-secret template parameters")
+    secret_refs: list[dict] | None = Field(None, description="SecretReference list; values stay in the runtime")
     oauth2_well_known_url: str | None = Field(None, description="OAuth2 well-known URL")
     oauth2_client_id: str | None = Field(None, description="OAuth2 client ID")
     oauth2_client_secret: str | None = Field(None, description="OAuth2 client secret")
@@ -46,8 +61,24 @@ class McpServerCreateRequest(BaseModel):
     supports_elicitation: bool = Field(default=False, description="Whether this server supports MCP elicitation")
     runtime_endpoint_url: str | None = Field(None, description="Direct runtime URL for WebSocket elicitation (bypasses Gateway)")
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_freeform_command(cls, data):
+        if isinstance(data, dict) and ("command" in data or "args" in data):
+            raise ValueError("command and args are not accepted; use template_id")
+        return data
+
     @model_validator(mode="after")
     def validate_auth_fields(self):
+        if self.transport_type == "stdio":
+            if not self.template_id:
+                raise ValueError("template_id is required when transport_type is 'stdio'")
+            if not self.endpoint_url:
+                self.endpoint_url = ""
+            self.auth_type = "loom"
+            return self
+        if not self.endpoint_url:
+            raise ValueError("endpoint_url is required when transport_type is not stdio")
         if self.auth_type == "oauth2":
             if not self.oauth2_well_known_url:
                 raise ValueError("oauth2_well_known_url is required when auth_type is 'oauth2'")  # nosec B105 — validation error message, not a password
@@ -77,6 +108,9 @@ class McpServerUpdateRequest(BaseModel):
     api_key: str | None = None
     supports_elicitation: bool | None = None
     runtime_endpoint_url: str | None = None
+    template_id: str | None = None
+    template_params: dict | None = None
+    secret_refs: list[dict] | None = None
 
 
 class McpServerResponse(BaseModel):
@@ -98,6 +132,10 @@ class McpServerResponse(BaseModel):
     has_admin_api_key: bool = False
     supports_elicitation: bool = False
     runtime_endpoint_url: str | None = None
+    template_id: str | None = None
+    template_params: dict | None = None
+    secret_refs: list[dict] | None = None
+    runtime_state: str | None = None
     registry_record_id: str | None = None
     registry_status: str | None = None
     created_at: str | None = None
@@ -150,6 +188,7 @@ class TestConnectionResponse(BaseModel):
 class ToolInvokeRequest(BaseModel):
     tool_name: str = Field(..., description="Name of the tool to invoke")
     arguments: dict = Field(default_factory=dict, description="Arguments to pass to the tool")
+    agent_id: int | None = Field(None, description="When set, McpServerAccess is enforced for this agent")
 
 
 class ToolInvokeResponse(BaseModel):
@@ -173,6 +212,16 @@ def _get_server_or_404(server_id: int, db: Session) -> McpServer:
 
 
 # ---------------------------------------------------------------------------
+# Templates (must be registered before /{server_id})
+# ---------------------------------------------------------------------------
+@templates_router.get("/templates")
+def list_mcp_templates(
+    user: UserInfo = Depends(require_scopes("mcp:read")),
+) -> dict:
+    return {"templates": public_templates()}
+
+
+# ---------------------------------------------------------------------------
 # CRUD endpoints
 # ---------------------------------------------------------------------------
 @router.post("", response_model=McpServerResponse, status_code=status.HTTP_201_CREATED)
@@ -184,7 +233,7 @@ def create_mcp_server(
     server = McpServer(
         name=request.name,
         description=request.description,
-        endpoint_url=request.endpoint_url,
+        endpoint_url=request.endpoint_url or "",
         transport_type=request.transport_type,
         auth_type=request.auth_type,
         oauth2_well_known_url=request.oauth2_well_known_url,
@@ -202,7 +251,33 @@ def create_mcp_server(
         region = os.getenv("AWS_REGION", "us-east-1")
         store_secret(f"loom/mcp/{request.name}/admin-api-key", request.api_key, region, description=f"Admin API key for MCP server {request.name}")
         server.has_admin_api_key = "true"
+    if request.transport_type == "stdio":
+        params = validate_or_400(request.template_id or "", request.template_params)
+        server.template_id = request.template_id
+        server.set_template_params(params)
+        server.set_secret_refs(catalog_secret_refs(request.template_id or "", request.secret_refs))
+        server.runtime_state = "REGISTERED"
+        server.status = "inactive"
+        server.auth_type = "loom"
     db.add(server)
+    db.flush()
+    if request.transport_type == "stdio":
+        server.endpoint_url = facade_url(server.id)
+        try:
+            state = provision(
+                server.id,
+                request.template_id or "",
+                server.get_template_params() or {},
+                server.get_secret_refs() or [],
+            )
+            server.runtime_state = state
+            server.status = "active" if state in ("READY", "RUNNING") else "error"
+            if server.status == "active":
+                _persist_discovered_tools(server, db)
+        except Exception as exc:
+            logger.warning("stdio MCP provision failed for %s: %s", server.id, exc)
+            server.runtime_state = "FAILED"
+            server.status = "error"
     db.commit()
     db.refresh(server)
     return McpServerResponse(**server.to_dict())
@@ -307,10 +382,16 @@ def update_mcp_server(
 
     update_data = request.model_dump(exclude_unset=True)
     new_api_key = update_data.pop("api_key", None)
+    template_params = update_data.pop("template_params", None)
+    secret_refs = update_data.pop("secret_refs", None)
     if "supports_elicitation" in update_data:
         update_data["supports_elicitation"] = "true" if update_data["supports_elicitation"] else "false"
     for field, value in update_data.items():
         setattr(server, field, value)
+    if template_params is not None:
+        server.set_template_params(template_params)
+    if secret_refs is not None:
+        server.set_secret_refs(secret_refs)
 
     if new_api_key:
         region = os.getenv("AWS_REGION", "us-east-1")
@@ -341,6 +422,11 @@ def delete_mcp_server(
     if server.has_admin_api_key == "true":
         region = os.getenv("AWS_REGION", "us-east-1")
         delete_secret(f"loom/mcp/{server.name}/admin-api-key", region)
+    if server.transport_type == "stdio":
+        try:
+            runtime_stop(server.id)
+        except Exception as exc:
+            logger.warning("stdio MCP stop failed for %s: %s", server.id, exc)
     result = McpServerResponse(**server.to_dict())
     db.delete(server)
     db.commit()
@@ -422,7 +508,27 @@ def refresh_mcp_tools(
     api_key = resolve_api_key(server)
     user_token = _extract_user_token(request) if getattr(server, "delegation_mode", "m2m") == "obo" else None
 
+    if server.transport_type == "stdio":
+        try:
+            state = ensure_stdio(server)
+            server.runtime_state = state
+            server.status = "active" if state in ("READY", "RUNNING") else "error"
+        except McpRuntimeError as exc:
+            logger.warning("stdio MCP start failed for %s: %s", server.id, exc)
+            server.runtime_state = "FAILED"
+            server.status = "error"
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=stdio_user_message(exc),
+            ) from exc
+
     fetched_tools = svc_fetch_tools(server, api_key=api_key, user_token=user_token)
+    if server.transport_type == "stdio" and not fetched_tools:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The stdio MCP started but tools/list returned no tools.",
+        )
 
     # Clear existing tools
     db.query(McpTool).filter(McpTool.server_id == server_id).delete()
@@ -474,6 +580,12 @@ def invoke_mcp_tool(
     db: Session = Depends(get_db),
 ) -> ToolInvokeResponse:
     server = _get_server_or_404(server_id, db)
+    if request.agent_id is not None:
+        rule = require_access_or_403(db, server_id, request.agent_id)
+        try:
+            assert_tool_allowed(rule, request.tool_name)
+        except McpAccessDenied as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     api_key = resolve_api_key(server)
     result = svc_invoke_tool(server, request.tool_name, request.arguments, api_key=api_key)
     return ToolInvokeResponse(**result)
@@ -582,3 +694,48 @@ def update_access_rules(
         db.refresh(r)
 
     return [McpAccessRuleResponse(**r.to_dict()) for r in new_rules]
+
+
+@router.post("/{server_id}/runtime/restart", response_model=McpServerResponse)
+def restart_stdio_runtime(
+    server_id: int,
+    user: UserInfo = Depends(require_scopes("mcp:write")),
+    db: Session = Depends(get_db),
+) -> McpServerResponse:
+    server = _get_server_or_404(server_id, db)
+    if server.transport_type != "stdio":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only stdio MCP servers have a runtime")
+    try:
+        try:
+            result = runtime_restart(server.id)
+        except McpRuntimeError:
+            result = {"state": ensure_stdio(server)}
+        server.runtime_state = str(result.get("state") or "READY")
+        server.status = "active" if server.runtime_state in ("READY", "RUNNING") else "error"
+        if server.status == "active":
+            _persist_discovered_tools(server, db)
+    except Exception as exc:
+        logger.warning("stdio MCP restart failed for %s: %s", server.id, exc)
+        server.runtime_state = "FAILED"
+        server.status = "error"
+    server.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(server)
+    return McpServerResponse(**server.to_dict())
+
+
+def _persist_discovered_tools(server: McpServer, db: Session) -> None:
+    fetched_tools = svc_fetch_tools(server)
+    db.query(McpTool).filter(McpTool.server_id == server.id).delete()
+    now = datetime.utcnow()
+    for tool_data in fetched_tools:
+        tool = McpTool(
+            server_id=server.id,
+            tool_name=tool_data.get("name", ""),
+            description=tool_data.get("description"),
+            last_refreshed_at=now,
+        )
+        schema = tool_data.get("input_schema")
+        if schema:
+            tool.set_input_schema(schema)
+        db.add(tool)

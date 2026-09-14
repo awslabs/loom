@@ -8,7 +8,7 @@ import { Key, Pencil, Check, X, Wrench, Shield } from "lucide-react";
 import type { SSETokenInfo } from "@/api/types";
 import { ApprovalRequestBubble } from "@/components/ApprovalDialog";
 import { ElicitationRequestBubble } from "@/components/ElicitationDialog";
-import { fetchModels } from "@/api/agents";
+import { fetchAllModelOptions } from "@/api/agents";
 import type { ModelOption } from "@/api/types";
 import { groupModels } from "@/lib/models";
 import ReactMarkdown from "react-markdown";
@@ -23,6 +23,7 @@ import { RegistryActions } from "@/components/RegistryActions";
 import { ExternalIntegrationSection } from "@/components/ExternalIntegrationSection";
 import { useInvoke, sendElicitationResponse } from "@/hooks/useInvoke";
 import { useAuth } from "@/contexts/AuthContext";
+import { usesRedirectLogin } from "@/auth/providers";
 import { trackAction } from "@/api/audit";
 import type { AgentResponse, SessionResponse } from "@/api/types";
 
@@ -146,6 +147,9 @@ export function AgentDetailPage({
               {agent.source === "deploy" && (
                 <Badge variant="outline" className="text-[10px] px-1.5 py-0">CUSTOM</Badge>
               )}
+              {agent.source === "local" && (
+                <Badge variant="outline" className="text-[10px] px-1.5 py-0">LOCAL</Badge>
+              )}
               <RegistryStatusBadge status={agent.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
               {!registryReadOnly && registryEnabled && (
                 <RegistryActions
@@ -235,8 +239,9 @@ export function AgentDetailPage({
             authorizerName={agent.authorizer_config?.name}
             authorizerPoolId={agent.authorizer_config?.pool_id}
             authorizerDiscoveryUrl={agent.authorizer_config?.discovery_url}
-            isExternalIdp={Boolean(authConfig?.provider_type && authConfig.provider_type !== "cognito")}
+            isExternalIdp={usesRedirectLogin(authConfig)}
             loginIssuerUrl={authConfig?.issuer_url}
+            loginProviderType={authConfig?.provider_type}
             currentUserId={user?.username ?? user?.sub}
             onInvoke={handleInvoke}
             onCancel={cancel}
@@ -465,7 +470,9 @@ function RegisteredAgentModelConfig({ agent, onPatchAgent }: {
   const [allModels, setAllModels] = useState<ModelOption[]>([]);
 
   useEffect(() => {
-    fetchModels().then(setAllModels).catch(() => {});
+    // Merge Bedrock + LiteLLM (same as Chat/Invoke). Local agents only have
+    // LiteLLM ids — Bedrock-only fetch left the editor empty.
+    fetchAllModelOptions().then(setAllModels).catch(() => {});
   }, []);
 
   const handleEdit = () => {
@@ -497,6 +504,15 @@ function RegisteredAgentModelConfig({ agent, onPatchAgent }: {
     );
   };
 
+  // Ensure agent-allowed / draft ids still render if catalog is stale/empty.
+  const catalogIds = new Set(allModels.map((m) => m.model_id));
+  const editorModels: ModelOption[] = [
+    ...allModels,
+    ...[...new Set([...agent.allowed_model_ids, ...draft, defaultDraft].filter(Boolean))]
+      .filter((id) => !catalogIds.has(id))
+      .map((id) => ({ model_id: id, display_name: id })),
+  ];
+
   return (
     <Card className="py-3 gap-1">
       <CardHeader className="gap-1 pb-2">
@@ -512,45 +528,51 @@ function RegisteredAgentModelConfig({ agent, onPatchAgent }: {
       <CardContent className="text-xs text-muted-foreground space-y-2">
         {editing ? (
           <div className="space-y-2">
-            <p className="text-xs">Select which models users may choose at invoke time:</p>
-            <div className="space-y-1.5">
-              {groupModels(allModels).map(([group, models]) => (
-                <div key={group} className="flex flex-wrap gap-x-4 gap-y-1 items-center">
-                  <span className="text-[10px] font-medium text-muted-foreground w-16 shrink-0">{group}</span>
-                  {models.map((m) => {
-                    const isDefault = m.model_id === defaultDraft;
-                    const isChecked = draft.includes(m.model_id);
-                    return (
-                      <label key={m.model_id} className="flex items-center gap-1.5 text-xs cursor-pointer">
-                        <input
-                          type="checkbox"
-                          className="h-3.5 w-3.5 shrink-0"
-                          checked={isChecked}
-                          disabled={isDefault}
-                          onChange={() => toggle(m.model_id)}
-                        />
-                        <span>{m.display_name}</span>
-                        {isChecked && (
-                          <button
-                            type="button"
-                            onClick={() => setDefaultDraft(m.model_id)}
-                            className={`text-[10px] px-1 rounded ${
-                              isDefault
-                                ? "bg-primary text-primary-foreground"
-                                : "bg-accent text-muted-foreground hover:bg-accent/80"
-                            }`}
-                          >
-                            {isDefault ? "default" : "set default"}
-                          </button>
-                        )}
-                      </label>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
+            <p className="text-xs">Select which models users may choose at invoke time (checkboxes — check one, then Set default):</p>
+            {editorModels.length === 0 ? (
+              <p className="text-xs text-destructive">
+                No models in catalog. Enable LiteLLM models in Settings or refresh the LiteLLM proxy catalog.
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                {groupModels(editorModels).map(([group, models]) => (
+                  <div key={group} className="flex flex-wrap gap-x-4 gap-y-1 items-center">
+                    <span className="text-[10px] font-medium text-muted-foreground w-16 shrink-0">{group}</span>
+                    {models.map((m) => {
+                      const isDefault = m.model_id === defaultDraft;
+                      const isChecked = draft.includes(m.model_id);
+                      return (
+                        <label key={m.model_id} className="flex items-center gap-1.5 text-xs cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="h-3.5 w-3.5 shrink-0"
+                            checked={isChecked}
+                            disabled={isDefault}
+                            onChange={() => toggle(m.model_id)}
+                          />
+                          <span>{m.display_name}</span>
+                          {isChecked && (
+                            <button
+                              type="button"
+                              onClick={() => setDefaultDraft(m.model_id)}
+                              className={`text-[10px] px-1 rounded ${
+                                isDefault
+                                  ? "bg-primary text-primary-foreground"
+                                  : "bg-accent text-muted-foreground hover:bg-accent/80"
+                              }`}
+                            >
+                              {isDefault ? "default" : "set default"}
+                            </button>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="flex gap-2">
-              <Button size="sm" className="h-6 text-xs" onClick={() => void handleSave()} disabled={saving}>
+              <Button size="sm" className="h-6 text-xs" onClick={() => void handleSave()} disabled={saving || draft.length === 0}>
                 <Check className="h-3 w-3 mr-1" />
                 Save
               </Button>
@@ -562,7 +584,7 @@ function RegisteredAgentModelConfig({ agent, onPatchAgent }: {
           </div>
         ) : (
           <div className="space-y-1">
-            {groupModels(allModels.filter((m) => agent.allowed_model_ids.includes(m.model_id))).map(([group, models]) => (
+            {groupModels(editorModels.filter((m) => agent.allowed_model_ids.includes(m.model_id))).map(([group, models]) => (
               <div key={group} className="flex flex-wrap gap-1 items-center">
                 <span className="text-[10px] font-medium text-muted-foreground w-16 shrink-0">{group}</span>
                 {models.map((m) => (
@@ -572,6 +594,13 @@ function RegisteredAgentModelConfig({ agent, onPatchAgent }: {
                 ))}
               </div>
             ))}
+            {agent.allowed_model_ids.length > 0 &&
+            editorModels.filter((m) => agent.allowed_model_ids.includes(m.model_id)).length === 0 ? (
+              <p className="text-xs italic">
+                Allowed: {agent.allowed_model_ids.join(", ")}
+                {agent.model_id ? ` (default: ${agent.model_id})` : ""}
+              </p>
+            ) : null}
           </div>
         )}
       </CardContent>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -11,10 +11,10 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Loader2 } from "lucide-react";
-import { testConnectionPreCreate, exportMcpServer } from "@/api/mcp";
+import { listMcpTemplates, testConnectionPreCreate, exportMcpServer } from "@/api/mcp";
 import { JsonConfigSection } from "./JsonConfigSection";
 import { useAuth } from "@/contexts/AuthContext";
-import type { McpServerCreateRequest, TestConnectionResult } from "@/api/types";
+import type { McpAuthType, McpServerCreateRequest, McpTemplate, TestConnectionResult } from "@/api/types";
 
 interface McpServerFormProps {
   onSubmit: (data: McpServerCreateRequest) => Promise<void>;
@@ -27,10 +27,15 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
   const [name, setName] = useState(initialData?.name ?? "");
   const [description, setDescription] = useState(initialData?.description ?? "");
   const [endpointUrl, setEndpointUrl] = useState(initialData?.endpoint_url ?? "");
-  const [transportType, setTransportType] = useState<"sse" | "streamable_http">(
+  const [transportType, setTransportType] = useState<"sse" | "streamable_http" | "stdio">(
     initialData?.transport_type ?? "sse",
   );
-  const [authType, setAuthType] = useState<"none" | "oauth2" | "api_key">(initialData?.auth_type ?? "none");
+  const [templates, setTemplates] = useState<McpTemplate[]>([]);
+  const [templateId, setTemplateId] = useState(initialData?.template_id ?? "");
+  const [templateParams, setTemplateParams] = useState<Record<string, string>>(initialData?.template_params ?? {});
+  const isStdio = transportType === "stdio";
+  const selectedTemplate = templates.find((item) => item.id === templateId);
+  const [authType, setAuthType] = useState<McpAuthType>(initialData?.auth_type ?? "none");
   const [wellKnownUrl, setWellKnownUrl] = useState(initialData?.oauth2_well_known_url ?? "");
   const [clientId, setClientId] = useState(initialData?.oauth2_client_id ?? "");
   const [clientSecret, setClientSecret] = useState("");
@@ -45,18 +50,34 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
 
+  useEffect(() => {
+    void listMcpTemplates().then(setTemplates).catch(() => setTemplates([]));
+  }, []);
+
   const handleSubmit = async () => {
-    if (!name.trim() || !endpointUrl.trim()) return;
+    if (!name.trim()) return;
+    if (!isStdio && !endpointUrl.trim()) return;
+    if (isStdio && !templateId) return;
     setSubmitting(true);
     try {
       const request: McpServerCreateRequest = {
         name: name.trim(),
         description: description.trim() || undefined,
-        endpoint_url: endpointUrl.trim(),
         transport_type: transportType,
-        auth_type: authType,
+        auth_type: isStdio ? "loom" : authType,
       };
-      if (authType === "oauth2") {
+      if (isStdio) {
+        request.template_id = templateId;
+        request.template_params = { ...templateParams };
+        request.secret_refs = (selectedTemplate?.secrets ?? []).map((secret) => ({
+          name: secret.name,
+          backend: "env" as const,
+          ref: secret.name,
+        }));
+      } else {
+        request.endpoint_url = endpointUrl.trim();
+      }
+      if (!isStdio && authType === "oauth2") {
         if (wellKnownUrl.trim()) request.oauth2_well_known_url = wellKnownUrl.trim();
         if (clientId.trim()) request.oauth2_client_id = clientId.trim();
         if (clientSecret) request.oauth2_client_secret = clientSecret;
@@ -67,7 +88,7 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
           if (audience.trim()) request.oauth2_audience = audience.trim();
         }
       }
-      if (authType === "api_key") {
+      if (!isStdio && authType === "api_key") {
         request.api_key_header_name = apiKeyHeaderName;
         if (apiKey) request.api_key = apiKey;
       }
@@ -118,9 +139,11 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
             if (parsed.name) setName(parsed.name);
             if (parsed.description !== undefined) setDescription(parsed.description);
             if (parsed.endpoint_url) setEndpointUrl(parsed.endpoint_url);
-            if (parsed.transport_type && ["sse", "streamable_http"].includes(parsed.transport_type)) {
+            if (parsed.transport_type && ["sse", "streamable_http", "stdio"].includes(parsed.transport_type)) {
               setTransportType(parsed.transport_type);
             }
+            if (parsed.template_id) setTemplateId(parsed.template_id);
+            if (parsed.template_params) setTemplateParams(parsed.template_params);
             if (parsed.auth_type && ["none", "oauth2", "api_key"].includes(parsed.auth_type)) {
               setAuthType(parsed.auth_type);
             }
@@ -174,27 +197,62 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
           <label className="text-xs text-muted-foreground">Name *</label>
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Server name" />
         </div>
-        <div className="flex-1 min-w-0">
-          <label className="text-xs text-muted-foreground">Endpoint URL *</label>
-          <Input
-            value={endpointUrl}
-            onChange={(e) => setEndpointUrl(e.target.value)}
-            placeholder="https://example.com/mcp"
-          />
-        </div>
+        {!isStdio && (
+          <div className="flex-1 min-w-0">
+            <label className="text-xs text-muted-foreground">Endpoint URL *</label>
+            <Input
+              value={endpointUrl}
+              onChange={(e) => setEndpointUrl(e.target.value)}
+              placeholder="https://example.com/mcp"
+            />
+          </div>
+        )}
         <div className="w-[180px]">
           <label className="text-xs text-muted-foreground">Transport</label>
-          <Select value={transportType} onValueChange={(v) => setTransportType(v as "sse" | "streamable_http")}>
+          <Select value={transportType} onValueChange={(v) => setTransportType(v as "sse" | "streamable_http" | "stdio")}>
             <SelectTrigger className="w-full text-sm">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="sse">SSE</SelectItem>
               <SelectItem value="streamable_http">Streamable HTTP</SelectItem>
+              <SelectItem value="stdio">Stdio (local)</SelectItem>
             </SelectContent>
           </Select>
         </div>
       </div>
+
+      {isStdio && (
+        <div className="space-y-2 rounded-md border border-border p-3">
+          <label className="text-xs text-muted-foreground">Template *</label>
+          <Select value={templateId} onValueChange={(value) => { setTemplateId(value); setTemplateParams({}); }}>
+            <SelectTrigger className="w-full text-sm">
+              <SelectValue placeholder="Choose an allowlisted template" />
+            </SelectTrigger>
+            <SelectContent>
+              {templates.map((template) => (
+                <SelectItem key={template.id} value={template.id}>{template.display_name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {selectedTemplate && Object.entries(selectedTemplate.params_schema).map(([key, rules]) => (
+            <div key={key}>
+              <label className="text-xs text-muted-foreground">{key} *</label>
+              <Input
+                value={templateParams[key] ?? ""}
+                onChange={(e) => setTemplateParams((prev) => ({ ...prev, [key]: e.target.value }))}
+                placeholder={rules.pattern ? `pattern: ${rules.pattern}` : key}
+              />
+            </div>
+          ))}
+          {selectedTemplate && selectedTemplate.secrets.length > 0 && (
+            <p className="text-[11px] text-muted-foreground">
+              Secrets ({selectedTemplate.secrets.map((secret) => secret.name).join(", ")}) come from
+              the mcp-runtime compose <code>.env</code>. Do not paste tokens here.
+            </p>
+          )}
+        </div>
+      )}
 
       <div>
         <label className="text-xs text-muted-foreground">Description</label>
@@ -206,7 +264,7 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
         />
       </div>
 
-      <div className="space-y-2">
+      {!isStdio && <div className="space-y-2">
         <label className="text-xs text-muted-foreground font-medium">Authentication</label>
         <div className="flex items-center gap-4">
           <label className="flex items-center gap-1.5 text-sm cursor-pointer">
@@ -338,9 +396,9 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
             </div>
           </div>
         )}
-      </div>
+      </div>}
 
-      <div className="space-y-2">
+      {!isStdio && <div className="space-y-2">
         <label className="flex items-center gap-2 text-sm cursor-pointer">
           <input
             type="checkbox"
@@ -350,9 +408,9 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
           />
           Supports MCP elicitation (requires WebSocket invocation)
         </label>
-      </div>
+      </div>}
 
-      <div className="flex items-center gap-2">
+      {!isStdio && <div className="flex items-center gap-2">
         <Button size="sm" variant="outline" onClick={handleTest} disabled={testing || !endpointUrl.trim()}>
           {testing ? (
             <>
@@ -368,10 +426,10 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
             {testResult.message}
           </Badge>
         )}
-      </div>
+      </div>}
 
       <div className="flex items-center gap-2 pt-2">
-        <Button size="sm" className="min-w-[120px]" onClick={handleSubmit} disabled={submitting || !name.trim() || !endpointUrl.trim()}>
+        <Button size="sm" className="min-w-[120px]" onClick={handleSubmit} disabled={submitting || !name.trim() || (isStdio ? !templateId : !endpointUrl.trim())}>
           {submitting ? (initialData?.id ? "Updating..." : "Creating...") : (initialData?.id ? "Update" : "Create")}
         </Button>
         <Button size="sm" variant="ghost" onClick={onCancel}>

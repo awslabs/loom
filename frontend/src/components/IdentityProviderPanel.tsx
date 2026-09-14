@@ -17,27 +17,24 @@ import {
   type IdentityProviderResponse,
   type CreateIdentityProviderRequest,
 } from "@/api/identity_providers";
+import { getDescriptor, REGISTRABLE_PROVIDERS } from "@/auth/providers";
 
-const PROVIDER_TYPES = [
-  { value: "entra_id", label: "Microsoft Entra ID" },
-  { value: "okta", label: "Okta" },
-  { value: "auth0", label: "Auth0" },
-  { value: "generic_oidc", label: "Generic OIDC" },
-];
+const PROVIDER_TYPES = REGISTRABLE_PROVIDERS.map((p) => ({
+  value: p.type,
+  label: p.type === "generic_oidc" ? "Generic OIDC" : p.label,
+}));
 
 const PROVIDER_HINTS: Record<string, string> = {
+  keycloak: "http://localhost:8081/realms/loom",
   entra_id: "https://login.microsoftonline.com/{tenant-id}/v2.0",
   okta: "https://{your-domain}.okta.com",
   auth0: "https://{your-domain}.auth0.com/",
   generic_oidc: "https://your-issuer.example.com",
 };
 
-const GROUP_CLAIM_HINTS: Record<string, string> = {
-  entra_id: "roles",
-  okta: "groups",
-  auth0: "https://your-namespace/roles",
-  generic_oidc: "groups",
-};
+const GROUP_CLAIM_HINTS: Record<string, string> = Object.fromEntries(
+  REGISTRABLE_PROVIDERS.map((p) => [p.type, p.groupClaimHint]),
+);
 
 const LOOM_GROUPS = [
   "t-admin",
@@ -572,7 +569,7 @@ export function IdentityProviderPanel({ readOnly }: IdentityProviderPanelProps) 
                   {idp.token_endpoint && <div><span className="text-muted-foreground">Token: </span><span className="break-all">{idp.token_endpoint}</span></div>}
                 </div>
 
-                {idp.provider_type === "entra_id" && Object.keys(idp.group_mappings).length > 0 && (
+                {getDescriptor(idp.provider_type).groupMappingUi && Object.keys(idp.group_mappings).length > 0 && (
                   <div>
                     <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground mb-2">
                       <ArrowRightLeft className="h-3.5 w-3.5" />

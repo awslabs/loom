@@ -13,7 +13,7 @@ from app.main import app
 from app.db import Base, get_db
 from app.models.agent import Agent
 from app.models.config_entry import ConfigEntry
-from app.models.mcp import McpServer
+from app.models.mcp import McpServer, McpServerAccess
 from app.models.session import InvocationSession
 from app.models.invocation import Invocation
 
@@ -153,6 +153,11 @@ class TestInvocationsRouter(unittest.TestCase):
         )
         self.session.add(server)
         self.session.flush()
+        self.session.add(McpServerAccess(
+            server_id=server.id,
+            persona_id=self.agent.id,
+            access_level="all_tools",
+        ))
         self.session.add(ConfigEntry(
             agent_id=self.agent.id,
             key="AGENT_CONFIG_JSON",

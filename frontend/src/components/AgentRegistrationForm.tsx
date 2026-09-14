@@ -645,9 +645,10 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
 
   // Filter resources by group if restricted
   const registryActive = mcpServers.some(s => s.registry_status) || a2aAgents.some(a => a.registry_status);
-  const filteredMcpServers = registryActive
+  const filteredMcpServers = (registryActive
     ? mcpServers.filter(s => !s.registry_status || s.registry_status === "APPROVED")
-    : mcpServers;
+    : mcpServers
+  ).filter((s) => s.transport_type !== "stdio");
   const filteredA2aAgents = registryActive
     ? a2aAgents.filter(a => !a.registry_status || a.registry_status === "APPROVED")
     : a2aAgents;

@@ -12,12 +12,18 @@ import {
   initiateAuth,
   respondToNewPasswordChallenge,
   refreshTokens,
+  refreshOIDCToken,
   exchangeOIDCCode,
   startOIDCLogin,
   type AuthConfig,
   type AuthTokens,
   type CognitoAuthResult,
 } from "@/api/auth";
+import {
+  idpLogoutUrl,
+  refreshStrategyFor,
+  usesRedirectLogin,
+} from "@/auth/providers";
 import { setAuthToken, setOnUnauthorized } from "@/api/client";
 import { recordLogin } from "@/api/audit";
 
@@ -153,8 +159,17 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   return JSON.parse(decoded) as Record<string, unknown>;
 }
 
-function isExternalOIDC(cfg: AuthConfig | null): boolean {
-  return !!cfg?.provider_type && cfg.provider_type !== "cognito";
+function isTokenExpired(accessToken: string): boolean {
+  try {
+    const claims = decodeJwtPayload(accessToken);
+    const exp = claims.exp as number | undefined;
+    // Treat as expired a few seconds early so clock skew with Keycloak
+    // does not produce a 401 that the interceptor then refuses to refresh.
+    return !!exp && exp <= Date.now() / 1000 + 15;
+  } catch {
+    // Cannot decode — treat as expired so the caller fails safe.
+    return true;
+  }
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -285,7 +300,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Invalidate cached tokens if the IdP changed (e.g., switched from Okta to Entra).
         // Use the id_token's aud claim which always matches the client_id, unlike access
         // tokens which may have a different audience (e.g., Entra ID API resource URIs).
-        if (isExternalOIDC(cfg) && tokensRef.current?.idToken) {
+        if (usesRedirectLogin(cfg) && tokensRef.current?.idToken) {
           try {
             const claims = decodeJwtPayload(tokensRef.current.idToken);
             const tokenAud = (claims.aud as string) || "";
@@ -301,13 +316,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Check for OIDC callback code in URL (skip link-callback — that's handled separately)
         const params = new URLSearchParams(window.location.search);
         const code = params.get("code");
-        if (code && isExternalOIDC(cfg) && window.location.pathname !== "/oauth/link-callback") {
+        if (code && usesRedirectLogin(cfg) && window.location.pathname !== "/oauth/link-callback") {
           void handleOIDCCallback(code, cfg).finally(() => setIsLoading(false));
           return;
         }
 
         // If no Cognito pool and no external IdP, skip auth
-        if (!isExternalOIDC(cfg) && (!cfg.user_pool_id || !import.meta.env.VITE_COGNITO_USER_CLIENT_ID)) {
+        if (!usesRedirectLogin(cfg) && (!cfg.user_pool_id || !import.meta.env.VITE_COGNITO_USER_CLIENT_ID)) {
           setIsLoading(false);
         }
       })
@@ -319,7 +334,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Mark loading done once config is loaded (if pool is configured, user must log in)
   useEffect(() => {
     if (config) {
-      if (isExternalOIDC(config)) {
+      if (usesRedirectLogin(config)) {
         // For external IdP, loading is done after callback handling or immediately if no code
         const params = new URLSearchParams(window.location.search);
         if (!params.get("code") || window.location.pathname === "/oauth/link-callback") {
@@ -344,26 +359,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         refreshTimerRef.current = setTimeout(async () => {
           if (!config) return;
-          // Only Cognito supports REFRESH_TOKEN_AUTH via direct API
-          if (isExternalOIDC(config)) {
-            // For external IdPs, force re-login when token expires
+          const strategy = refreshStrategyFor(config);
+          if (strategy === "none") {
+            // Provider cannot renew tokens — force re-login when the token expires.
             setTokens(null);
             setUser(null);
             setAuthToken(null);
             return;
           }
           try {
-            const result = await refreshTokens(
-              refreshToken,
-              import.meta.env.VITE_COGNITO_USER_CLIENT_ID,
-              config.region,
-            );
-            if (result.AuthenticationResult) {
-              const newTokens: AuthTokens = {
-                idToken: result.AuthenticationResult.IdToken,
-                accessToken: result.AuthenticationResult.AccessToken,
-                refreshToken: refreshToken,
+            let newTokens: AuthTokens | null = null;
+            if (strategy === "backend-proxy") {
+              const result = await refreshOIDCToken(refreshToken);
+              newTokens = {
+                idToken: result.id_token,
+                accessToken: result.access_token,
+                // Providers that rotate refresh tokens return a new one.
+                refreshToken: result.refresh_token || refreshToken,
               };
+            } else {
+              const result = await refreshTokens(
+                refreshToken,
+                import.meta.env.VITE_COGNITO_USER_CLIENT_ID,
+                config.region,
+              );
+              if (result.AuthenticationResult) {
+                newTokens = {
+                  idToken: result.AuthenticationResult.IdToken,
+                  accessToken: result.AuthenticationResult.AccessToken,
+                  refreshToken: refreshToken,
+                };
+              }
+            }
+            if (newTokens) {
               setTokens(newTokens);
               setAuthToken(newTokens.accessToken);
               scheduleRefresh(newTokens.accessToken, newTokens.refreshToken);
@@ -387,42 +415,56 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const currentTokens = tokensRef.current;
       const currentConfig = configRef.current;
       if (!currentTokens?.refreshToken || !currentConfig) return null;
-      if (isExternalOIDC(currentConfig)) {
-        // Only clear session if the token is actually expired — a 401 on a
-        // scope-restricted endpoint shouldn't nuke the entire session.
-        try {
-          const payload = currentTokens.accessToken.split(".")[1] ?? "";
-          const claims = JSON.parse(atob(payload));
-          if (claims.exp && claims.exp > Date.now() / 1000) {
-            return null;
-          }
-        } catch { /* can't verify — clear to be safe */ }
+
+      // Missing scopes are 403. A 401 here is an expired/rejected JWT — always
+      // try to refresh. Keycloak and the browser clock can disagree by a few
+      // seconds, so "frontend thinks token is still valid" is not reliable.
+      const expired = isTokenExpired(currentTokens.accessToken);
+      const strategy = refreshStrategyFor(currentConfig);
+
+      if (strategy === "none") {
+        if (!expired) return null;
         setTokens(null);
         setUser(null);
         setAuthToken(null);
         return null;
       }
+
       try {
-        const result = await refreshTokens(
-          currentTokens.refreshToken,
-          import.meta.env.VITE_COGNITO_USER_CLIENT_ID,
-          currentConfig.region,
-        );
-        if (result.AuthenticationResult) {
-          const newTokens: AuthTokens = {
-            idToken: result.AuthenticationResult.IdToken,
-            accessToken: result.AuthenticationResult.AccessToken,
-            refreshToken: currentTokens.refreshToken,
+        let newTokens: AuthTokens | null = null;
+        if (strategy === "backend-proxy") {
+          const result = await refreshOIDCToken(currentTokens.refreshToken);
+          newTokens = {
+            idToken: result.id_token,
+            accessToken: result.access_token,
+            refreshToken: result.refresh_token || currentTokens.refreshToken,
           };
+        } else {
+          const result = await refreshTokens(
+            currentTokens.refreshToken,
+            import.meta.env.VITE_COGNITO_USER_CLIENT_ID,
+            currentConfig.region,
+          );
+          if (result.AuthenticationResult) {
+            newTokens = {
+              idToken: result.AuthenticationResult.IdToken,
+              accessToken: result.AuthenticationResult.AccessToken,
+              refreshToken: currentTokens.refreshToken,
+            };
+          }
+        }
+        if (newTokens) {
           setTokens(newTokens);
           setAuthToken(newTokens.accessToken);
           scheduleRefresh(newTokens.accessToken, newTokens.refreshToken);
           return newTokens.accessToken;
         }
       } catch {
-        setTokens(null);
-        setUser(null);
-        setAuthToken(null);
+        if (expired) {
+          setTokens(null);
+          setUser(null);
+          setAuthToken(null);
+        }
       }
       return null;
     });
@@ -536,19 +578,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     logout();
     // Mark that next login should force a fresh prompt
     sessionStorage.setItem("oidc_force_prompt", "login");
-    if (currentConfig && isExternalOIDC(currentConfig) && currentConfig.issuer_url && idToken) {
-      // Only redirect to IdP logout if we have a valid id_token_hint — otherwise the
-      // IdP may reject the request (e.g. after authorization server change).
-      const issuer = currentConfig.issuer_url.replace(/\/+$/, "");
-      const returnUrl = window.location.origin;
-      if (currentConfig.provider_type === "okta") {
-        const params = new URLSearchParams({ post_logout_redirect_uri: returnUrl, id_token_hint: idToken });
-        window.location.href = `${issuer}/v1/logout?${params.toString()}`;
-      } else if (currentConfig.provider_type === "entra_id") {
-        const params = new URLSearchParams({ post_logout_redirect_uri: returnUrl });
-        const authority = issuer.replace(/\/v2\.0$/i, "");
-        window.location.href = `${authority}/oauth2/v2.0/logout?${params.toString()}`;
-      }
+    // Only redirect to IdP logout when we have an id_token to hint with — otherwise the
+    // IdP may reject the request (e.g. after an authorization server change).
+    if (idToken) {
+      const url = idpLogoutUrl(currentConfig, window.location.origin, idToken);
+      if (url) window.location.href = url;
     }
   }, [tokens, logout]);
 
@@ -564,7 +598,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const isCognitoConfigured = Boolean(
     config?.user_pool_id && import.meta.env.VITE_COGNITO_USER_CLIENT_ID,
   );
-  const isExternalConfigured = isExternalOIDC(config);
+  const isExternalConfigured = usesRedirectLogin(config);
   const isConfigured = isCognitoConfigured || isExternalConfigured;
 
   const scopes = !isConfigured

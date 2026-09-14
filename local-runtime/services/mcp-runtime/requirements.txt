@@ -1,0 +1,2 @@
+# Runtime-only. The Loom backend image must not install this.
+PyYAML>=6.0

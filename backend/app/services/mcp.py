@@ -331,10 +331,32 @@ def _parse_sse_response(text: str) -> dict | None:
 
 def _call_mcp(server: Any, method: str, params: dict | None = None, api_key: str | None = None, user_token: str | None = None) -> dict | None:
     """Call an MCP server using the configured transport."""
+    if getattr(server, "transport_type", None) == "stdio":
+        from app.services.mcp_runtime_client import McpRuntimeError, call_mcp, ensure_stdio
+
+        result = call_mcp(int(server.id), method, params)
+        if _stdio_needs_start(result):
+            try:
+                ensure_stdio(server)
+            except McpRuntimeError as exc:
+                logger.warning("stdio MCP provision failed for %s: %s", getattr(server, "id", "?"), exc)
+                return {"error": {"message": str(exc), "code": "stdio_start_failed"}}
+            result = call_mcp(int(server.id), method, params)
+        return result
     if server.transport_type == "streamable_http":
         return _call_streamable_http(server, method, params, api_key, user_token=user_token)
     else:
         return _call_sse(server, method, params, api_key, user_token=user_token)
+
+
+def _stdio_needs_start(result: dict | None) -> bool:
+    if result is None:
+        return True
+    error = result.get("error") if isinstance(result, dict) else None
+    if not isinstance(error, dict):
+        return False
+    message = str(error.get("message") or "")
+    return error.get("code") == "unknown_server" or message in {"unknown_server", "not ready"}
 
 
 def test_mcp_connection(server: Any, api_key: str | None = None, user_token: str | None = None) -> dict:

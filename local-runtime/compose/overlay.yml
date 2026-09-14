@@ -1,0 +1,154 @@
+# Loom local-runtime extension overlay (ADR 0006).
+# Merged by `make local.up` with the root docker-compose.yml.
+# Project directory = repository root (first -f file).
+
+networks:
+  # Kind cluster network (C:\work\k8s). Required for Rancher MCP via NodePort.
+  kind:
+    external: true
+    name: kind
+
+services:
+  backend:
+    environment:
+      MCP_RUNTIME_URL: http://mcp-runtime:8787
+      MCP_RUNTIME_TOKEN: ${MCP_RUNTIME_TOKEN:-loom-mcp-runtime-local}
+      AGENT_RUNTIME_URL: http://agent-runtime:8766
+      AGENT_RUNTIME_TOKEN: ${AGENT_RUNTIME_TOKEN:-loom-agent-runtime-local}
+      MCP_HUB_SERVICE_TOKEN: ${MCP_HUB_SERVICE_TOKEN:-loom-mcp-hub-local}
+      MCP_HUB_PUBLIC_URL: ${MCP_HUB_PUBLIC_URL:-http://127.0.0.1:8790/mcp}
+      MCP_HUB_INTERNAL_URL: ${MCP_HUB_INTERNAL_URL:-http://mcp-hub:8790}
+
+  cursor-adapter:
+    build:
+      context: ./local-runtime/services/cursor-adapter
+    restart: unless-stopped
+    environment:
+      CURSOR_ADAPTER_HOST: 0.0.0.0
+      CURSOR_ADAPTER_PORT: "8765"
+      CURSOR_API_KEY: ${CURSOR_API_KEY:-}
+      CURSOR_WORKSPACE: /workspace
+      CURSOR_MODEL: ${CURSOR_MODEL:-composer-2.5}
+    volumes:
+      - ${CURSOR_WORKSPACE:-.}:/workspace
+    ports:
+      - "127.0.0.1:8765:8765"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  mcp-runtime:
+    build:
+      context: ./local-runtime/services/mcp-runtime
+    restart: unless-stopped
+    networks:
+      - default
+      - kind
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      # Grafana Ingress via Kind publish on the host (:8080 → 30080).
+      - "grafana.local:host-gateway"
+    environment:
+      MCP_RUNTIME_HOST: 0.0.0.0
+      MCP_RUNTIME_PORT: "8787"
+      MCP_RUNTIME_TOKEN: ${MCP_RUNTIME_TOKEN:-loom-mcp-runtime-local}
+      MCP_TEMPLATES_DIR: /templates
+      AZURE_DEVOPS_PAT: ${AZURE_DEVOPS_PAT:-}
+      GRAFANA_SERVICE_ACCOUNT_TOKEN: ${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}
+      RANCHER_MCP_RANCHER_TOKEN: ${RANCHER_MCP_RANCHER_TOKEN:-}
+      RANCHER_MCP_TLS_INSECURE: ${RANCHER_MCP_TLS_INSECURE:-}
+    volumes:
+      - ./local-runtime/templates:/templates:ro
+    ports:
+      - "127.0.0.1:8787:8787"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  agent-runtime:
+    build:
+      context: ./local-runtime/services/agent-runtime
+    restart: unless-stopped
+    depends_on:
+      litellm:
+        condition: service_healthy
+      mcp-runtime:
+        condition: service_healthy
+    environment:
+      AGENT_RUNTIME_HOST: 0.0.0.0
+      AGENT_RUNTIME_PORT: "8766"
+      AGENT_RUNTIME_TOKEN: ${AGENT_RUNTIME_TOKEN:-loom-agent-runtime-local}
+      AGENT_RUNTIME_MAX_SESSIONS: ${AGENT_RUNTIME_MAX_SESSIONS:-4}
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-loom-local-dev}
+      MCP_RUNTIME_TOKEN: ${MCP_RUNTIME_TOKEN:-loom-mcp-runtime-local}
+    ports:
+      - "127.0.0.1:8766:8766"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8766/health', timeout=3).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  mcp-hub:
+    build:
+      context: ./local-runtime/services/mcp-hub
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      MCP_HUB_HOST: 0.0.0.0
+      MCP_HUB_PORT: "8790"
+      MCP_HUB_SERVICE_TOKEN: ${MCP_HUB_SERVICE_TOKEN:-loom-mcp-hub-local}
+      LOOM_BACKEND_URL: http://backend:8000
+      MCP_HUB_STORE_PATH: /data/hub_clients.json
+      MCP_HUB_RESOURCE: ${MCP_HUB_PUBLIC_URL:-http://127.0.0.1:8790/mcp}
+      MCP_HUB_PUBLIC_BASE: http://127.0.0.1:8790
+      # Token iss is browser hostname; JWKS fetched on Docker network.
+      MCP_HUB_OIDC_ISSUER: ${MCP_HUB_OIDC_ISSUER:-http://localhost:8081/realms/loom}
+      MCP_HUB_OIDC_AUDIENCE: ${MCP_HUB_OIDC_AUDIENCE:-loom-mcp-hub}
+      MCP_HUB_OIDC_JWKS_URL: ${MCP_HUB_OIDC_JWKS_URL:-http://keycloak:8080/realms/loom/protocol/openid-connect/certs}
+    volumes:
+      - mcp-hub-data:/data
+    ports:
+      - "127.0.0.1:8790:8790"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8790/health', timeout=3).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  mcp-hub-data:

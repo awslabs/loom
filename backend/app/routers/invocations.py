@@ -26,10 +26,12 @@ from app.models.invocation import Invocation
 from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
 from app.models.mcp import McpServer
+from app.services.mcp_access import require_access, require_access_or_403, allowed_tool_names, McpAccessDenied
 from app.models.approval_policy import ApprovalPolicy
 
 from app.services.agentcore import invoke_agent, invoke_agent_ws
 from app.services.harness import invoke_harness_stream
+from app.services.local_invoke import invoke_local_agent_stream, is_local_agent
 from app.services.cloudwatch import (
     get_log_events, get_usage_log_events,
     parse_agent_start_time, parse_agentcore_request_id,
@@ -1599,13 +1601,46 @@ async def invoke_agent_endpoint(
         dynamic_mcp_servers = []
 
         for server in mcp_records:
+            rule = require_access_or_403(db, server.id, agent.id)
+            if server.transport_type == "stdio" and not is_local_agent(agent):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Stdio MCP cannot be used with AgentCore agents: {server.name}",
+                )
+            endpoint_url = server.endpoint_url
+            if server.transport_type == "stdio" and is_local_agent(agent):
+                # mcp-runtime is in-memory; after recreate the facade 404s until
+                # register+start. Control plane must provision before agent-runtime.
+                from app.services.mcp_runtime_client import (
+                    McpRuntimeError,
+                    ensure_stdio_ready,
+                    facade_url,
+                    stdio_user_message,
+                )
+                try:
+                    ensure_stdio_ready(server)
+                except McpRuntimeError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=stdio_user_message(exc),
+                    ) from exc
+                endpoint_url = facade_url(int(server.id))
+                if server.endpoint_url != endpoint_url:
+                    server.endpoint_url = endpoint_url
+                    db.commit()
             entry: dict[str, Any] = {
                 "name": server.name,
                 "enabled": True,
-                "transport": server.transport_type,
-                "endpoint_url": server.endpoint_url,
+                "transport": "streamable_http" if server.transport_type == "stdio" else server.transport_type,
+                "endpoint_url": endpoint_url,
             }
-            if server.auth_type == "api_key":
+            selected = allowed_tool_names(rule)
+            if selected is not None:
+                entry["allowed_tools"] = selected
+            if server.transport_type == "stdio" or server.auth_type == "loom":
+                # Service token is injected by local_invoke.enrich_mcp_servers_for_runtime
+                entry["auth"] = {"type": "service_bearer"}
+            elif server.auth_type == "api_key":
                 # Per-user keys are stored by the immutable IdP subject.  The
                 # actor_id is a separately formatted value used by AgentCore
                 # sessions and does not identify the Secrets Manager entry.
@@ -1683,8 +1718,15 @@ async def invoke_agent_endpoint(
     if active_policies:
         approval_policies_payload = [p.to_dict() for p in active_policies]
 
-    # Dispatch to harness or standard invoke path
-    if agent.source == "harness" and agent.harness_id:
+    # Dispatch to harness, local agent-runtime / LiteLLM, or AgentCore
+    if is_local_agent(agent):
+        stream_gen = invoke_local_agent_stream(
+            agent, session, invocation, db, client_invoke_time,
+            request_body.prompt, runtime_model_id,
+            dynamic_mcp_servers=dynamic_mcp_servers,
+            subject=user.sub,
+        )
+    elif agent.source == "harness" and agent.harness_id:
         # Convert dynamic MCP connectors to harness tool format
         dynamic_harness_tools: list[dict[str, Any]] | None = None
         if dynamic_mcp_servers:
@@ -1798,9 +1840,22 @@ async def invoke_agent_websocket(
                 mcp_servers = db.query(McpServer).filter(McpServer.id.in_(connector_ids)).all()
                 dynamic_mcp_servers = []
                 for s in mcp_servers:
+                    try:
+                        require_access(db, s.id, agent.id)
+                    except McpAccessDenied as exc:
+                        await websocket.send_json({"type": "error", "content": str(exc)})
+                        dynamic_mcp_servers = None
+                        break
+                    if s.transport_type == "stdio" and not is_local_agent(agent):
+                        await websocket.send_json({
+                            "type": "error",
+                            "content": f"Stdio MCP cannot be used with AgentCore agents: {s.name}",
+                        })
+                        dynamic_mcp_servers = None
+                        break
                     server_data: dict[str, Any] = {
                         "name": s.name,
-                        "transport": s.transport_type,
+                        "transport": "streamable_http" if s.transport_type == "stdio" else s.transport_type,
                         "endpoint_url": s.endpoint_url,
                     }
                     dynamic_mcp_servers.append(server_data)

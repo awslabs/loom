@@ -53,6 +53,7 @@ def fetch_discovery(issuer_url: str) -> dict[str, Any]:
         "jwks_uri": doc["jwks_uri"],
         "authorization_endpoint": doc["authorization_endpoint"],
         "token_endpoint": doc["token_endpoint"],
+        "end_session_endpoint": doc.get("end_session_endpoint"),
         "scopes_supported": doc.get("scopes_supported", []),
         "issuer": doc.get("issuer", issuer_url),
     }

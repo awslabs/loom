@@ -16,7 +16,9 @@ IDE (URL only)
 
 Host port loopback-only (`127.0.0.1:8790`). Health: `GET /health`.
 PRM: `GET /.well-known/oauth-protected-resource`.
-Store: `MCP_HUB_STORE_PATH` (default `/data/hub_clients.json`).
+Store: **`MCP_HUB_DATABASE_URL`** (Postgres DB `mcp_hub`). JSON file
+(`MCP_HUB_STORE_PATH`) is fallback only when DSN unset; if PG is empty and the
+JSON file exists, clients are imported once at startup.
 
 ## Cursor `mcp.json`
 
@@ -51,6 +53,9 @@ active IdP, register an equivalent public PKCE app instead.
 |----------|---------|
 | `MCP_HUB_SERVICE_TOKEN` | Hub ↔ Loom only |
 | `LOOM_BACKEND_URL` | Hub → backend |
+| `MCP_HUB_DATABASE_URL` | Postgres DSN for Hub store (dedicated DB `mcp_hub`) |
+| `MCP_HUB_STORE_PATH` | Optional JSON path (fallback / migrate source) |
+| `MCP_HUB_MIGRATE_JSON` | `force` to re-import JSON over PG |
 | `MCP_HUB_RESOURCE` | Canonical resource URL (aud/resource check) |
 | `MCP_HUB_OIDC_ISSUER` | Token `iss` (browser URL of the **active** IdP) |
 | `MCP_HUB_OIDC_AUDIENCE` | Default `loom-mcp-hub` |
@@ -70,4 +75,7 @@ mcp_hub/
   *.py              # compat shims (old import paths)
 ```
 
-Wire protocol and env unchanged. Postgres Hub store = `REF-2026-09-14-01` (port `HubStore` already defined).
+Wire protocol and env unchanged for MCP. Store default = Postgres via
+`MCP_HUB_DATABASE_URL` (`HubStore` port). Fresh postgres volume runs
+`etc/docker/postgres-init/02-mcp-hub-db.sql`. Existing volumes need reset or
+manual `CREATE DATABASE mcp_hub`.

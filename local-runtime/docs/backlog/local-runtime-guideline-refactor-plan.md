@@ -92,9 +92,9 @@ Critério de aceite: mesmos testes verdes; smoke Cursor `tools/list` + `agent__*
 
 ### Fase 2 — Hub store produção ([REF-2026-09-14-01](refactoring.md))
 
-- Port `HubStore` já existente na Fase 1
-- Adapter Postgres (DSN via env); migração one-shot do JSON
-- Atualizar architecture + scalability docs
+- [x] Port `HubStore` (Fase 1)
+- [x] Adapter Postgres (DSN via env); migrate one-shot do JSON quando PG vazio
+- [x] Atualizar architecture + compose (`mcp_hub` DB)
 
 ### Fase 3 — agent-runtime
 

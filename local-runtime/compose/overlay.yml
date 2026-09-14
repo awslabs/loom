@@ -120,13 +120,21 @@ services:
       context: ./local-runtime/services/mcp-hub
     restart: unless-stopped
     depends_on:
-      - backend
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
     environment:
       MCP_HUB_HOST: 0.0.0.0
       MCP_HUB_PORT: "8790"
       MCP_HUB_SERVICE_TOKEN: ${MCP_HUB_SERVICE_TOKEN:-loom-mcp-hub-local}
       LOOM_BACKEND_URL: http://backend:8000
+      # Dedicated DB on shared Postgres (not Loom schema). Init: etc/docker/postgres-init/02-mcp-hub-db.sql
+      MCP_HUB_DATABASE_URL: ${MCP_HUB_DATABASE_URL:-postgresql://mcp_hub:mcp-hub-local-dev@postgres:5432/mcp_hub}
+      # Optional leftover JSON path; auto-imported only when PG has zero clients
       MCP_HUB_STORE_PATH: /data/hub_clients.json
+      # Set to "force" to re-import JSON over PG (rare)
+      MCP_HUB_MIGRATE_JSON: ${MCP_HUB_MIGRATE_JSON:-}
       MCP_HUB_RESOURCE: ${MCP_HUB_PUBLIC_URL:-http://127.0.0.1:8790/mcp}
       MCP_HUB_PUBLIC_BASE: http://127.0.0.1:8790
       # Token iss is browser hostname; JWKS fetched on Docker network.

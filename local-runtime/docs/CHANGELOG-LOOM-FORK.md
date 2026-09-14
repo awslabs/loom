@@ -75,6 +75,20 @@ Checklist pós-merge:
 
 ## Registro
 
+### 2026-09-14 — Hub store Postgres (REF-01)
+
+**Contexto:** paridade produção; port `HubStore` + DB dedicado.
+
+| Zona | Paths | O que mudou |
+|------|-------|-------------|
+| **Extension** | `mcp_hub/adapters/outbound/pg_store.py`, `wiring.py` | `PostgresHubStore` + migrate JSON |
+| **Config** | `compose/overlay.yml`, `postgres-init/02-mcp-hub-db.sql`, `.env.example` | DSN `mcp_hub` |
+| **Docs** | architecture, backlog REF-01/02 done | |
+
+**Impacto no sync upstream:** baixo (init SQL sob `etc/docker/`).
+
+---
+
 ### 2026-09-14 — mcp-hub hexagonal strangler (REF-02)
 
 **Contexto:** decisões do plano aceitas; primeira fatia de layout ports/adapters.

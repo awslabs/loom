@@ -21,7 +21,7 @@ Relacionados: [ADR 0006](../adr/0006-local-runtime-extension-repo.md), [overview
 [scalability-reliability.md](scalability-reliability.md),
 [CHANGELOG-LOOM-FORK.md](../CHANGELOG-LOOM-FORK.md).
 
-**Última revisão:** 2026-09-14 (Mermaid portátil; endpoints via env)
+**Última revisão:** 2026-09-14 (Hub store → Postgres `mcp_hub`)
 
 ---
 
@@ -294,27 +294,20 @@ erDiagram
 
 | Store | Onde | Conteúdo |
 |-------|------|----------|
-| **`hub_clients.json`** | Volume `mcp-hub` (`MCP_HUB_STORE_PATH`) | Canais MCP, `agents_enabled`, profile grants, session bindings |
+| **Postgres DB `mcp_hub`** | Mesmo servidor PG do compose; DSN `MCP_HUB_DATABASE_URL` | Canais MCP, `agents_enabled`, profile grants, session bindings (`hub_clients`, `hub_session_bindings`) |
+| **JSON fallback** | `MCP_HUB_STORE_PATH` (só se DSN unset; ou fonte de migrate) | Snapshot legado |
 | **Keycloak DB** | Container Keycloak | Realm `loom`, users/groups, client `loom-mcp-hub` |
 | **Templates YAML** | `local-runtime/templates/` (ro no mcp-runtime) | Allowlist de servers stdio — arquivos, não SQL |
 
-#### JSON Hub (**local-runtime** only)
+#### Hub store schema (Postgres `mcp_hub`)
 
 ```text
-{
-  "version": 1,
-  "clients": {
-    "<slug>": {
-      "slug", "status", "agents_enabled",
-      "declared_*", "display_name",
-      "profile_grants": { "<idp-group>": [ { server_id, access_level, tool_names } ] }
-    }
-  },
-  "session_bindings": { ... }
-}
+hub_clients(slug PK, display_name, declared_*, status, agents_enabled, grants JSONB, first_seen_at, last_seen_at)
+hub_session_bindings(hub_session_id PK, mcp_client_slug FK, bound_at)
 ```
 
-Não misturar este JSON com migrations do Postgres.
+Init: `etc/docker/postgres-init/02-mcp-hub-db.sql` (volume Postgres **novo**).  
+Não misturar com schema/ORM do Loom Core.
 
 ---
 
@@ -322,8 +315,8 @@ Não misturar este JSON com migrations do Postgres.
 
 | Conceito | Origem | Liga a |
 |----------|--------|--------|
-| `profile_grants[].server_id` | **local-runtime** JSON | **Core** `mcp_servers.id` |
-| `agents_enabled` | **local-runtime** JSON | **Core** `agents` + RBAC tags (invoke via BFF) |
+| `profile_grants[].server_id` | **local-runtime** Hub PG | **Core** `mcp_servers.id` |
+| `agents_enabled` | **local-runtime** Hub PG | **Core** `agents` + RBAC tags (invoke via BFF) |
 | Runs `agent__*` | BFF cria **Core** `invocation_sessions` / `invocations` | — |
 | IdP ativo | **Fork (PG)** `identity_providers` | Keycloak/Entra (**local-runtime** / SaaS) |
 | Template stdio | **Fork** colunas em `mcp_servers` | **local-runtime** YAML + mcp-runtime |
@@ -331,7 +324,7 @@ Não misturar este JSON com migrations do Postgres.
 ```text
                     ┌──────────────────────────┐
                     │  local-runtime           │
-                    │  hub_clients.json        │
+                    │  Postgres DB mcp_hub     │
                     │  templates/*.yaml        │
                     │  Keycloak (realm)        │
                     └────────────┬─────────────┘

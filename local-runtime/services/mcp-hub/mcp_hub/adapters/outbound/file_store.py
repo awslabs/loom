@@ -1,4 +1,4 @@
-"""Persistent MCP Client registry for the Hub (ADR 0008 / specs 021-022)."""
+"""Persistent MCP Client registry for the Hub (ADR 0008 / specs 021-022) — JSON file."""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,8 @@ import threading
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
+
+from mcp_hub.domain.client_records import client_summary, normalize_grant, refresh_allowed_groups
 
 _lock = threading.RLock()
 
@@ -48,45 +50,6 @@ def _save(data: dict[str, Any]) -> None:
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2, sort_keys=True)
     os.replace(tmp, path)
-
-
-def _normalize_grant(g: dict[str, Any], *, group: str) -> dict[str, Any] | None:
-    try:
-        server_id = int(g["server_id"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    level = str(g.get("access_level") or "selected_tools")
-    if level not in ("all_tools", "selected_tools"):
-        level = "selected_tools"
-    names = g.get("tool_names") or []
-    if not isinstance(names, list):
-        names = []
-    return {
-        "group": group[:128],
-        "server_id": server_id,
-        "access_level": level,
-        "tool_names": [str(n) for n in names][:500],
-    }
-
-
-def _refresh_allowed_groups(row: dict[str, Any]) -> None:
-    row["allowed_groups"] = sorted({
-        str(g.get("group"))
-        for g in (row.get("grants") or [])
-        if g.get("group")
-    })
-
-
-def client_summary(row: dict[str, Any]) -> dict[str, Any]:
-    """List/detail payload without embedding all profile grants."""
-    out = deepcopy(row)
-    grants = list(out.pop("grants", None) or [])
-    profiles = sorted({str(g.get("group")) for g in grants if g.get("group")})
-    out["granted_profiles"] = profiles
-    out["grant_count"] = len(grants)
-    out["allowed_groups"] = profiles
-    out["agents_enabled"] = bool(out.get("agents_enabled", False))
-    return out
 
 
 def list_clients(status: str | None = None) -> list[dict[str, Any]]:
@@ -141,11 +104,11 @@ def put_profile_grants(slug: str, group: str, grants: list[dict[str, Any]]) -> d
         ]
         cleaned: list[dict[str, Any]] = []
         for g in grants:
-            item = _normalize_grant(g, group=group)
+            item = normalize_grant(g, group=group)
             if item is not None:
                 cleaned.append(item)
         row["grants"] = kept + cleaned
-        _refresh_allowed_groups(row)
+        refresh_allowed_groups(row)
         _save(data)
         return {"slug": slug, "group": group, "grants": deepcopy(cleaned)}
 
@@ -162,13 +125,14 @@ def put_grants(slug: str, grants: list[dict[str, Any]]) -> dict[str, Any] | None
             group = str(g.get("group") or "").strip()
             if not group:
                 continue
-            item = _normalize_grant(g, group=group)
+            item = normalize_grant(g, group=group)
             if item is not None:
                 cleaned.append(item)
         row["grants"] = cleaned
-        _refresh_allowed_groups(row)
+        refresh_allowed_groups(row)
         _save(data)
         return deepcopy(row)
+
 
 def upsert_from_initialize(
     *,
@@ -264,8 +228,14 @@ def delete_client(slug: str) -> bool:
         return True
 
 
+def load_snapshot() -> dict[str, Any]:
+    """Return raw JSON snapshot (for one-shot migration to Postgres)."""
+    with _lock:
+        return deepcopy(_load())
+
+
 class FileHubStore:
-    """Outbound adapter implementing ``HubStore`` (JSON file today; PG later)."""
+    """Outbound adapter implementing ``HubStore`` (JSON file fallback)."""
 
     def store_path(self) -> str:
         return store_path()

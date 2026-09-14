@@ -30,34 +30,6 @@ Fluxo:
 
 ## Itens abertos
 
-### REF-2026-09-14-01 — Hub store: JSON file → Postgres (paridade produção)
-
-| Campo | Valor |
-|-------|--------|
-| **Data** | 2026-09-14 |
-| **Área** | `local-runtime/services/mcp-hub` |
-| **Paths** | `mcp_hub/store.py`, compose volume, `architecture.md` § Hub store |
-| **Oportunidade** | Substituir `hub_clients.json` (single-writer file) por Postgres (ou schema no PG Loom via interface), com path/DSN só via env |
-| **Motivo** | Comportamento próximo de produção: HA, backup, sem estado em arquivo local; alinha a [scalability-reliability.md](../guide/scalability-reliability.md) |
-| **Complexidade** | média |
-| **Risco** | médio (migração de clients/grants existentes; downtime Hub) |
-| **Status** | open |
-| **Notas** | Hoje `MCP_HUB_STORE_PATH` aponta ao JSON. Não executar até o Dev pedir este id. Diagramas C4 já usam “Hub store” genérico. Plano: [local-runtime-guideline-refactor-plan.md](local-runtime-guideline-refactor-plan.md) Fase 2. |
-
-### REF-2026-09-14-02 — mcp-hub: layout hexagonal (ports/adapters)
-
-| Campo | Valor |
-|-------|--------|
-| **Data** | 2026-09-14 |
-| **Área** | `local-runtime/services/mcp-hub` |
-| **Paths** | `mcp_hub/http_app.py`, `store.py`, `loom_client.py`, `oauth.py`, `access.py`, `naming.py`, `identity.py` |
-| **Oportunidade** | Migrar pacote plano → `domain/` + `application/` + `adapters/{inbound,outbound}/` conforme [python-best-practices.md](../guide/python-best-practices.md) §6 |
-| **Motivo** | Isolar regras (grants, naming, agents tools) de HTTP/JSON/JWKS; testabilidade; norte do guideline |
-| **Complexidade** | alta |
-| **Risco** | médio (regressão MCP OAuth / tools/list|call) |
-| **Status** | in_progress — layout + use cases + DI; falta fechar REF e Postgres (`REF-01`) |
-| **Notas** | Strangler; wire protocol estável. Plano Fase 1 itens 1–8 feitos. |
-
 ### REF-2026-09-14-03 — agent-runtime: layout hexagonal
 
 | Campo | Valor |
@@ -116,4 +88,20 @@ Fluxo:
 
 ## Itens encerrados
 
-_(nenhum ainda)_
+### REF-2026-09-14-01 — Hub store: JSON file → Postgres (paridade produção)
+
+| Campo | Valor |
+|-------|--------|
+| **Data** | 2026-09-14 |
+| **Área** | `local-runtime/services/mcp-hub` |
+| **Status** | done |
+| **Notas** | `PostgresHubStore` + DB `mcp_hub`; JSON fallback; migrate when PG empty. |
+
+### REF-2026-09-14-02 — mcp-hub: layout hexagonal (ports/adapters)
+
+| Campo | Valor |
+|-------|--------|
+| **Data** | 2026-09-14 |
+| **Área** | `local-runtime/services/mcp-hub` |
+| **Status** | done |
+| **Notas** | Ver branch `refactor/mcp-hub-hexagonal`. |

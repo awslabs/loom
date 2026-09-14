@@ -7,6 +7,7 @@ import os
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +25,17 @@ def _request(method: str, path: str, body: dict[str, Any] | None = None) -> tupl
     if not token:
         return 503, {"detail": "hub_service_token_unset"}
     data = None if body is None else json.dumps(body).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    if data is not None:
+        headers["Content-Type"] = "application/json"
     req = urllib.request.Request(
         f"{mcp_hub_base()}{path}",
         data=data,
         method=method,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -63,16 +66,32 @@ def list_clients(status: str | None = None) -> tuple[int, dict[str, Any]]:
 
 
 def get_client(slug: str) -> tuple[int, dict[str, Any]]:
-    return _request("GET", f"/v1/clients/{slug}")
+    return _request("GET", f"/v1/clients/{quote(slug, safe='-_.')}")
 
 
 def patch_client(slug: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    return _request("PATCH", f"/v1/clients/{slug}", body)
+    return _request("PATCH", f"/v1/clients/{quote(slug, safe='-_.')}", body)
 
 
-def put_grants(slug: str, grants: list[dict[str, Any]]) -> tuple[int, dict[str, Any]]:
-    return _request("PUT", f"/v1/clients/{slug}/grants", {"grants": grants})
+def put_grants(
+    slug: str,
+    grants: list[dict[str, Any]],
+    *,
+    group: str,
+) -> tuple[int, dict[str, Any]]:
+    return _request(
+        "PUT",
+        f"/v1/clients/{quote(slug, safe='-_.')}/profile-grants",
+        {"group": group, "grants": grants},
+    )
+
+
+def get_profile_grants(slug: str, group: str) -> tuple[int, dict[str, Any]]:
+    return _request(
+        "GET",
+        f"/v1/clients/{quote(slug, safe='-_.')}/profile-grants?group={quote(group, safe='-_.')}",
+    )
 
 
 def delete_client(slug: str) -> tuple[int, dict[str, Any]]:
-    return _request("DELETE", f"/v1/clients/{slug}")
+    return _request("DELETE", f"/v1/clients/{quote(slug, safe='-_.')}")

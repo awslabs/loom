@@ -50,6 +50,44 @@ def _save(data: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def _normalize_grant(g: dict[str, Any], *, group: str) -> dict[str, Any] | None:
+    try:
+        server_id = int(g["server_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    level = str(g.get("access_level") or "selected_tools")
+    if level not in ("all_tools", "selected_tools"):
+        level = "selected_tools"
+    names = g.get("tool_names") or []
+    if not isinstance(names, list):
+        names = []
+    return {
+        "group": group[:128],
+        "server_id": server_id,
+        "access_level": level,
+        "tool_names": [str(n) for n in names][:500],
+    }
+
+
+def _refresh_allowed_groups(row: dict[str, Any]) -> None:
+    row["allowed_groups"] = sorted({
+        str(g.get("group"))
+        for g in (row.get("grants") or [])
+        if g.get("group")
+    })
+
+
+def client_summary(row: dict[str, Any]) -> dict[str, Any]:
+    """List/detail payload without embedding all profile grants."""
+    out = deepcopy(row)
+    grants = list(out.pop("grants", None) or [])
+    profiles = sorted({str(g.get("group")) for g in grants if g.get("group")})
+    out["granted_profiles"] = profiles
+    out["grant_count"] = len(grants)
+    out["allowed_groups"] = profiles
+    return out
+
+
 def list_clients(status: str | None = None) -> list[dict[str, Any]]:
     with _lock:
         data = _load()
@@ -57,14 +95,79 @@ def list_clients(status: str | None = None) -> list[dict[str, Any]]:
     if status:
         rows = [c for c in rows if c.get("status") == status]
     rows.sort(key=lambda c: c.get("last_seen_at") or c.get("first_seen_at") or "")
-    return deepcopy(rows)
+    return [client_summary(c) for c in rows]
 
 
-def get_client(slug: str) -> dict[str, Any] | None:
+def get_client(slug: str, *, include_grants: bool = False) -> dict[str, Any] | None:
     with _lock:
         row = _load()["clients"].get(slug)
-        return deepcopy(row) if row else None
+        if row is None:
+            return None
+        if include_grants:
+            return deepcopy(row)
+        return client_summary(row)
 
+
+def get_profile_grants(slug: str, group: str) -> dict[str, Any] | None:
+    group = str(group or "").strip()
+    if not group:
+        return None
+    with _lock:
+        row = _load()["clients"].get(slug)
+        if row is None:
+            return None
+        grants = [
+            deepcopy(g)
+            for g in (row.get("grants") or [])
+            if str(g.get("group") or "") == group
+        ]
+    return {"slug": slug, "group": group, "grants": grants}
+
+
+def put_profile_grants(slug: str, group: str, grants: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Replace grants for one IdP profile only; leave other profiles untouched."""
+    group = str(group or "").strip()
+    if not group:
+        return None
+    with _lock:
+        data = _load()
+        row = data["clients"].get(slug)
+        if row is None:
+            return None
+        kept = [
+            g for g in (row.get("grants") or [])
+            if str(g.get("group") or "") != group
+        ]
+        cleaned: list[dict[str, Any]] = []
+        for g in grants:
+            item = _normalize_grant(g, group=group)
+            if item is not None:
+                cleaned.append(item)
+        row["grants"] = kept + cleaned
+        _refresh_allowed_groups(row)
+        _save(data)
+        return {"slug": slug, "group": group, "grants": deepcopy(cleaned)}
+
+
+def put_grants(slug: str, grants: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Replace all grants (admin/full sync). Prefer ``put_profile_grants`` for UI."""
+    with _lock:
+        data = _load()
+        row = data["clients"].get(slug)
+        if row is None:
+            return None
+        cleaned: list[dict[str, Any]] = []
+        for g in grants:
+            group = str(g.get("group") or "").strip()
+            if not group:
+                continue
+            item = _normalize_grant(g, group=group)
+            if item is not None:
+                cleaned.append(item)
+        row["grants"] = cleaned
+        _refresh_allowed_groups(row)
+        _save(data)
+        return deepcopy(row)
 
 def upsert_from_initialize(
     *,
@@ -138,34 +241,6 @@ def patch_client(slug: str, patch: dict[str, Any]) -> dict[str, Any] | None:
             row["display_name"] = patch["display_name"][:128]
         if "allowed_groups" in patch and isinstance(patch["allowed_groups"], list):
             row["allowed_groups"] = [str(g) for g in patch["allowed_groups"][:64]]
-        _save(data)
-        return deepcopy(row)
-
-
-def put_grants(slug: str, grants: list[dict[str, Any]]) -> dict[str, Any] | None:
-    with _lock:
-        data = _load()
-        row = data["clients"].get(slug)
-        if row is None:
-            return None
-        cleaned: list[dict[str, Any]] = []
-        for g in grants:
-            try:
-                server_id = int(g["server_id"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            level = str(g.get("access_level") or "selected_tools")
-            if level not in ("all_tools", "selected_tools"):
-                level = "selected_tools"
-            names = g.get("tool_names") or []
-            if not isinstance(names, list):
-                names = []
-            cleaned.append({
-                "server_id": server_id,
-                "access_level": level,
-                "tool_names": [str(n) for n in names][:500],
-            })
-        row["grants"] = cleaned
         _save(data)
         return deepcopy(row)
 

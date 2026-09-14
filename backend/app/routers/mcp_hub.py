@@ -50,7 +50,8 @@ class ClientPatchRequest(BaseModel):
 
 
 class ClientGrantsRequest(BaseModel):
-    grants: list[dict[str, Any]]
+    group: str = Field(..., min_length=1, max_length=128)
+    grants: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _require_service_token(authorization: str | None) -> None:
@@ -165,6 +166,33 @@ def list_mcp_clients(
     return payload
 
 
+@ext_router.get("/mcp-clients/{slug}/profile-grants")
+def get_mcp_client_profile_grants(
+    slug: str,
+    group: str = Query(..., min_length=1, max_length=128),
+    user: UserInfo = Depends(require_scopes("mcp:read")),
+) -> dict:
+    """On-demand grants for one IdP profile. Empty profile → 200 + grants=[]."""
+    _ = user
+    code, payload = hub_proxy.get_profile_grants(slug, group)
+    if code >= 400:
+        raise HTTPException(status_code=code, detail=payload.get("error") or payload.get("detail") or "hub_error")
+    return payload
+
+
+@ext_router.put("/mcp-clients/{slug}/profile-grants")
+def put_mcp_client_grants(
+    slug: str,
+    body: ClientGrantsRequest,
+    user: UserInfo = Depends(require_scopes("mcp:write")),
+) -> dict:
+    _ = user
+    code, payload = hub_proxy.put_grants(slug, body.grants, group=body.group)
+    if code >= 400:
+        raise HTTPException(status_code=code, detail=payload.get("error") or payload.get("detail") or "hub_error")
+    return payload
+
+
 @ext_router.get("/mcp-clients/{slug}")
 def get_mcp_client(
     slug: str,
@@ -185,19 +213,6 @@ def patch_mcp_client(
 ) -> dict:
     _ = user
     code, payload = hub_proxy.patch_client(slug, body.model_dump(exclude_none=True))
-    if code >= 400:
-        raise HTTPException(status_code=code, detail=payload.get("error") or payload.get("detail") or "hub_error")
-    return payload
-
-
-@ext_router.put("/mcp-clients/{slug}/grants")
-def put_mcp_client_grants(
-    slug: str,
-    body: ClientGrantsRequest,
-    user: UserInfo = Depends(require_scopes("mcp:write")),
-) -> dict:
-    _ = user
-    code, payload = hub_proxy.put_grants(slug, body.grants)
     if code >= 400:
         raise HTTPException(status_code=code, detail=payload.get("error") or payload.get("detail") or "hub_error")
     return payload

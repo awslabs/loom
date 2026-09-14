@@ -15,6 +15,7 @@ type HubMint = {
 };
 
 type McpClientGrant = {
+  group?: string;
   server_id: number;
   access_level: "all_tools" | "selected_tools";
   tool_names: string[];
@@ -27,8 +28,9 @@ type McpHubClient = {
   declared_version: string;
   declared_family: string;
   status: "discovered" | "enabled" | "disabled";
-  allowed_groups: string[];
-  grants: McpClientGrant[];
+  allowed_groups?: string[];
+  granted_profiles?: string[];
+  grant_count?: number;
   first_seen_at?: string;
   last_seen_at?: string;
 };
@@ -52,9 +54,56 @@ type ServerAccessRule = {
   allowed_tool_names: string[];
 };
 
+/** Full IdP profiles (GROUP_SCOPES); not short loom:group tags. */
+const LOOM_PROFILES = [
+  "g-users-demo",
+  "g-users-test",
+  "g-users-strategics",
+  "g-admins-demo",
+  "g-admins-mcp",
+  "g-admins-security",
+  "g-admins-memory",
+  "g-admins-a2a",
+  "g-admins-registry",
+] as const;
+
+const PROFILE_PLACEHOLDER = "";
+
+function buildRulesFromGrants(
+  grants: McpClientGrant[],
+  servers: McpServer[],
+): ServerAccessRule[] {
+  const grantMap = new Map<number, McpClientGrant>();
+  for (const g of grants) {
+    const sid = Number(g.server_id);
+    if (!Number.isFinite(sid)) continue;
+    grantMap.set(sid, g);
+  }
+  const serverIds = new Set(servers.map((s) => s.id));
+  const rows: ServerAccessRule[] = servers.map((s) => {
+    const existing = grantMap.get(s.id);
+    return {
+      server_id: s.id,
+      enabled: !!existing,
+      access_level: existing?.access_level ?? "all_tools",
+      allowed_tool_names: existing?.tool_names ?? [],
+    };
+  });
+  for (const [sid, g] of grantMap) {
+    if (serverIds.has(sid)) continue;
+    rows.push({
+      server_id: sid,
+      enabled: true,
+      access_level: g.access_level ?? "all_tools",
+      allowed_tool_names: g.tool_names ?? [],
+    });
+  }
+  return rows;
+}
+
 /**
  * Ops surface for local-runtime backends.
- * MCP Client grants mirror Integrations → MCP access control (servers × tools).
+ * Channel → pick IdP profile on demand → load/save only that profile (ADR 0010).
  */
 export function LocalRuntimePage({ canRead, canWrite }: Props) {
   const [mint, setMint] = useState<HubMint | null>(null);
@@ -63,7 +112,10 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
   const [clients, setClients] = useState<McpHubClient[]>([]);
   const [servers, setServers] = useState<McpServer[]>([]);
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const [selectedProfile, setSelectedProfile] = useState<string>(PROFILE_PLACEHOLDER);
   const [rules, setRules] = useState<ServerAccessRule[]>([]);
+  const [profileLoaded, setProfileLoaded] = useState(false);
+  const [loadingProfile, setLoadingProfile] = useState(false);
   const [toolsByServer, setToolsByServer] = useState<Record<number, McpTool[]>>({});
   const [savingGrants, setSavingGrants] = useState(false);
 
@@ -71,7 +123,9 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
 
   const refreshClients = useCallback(async () => {
     const data = await apiFetch<{ clients: McpHubClient[] }>("/api/ext/local-runtime/mcp-clients");
-    setClients(data.clients || []);
+    const next = data.clients || [];
+    setClients(next);
+    return next;
   }, []);
 
   const loadTools = useCallback(async (serverId: number) => {
@@ -86,13 +140,46 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
     });
   }, []);
 
+  const loadProfileGrants = useCallback(
+    async (slug: string, group: string, catalog: McpServer[]) => {
+      setLoadingProfile(true);
+      setError(null);
+      setProfileLoaded(false);
+      try {
+        const data = await apiFetch<{ group: string; grants: McpClientGrant[] }>(
+          `/api/ext/local-runtime/mcp-clients/${encodeURIComponent(slug)}/profile-grants?group=${encodeURIComponent(group)}`,
+        );
+        setRules(buildRulesFromGrants(data.grants || [], catalog));
+        setProfileLoaded(true);
+      } catch (err) {
+        // First-time profile (no grants yet): treat 404 as empty editor, not a hard failure.
+        const status = err instanceof ApiError ? err.status : 0;
+        if (status === 404) {
+          setRules(buildRulesFromGrants([], catalog));
+          setProfileLoaded(true);
+          setError(null);
+        } else {
+          setRules([]);
+          setProfileLoaded(false);
+          setError(err instanceof ApiError ? err.detail : "Failed to load profile grants");
+        }
+      } finally {
+        setLoadingProfile(false);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!canRead) return;
     void (async () => {
       try {
-        await refreshClients();
+        const nextClients = await refreshClients();
         const list = await apiFetch<McpServer[]>("/api/mcp/servers");
         setServers((list || []).filter((s) => s.status === "active"));
+        if (nextClients[0]) {
+          setSelectedSlug(nextClients[0].slug);
+        }
       } catch (err) {
         setError(err instanceof ApiError ? err.detail : "Failed to load Hub clients");
       }
@@ -100,35 +187,29 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
   }, [canRead, refreshClients]);
 
   useEffect(() => {
-    if (!selected) {
-      setRules([]);
-      return;
-    }
-    const grantMap = new Map<number, McpClientGrant>();
-    for (const g of selected.grants || []) {
-      grantMap.set(g.server_id, g);
-    }
-    setRules(
-      servers.map((s) => {
-        const existing = grantMap.get(s.id);
-        return {
-          server_id: s.id,
-          enabled: !!existing,
-          access_level: existing?.access_level ?? "all_tools",
-          allowed_tool_names: existing?.tool_names ?? [],
-        };
-      }),
-    );
-  }, [selected, servers]);
-
-  useEffect(() => {
-    if (!selected) return;
+    if (!selected || !selectedProfile || !profileLoaded) return;
     for (const rule of rules) {
       if (rule.enabled && rule.access_level === "selected_tools") {
         void loadTools(rule.server_id).catch(() => undefined);
       }
     }
-  }, [rules, selected, loadTools]);
+  }, [rules, selected, selectedProfile, profileLoaded, loadTools]);
+
+  function selectChannel(client: McpHubClient) {
+    setSelectedSlug(client.slug);
+    setSelectedProfile(PROFILE_PLACEHOLDER);
+    setRules([]);
+    setProfileLoaded(false);
+    setError(null);
+  }
+
+  async function changeProfile(profile: string) {
+    setSelectedProfile(profile);
+    setRules([]);
+    setProfileLoaded(false);
+    if (!profile || !selectedSlug) return;
+    await loadProfileGrants(selectedSlug, profile, servers);
+  }
 
   async function mintHubSession() {
     setBusy(true);
@@ -174,7 +255,12 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
       await apiFetch(`/api/ext/local-runtime/mcp-clients/${encodeURIComponent(slug)}`, {
         method: "DELETE",
       });
-      if (selectedSlug === slug) setSelectedSlug(null);
+      if (selectedSlug === slug) {
+        setSelectedSlug(null);
+        setSelectedProfile(PROFILE_PLACEHOLDER);
+        setRules([]);
+        setProfileLoaded(false);
+      }
       await refreshClients();
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : "Failed to delete client");
@@ -202,7 +288,7 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
   }
 
   async function saveGrants() {
-    if (!selected) return;
+    if (!selected || !selectedProfile || !profileLoaded) return;
     setSavingGrants(true);
     setError(null);
     try {
@@ -213,9 +299,9 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
           access_level: r.access_level,
           tool_names: r.access_level === "selected_tools" ? r.allowed_tool_names : [],
         }));
-      await apiFetch(`/api/ext/local-runtime/mcp-clients/${encodeURIComponent(selected.slug)}/grants`, {
+      await apiFetch(`/api/ext/local-runtime/mcp-clients/${encodeURIComponent(selected.slug)}/profile-grants`, {
         method: "PUT",
-        body: JSON.stringify({ grants }),
+        body: JSON.stringify({ group: selectedProfile, grants }),
       });
       if (selected.status !== "enabled" && grants.length > 0) {
         await apiFetch(`/api/ext/local-runtime/mcp-clients/${encodeURIComponent(selected.slug)}`, {
@@ -224,6 +310,7 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
         });
       }
       await refreshClients();
+      await loadProfileGrants(selected.slug, selectedProfile, servers);
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : "Failed to save grants");
     } finally {
@@ -243,8 +330,8 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Local runtime</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Extension plugin (ADR 0006). MCP Hub discovers IDE clients on connect; grant
-          catalog servers the same way as Integrations → MCP access control.
+          Extension plugin (ADR 0006 / 0010). Pick a channel, then an IdP profile — grants
+          load and save on demand for that profile only (All / Selected tools).
         </p>
       </div>
 
@@ -252,7 +339,7 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
         <h2 className="font-medium">MCP Hub session</h2>
         <p className="text-muted-foreground">
           Mint after IdP login, put the URL + Bearer in your IDE MCP config, connect once
-          so the Hub registers the client, then configure server access below.
+          so the Hub registers the channel, then configure profile grants below.
         </p>
         {canRead ? (
           <button
@@ -286,7 +373,7 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
 
       <section className="rounded-lg border bg-card p-4 space-y-3 text-sm">
         <div className="flex items-center justify-between gap-2">
-          <h2 className="font-medium">MCP Clients</h2>
+          <h2 className="font-medium">MCP Clients (channels)</h2>
           <button
             type="button"
             className="text-xs text-muted-foreground underline disabled:opacity-50"
@@ -297,8 +384,8 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
           </button>
         </div>
         <p className="text-muted-foreground text-xs">
-          Discovered on IDE <code className="text-xs">initialize</code>. Select a client to
-          grant MCP servers (deny by default until checked).
+          Discovered on IDE <code className="text-xs">initialize</code>. Select a channel,
+          then choose an IdP profile to load or register its tool grants.
         </p>
         {clients.length === 0 ? (
           <p className="text-muted-foreground text-xs">No clients discovered yet.</p>
@@ -311,18 +398,17 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
                   selectedSlug === c.slug ? "border-primary bg-muted/30" : ""
                 }`}
               >
-                <button
-                  type="button"
-                  className="text-left w-full"
-                  onClick={() => setSelectedSlug(c.slug)}
-                >
+                <button type="button" className="text-left w-full" onClick={() => selectChannel(c)}>
                   <div className="font-medium">
                     {c.display_name || c.slug}{" "}
                     <span className="text-muted-foreground font-normal">({c.slug})</span>
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    status={c.status} · family={c.declared_family} · servers=
-                    {(c.grants || []).length}
+                    status={c.status} · family={c.declared_family} · grant rows=
+                    {c.grant_count ?? 0}
+                    {(c.granted_profiles || c.allowed_groups || []).length > 0
+                      ? ` · profiles=${(c.granted_profiles || c.allowed_groups || []).join(",")}`
+                      : ""}
                   </div>
                 </button>
                 {canWrite ? (
@@ -360,19 +446,48 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
 
         {selected ? (
           <div className="rounded-md border bg-muted/20 p-3 space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <div>
-                <h3 className="text-sm font-medium">Server access — {selected.display_name || selected.slug}</h3>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Same pattern as Integrations → MCP: check a server, then All Tools or
-                  Selected Tools. Uncheck to revoke.
-                </p>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="space-y-2 min-w-0 flex-1">
+                <h3 className="text-sm font-medium">
+                  Profile tools — {selected.display_name || selected.slug}
+                </h3>
+                <label className="flex flex-col gap-1 text-xs max-w-sm">
+                  <span className="text-muted-foreground">IdP profile</span>
+                  <select
+                    className="rounded-md border bg-background px-2 py-1.5 text-sm"
+                    value={selectedProfile}
+                    onChange={(e) => void changeProfile(e.target.value)}
+                  >
+                    <option value={PROFILE_PLACEHOLDER}>Select a profile…</option>
+                    {LOOM_PROFILES.map((p) => {
+                      const configured = (selected.granted_profiles || selected.allowed_groups || []).includes(p);
+                      return (
+                        <option key={p} value={p}>
+                          {p}
+                          {configured ? " · configured" : ""}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </label>
+                {!selectedProfile ? (
+                  <p className="text-xs text-muted-foreground">
+                    Select a profile to load its grants or start registering tools for it.
+                  </p>
+                ) : loadingProfile ? (
+                  <p className="text-xs text-muted-foreground">Loading {selectedProfile}…</p>
+                ) : profileLoaded ? (
+                  <p className="text-xs text-muted-foreground">
+                    Editing <code className="text-xs">{selectedProfile}</code> only. Save writes
+                    this profile; other profiles are untouched.
+                  </p>
+                ) : null}
               </div>
-              {canWrite ? (
+              {canWrite && selectedProfile && profileLoaded ? (
                 <button
                   type="button"
                   className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-xs disabled:opacity-50"
-                  disabled={savingGrants}
+                  disabled={savingGrants || loadingProfile}
                   onClick={() => void saveGrants()}
                 >
                   {savingGrants ? "Saving…" : "Save"}
@@ -380,90 +495,92 @@ export function LocalRuntimePage({ canRead, canWrite }: Props) {
               ) : null}
             </div>
 
-            {servers.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No active MCP servers in the catalog.</p>
-            ) : (
-              <div className="space-y-2">
-                {rules.map((rule) => {
-                  const tools = toolsByServer[rule.server_id] || [];
-                  return (
-                    <div key={rule.server_id} className="rounded border bg-background p-3 space-y-2">
-                      <label className="flex items-center gap-2 cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={rule.enabled}
-                          disabled={!canWrite}
-                          onChange={(e) => {
-                            updateRule(rule.server_id, { enabled: e.target.checked });
-                            if (e.target.checked && rule.access_level === "selected_tools") {
-                              void loadTools(rule.server_id).catch(() => undefined);
-                            }
-                          }}
-                          className="h-3.5 w-3.5"
-                        />
-                        <span className="text-sm font-medium">{serverLabel(rule.server_id)}</span>
-                      </label>
+            {selectedProfile && profileLoaded ? (
+              servers.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No active MCP servers in the catalog.</p>
+              ) : (
+                <div className="space-y-2">
+                  {rules.map((rule) => {
+                    const tools = toolsByServer[rule.server_id] || [];
+                    return (
+                      <div key={rule.server_id} className="rounded border bg-background p-3 space-y-2">
+                        <label className="flex items-center gap-2 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={rule.enabled}
+                            disabled={!canWrite}
+                            onChange={(e) => {
+                              updateRule(rule.server_id, { enabled: e.target.checked });
+                              if (e.target.checked && rule.access_level === "selected_tools") {
+                                void loadTools(rule.server_id).catch(() => undefined);
+                              }
+                            }}
+                            className="h-3.5 w-3.5"
+                          />
+                          <span className="text-sm font-medium">{serverLabel(rule.server_id)}</span>
+                        </label>
 
-                      {rule.enabled ? (
-                        <div className="pl-6 space-y-2">
-                          <div className="flex items-center gap-4">
-                            <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                              <input
-                                type="radio"
-                                checked={rule.access_level === "all_tools"}
-                                disabled={!canWrite}
-                                onChange={() => updateRule(rule.server_id, { access_level: "all_tools" })}
-                                className="h-3 w-3"
-                              />
-                              All Tools
-                            </label>
-                            <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                              <input
-                                type="radio"
-                                checked={rule.access_level === "selected_tools"}
-                                disabled={!canWrite}
-                                onChange={() => {
-                                  updateRule(rule.server_id, { access_level: "selected_tools" });
-                                  void loadTools(rule.server_id).catch(() => undefined);
-                                }}
-                                className="h-3 w-3"
-                              />
-                              Selected Tools
-                            </label>
-                          </div>
-
-                          {rule.access_level === "selected_tools" ? (
-                            <div className="flex flex-wrap gap-2">
-                              {tools.length === 0 ? (
-                                <span className="text-xs text-muted-foreground italic">
-                                  No tools available. Refresh tools on the server in Integrations first.
-                                </span>
-                              ) : (
-                                tools.map((tool) => (
-                                  <label
-                                    key={tool.tool_name}
-                                    className="flex items-center gap-1.5 text-xs cursor-pointer"
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={rule.allowed_tool_names.includes(tool.tool_name)}
-                                      disabled={!canWrite}
-                                      onChange={() => toggleTool(rule.server_id, tool.tool_name)}
-                                      className="h-3 w-3"
-                                    />
-                                    {tool.tool_name}
-                                  </label>
-                                ))
-                              )}
+                        {rule.enabled ? (
+                          <div className="pl-6 space-y-2">
+                            <div className="flex items-center gap-4">
+                              <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                                <input
+                                  type="radio"
+                                  checked={rule.access_level === "all_tools"}
+                                  disabled={!canWrite}
+                                  onChange={() => updateRule(rule.server_id, { access_level: "all_tools" })}
+                                  className="h-3 w-3"
+                                />
+                                All Tools
+                              </label>
+                              <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                                <input
+                                  type="radio"
+                                  checked={rule.access_level === "selected_tools"}
+                                  disabled={!canWrite}
+                                  onChange={() => {
+                                    updateRule(rule.server_id, { access_level: "selected_tools" });
+                                    void loadTools(rule.server_id).catch(() => undefined);
+                                  }}
+                                  className="h-3 w-3"
+                                />
+                                Selected Tools
+                              </label>
                             </div>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+
+                            {rule.access_level === "selected_tools" ? (
+                              <div className="flex flex-wrap gap-2">
+                                {tools.length === 0 ? (
+                                  <span className="text-xs text-muted-foreground italic">
+                                    No tools available. Refresh tools on the server in Integrations first.
+                                  </span>
+                                ) : (
+                                  tools.map((tool) => (
+                                    <label
+                                      key={tool.tool_name}
+                                      className="flex items-center gap-1.5 text-xs cursor-pointer"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={rule.allowed_tool_names.includes(tool.tool_name)}
+                                        disabled={!canWrite}
+                                        onChange={() => toggleTool(rule.server_id, tool.tool_name)}
+                                        className="h-3 w-3"
+                                      />
+                                      {tool.tool_name}
+                                    </label>
+                                  ))
+                                )}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            ) : null}
           </div>
         ) : null}
       </section>

@@ -22,7 +22,7 @@ admin liberar tools.
 |-------|--------|-------------|-----|
 | **A — Declarada / discovery** | `initialize.clientInfo` | Não | UPSERT MCP Client; logs; chave de grants |
 | **B — User autenticado** | Hub session `hs_…` | Sim (IdP + token) | Acesso ao Hub |
-| **C — Policy** | `enabled` + grants (admin) | Sim (admin) | Allowlist |
+| **C — Policy** | `enabled` + grants **por perfil IdP** (ADR 0010) | Sim (admin) | Allowlist |
 
 Fluxo no Hub `initialize`:
 

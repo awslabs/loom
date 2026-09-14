@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from mcp_hub import loom_client, store
+from mcp_hub.access import grants_for_user
 from mcp_hub.identity import parse_client_info
 from mcp_hub.naming import expose_tools
 
@@ -59,14 +60,6 @@ def _read_json(handler: BaseHTTPRequestHandler) -> Any:
     return json.loads(raw.decode("utf-8") or "{}")
 
 
-def _user_allowed(groups: list[str], allowed_groups: list[str]) -> bool:
-    if not allowed_groups:
-        return True
-    if "g-admins-super" in groups:
-        return True
-    return bool(set(groups) & set(allowed_groups))
-
-
 def _build_session_allowlist(token: str, hub_session_id: str, groups: list[str]) -> tuple[str, dict[str, Any], dict[str, tuple[int, str]]]:
     slug = store.session_client_slug(hub_session_id)
     if not slug:
@@ -77,7 +70,7 @@ def _build_session_allowlist(token: str, hub_session_id: str, groups: list[str])
             "entries": [],
         }
         return "unbound", empty, {}
-    client = store.get_client(slug)
+    client = store.get_client(slug, include_grants=True)
     if client is None:
         empty = {
             "hub_session_id": hub_session_id,
@@ -87,8 +80,17 @@ def _build_session_allowlist(token: str, hub_session_id: str, groups: list[str])
         }
         return slug, empty, {}
     status = str(client.get("status") or "discovered")
-    allowed_groups = list(client.get("allowed_groups") or [])
-    if status != "enabled" or not _user_allowed(groups, allowed_groups):
+    if status != "enabled":
+        empty = {
+            "hub_session_id": hub_session_id,
+            "mcp_client_slug": slug,
+            "client_status": status,
+            "entries": [],
+        }
+        return slug, empty, {}
+    # Channel enabled → resolve tools for this user's IdP profile before list/call.
+    profile_grants = grants_for_user(groups, list(client.get("grants") or []))
+    if not profile_grants:
         empty = {
             "hub_session_id": hub_session_id,
             "mcp_client_slug": slug,
@@ -100,8 +102,8 @@ def _build_session_allowlist(token: str, hub_session_id: str, groups: list[str])
         hub_session_id=hub_session_id,
         mcp_client_slug=slug,
         client_status=status,
-        allowed_groups=allowed_groups,
-        grants=list(client.get("grants") or []),
+        allowed_groups=[],
+        grants=profile_grants,
     )
     if code != 200:
         empty = {
@@ -150,7 +152,26 @@ class HubHandler(BaseHTTPRequestHandler):
         if path.startswith("/v1/clients/"):
             if not _require_service(self):
                 return
-            slug = path.removeprefix("/v1/clients/").strip("/")
+            rest = path.removeprefix("/v1/clients/").strip("/")
+            # /v1/clients/{slug}/profile-grants?group=…  (on-demand; empty → 200 [])
+            if rest.endswith("/profile-grants") or rest.endswith("/grants"):
+                slug = rest.removesuffix("/profile-grants").removesuffix("/grants").strip("/")
+                if not slug or "/" in slug:
+                    _json(self, 404, {"error": {"message": "not_found"}})
+                    return
+                qs = parse_qs(parsed.query)
+                group = (qs.get("group") or [""])[0].strip()
+                if not group:
+                    _json(self, 400, {"error": {"message": "group_required"}})
+                    return
+                payload = store.get_profile_grants(slug, group)
+                if payload is None:
+                    # Missing client only. Empty profile grants → 200 + [].
+                    _json(self, 404, {"error": {"message": "client_not_found"}})
+                    return
+                _json(self, 200, payload)
+                return
+            slug = rest
             if not slug or "/" in slug:
                 _json(self, 404, {"error": {"message": "not_found"}})
                 return
@@ -209,12 +230,19 @@ class HubHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
-        if not path.endswith("/grants") or not path.startswith("/v1/clients/"):
+        if not path.startswith("/v1/clients/") or not (
+            path.endswith("/profile-grants") or path.endswith("/grants")
+        ):
             _json(self, 404, {"error": {"message": "not_found"}})
             return
         if not _require_service(self):
             return
-        mid = path.removeprefix("/v1/clients/").removesuffix("/grants").strip("/")
+        mid = (
+            path.removeprefix("/v1/clients/")
+            .removesuffix("/profile-grants")
+            .removesuffix("/grants")
+            .strip("/")
+        )
         if not mid or "/" in mid:
             _json(self, 404, {"error": {"message": "not_found"}})
             return
@@ -227,9 +255,13 @@ class HubHandler(BaseHTTPRequestHandler):
         if not isinstance(grants, list):
             _json(self, 400, {"error": {"message": "grants_required"}})
             return
-        row = store.put_grants(mid, grants)
+        group = str(body.get("group") or "").strip() if isinstance(body, dict) else ""
+        if not group:
+            _json(self, 400, {"error": {"message": "group_required"}})
+            return
+        row = store.put_profile_grants(mid, group, grants)
         if row is None:
-            _json(self, 404, {"error": {"message": "not_found"}})
+            _json(self, 404, {"error": {"message": "client_not_found"}})
             return
         _json(self, 200, row)
 

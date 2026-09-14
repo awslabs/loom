@@ -172,7 +172,8 @@ A2A; decisão em ADR futura.
 5. [020 — Observabilidade](../specs/020-mcp-hub-observability.md)
 6. [ADR 0008 — MCP Clients](0008-mcp-hub-clients.md)
 7. [ADR 0009 — Identificação MCP Client](0009-mcp-hub-client-identification.md)
-8. [021 — MCP Clients](../specs/021-mcp-hub-clients.md) · [022 — Identificação](../specs/022-mcp-hub-client-identification.md)
+8. [ADR 0010 — Grants por perfil](0010-mcp-hub-profile-grants.md)
+9. [021 — MCP Clients](../specs/021-mcp-hub-clients.md) · [022 — Identificação](../specs/022-mcp-hub-client-identification.md) · [023 — Perfil](../specs/023-mcp-hub-profile-grants.md)
 
 Implementação **não** começa até as specs **016–018** serem aceitas.
 Na segurança (019), v1 prefere `tools/call` via BFF Loom para não guardar

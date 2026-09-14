@@ -24,6 +24,7 @@ Não criar documentação nova em `docs/` na raiz do Loom.
 |-----------|----------|
 | [CHANGELOG-LOOM-FORK.md](CHANGELOG-LOOM-FORK.md) | Divergência vs upstream (paths Core) |
 | [backlog/refactoring.md](backlog/refactoring.md) | Oportunidades de refactor (aguardar Dev) |
+| [backlog/local-runtime-guideline-refactor-plan.md](backlog/local-runtime-guideline-refactor-plan.md) | Plano fasado: aderência hexagonal / guidelines |
 | [adr/README.md](adr/README.md) | ADRs 0001–0012 |
 | [specs/README.md](specs/README.md) | Specs 001–025 |
 

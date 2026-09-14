@@ -26,8 +26,8 @@
 | **Docs** | `local-runtime/docs/**` (ADRs, specs, guias, este changelog) | Baixo — fora do Loom; raiz `docs/` do fork removida |
 | **Config** | `etc/docker/**`, `.env.example`, realm Keycloak, LiteLLM local | Médio — stack local do fork |
 
-**Baseline de comparação:** `main` alinhada a `upstream/main`.  
-**Branch de trabalho tipica:** `feat/keycloak-idp-abstraction` e derivadas.
+**Baseline de comparação:** `main` do fork (`origin/main`).  
+**Branch de planejamento (refactor guidelines):** `plan/local-runtime-guideline-refactor`.
 
 **Instruções de agentes:** hub [`README.md`](README.md) → [`guide/rules.md`](guide/rules.md) →
 guias em [`guide/`](guide/). Pointers: Cursor
@@ -74,6 +74,20 @@ Checklist pós-merge:
 ---
 
 ## Registro
+
+### 2026-09-14 — Plano de refactor local-runtime × guidelines
+
+**Contexto:** iniciar planejamento (sem código) para aderência hexagonal / SOLID.
+
+| Zona | Paths | O que mudou |
+|------|-------|-------------|
+| **Docs** | `backlog/local-runtime-guideline-refactor-plan.md` | Plano fasado 0–6 |
+| **Docs** | `backlog/refactoring.md` | REF-02…06 |
+| **Docs** | `README.md`, este changelog | Links / baseline fork |
+
+**Impacto no sync upstream:** baixo.
+
+---
 
 ### 2026-09-14 — Guia Python best practices (hexagonal alvo)
 

@@ -1,8 +1,8 @@
 # 7. MCP Hub (Fase 1) — tools MCP governadas pelo Loom
 
-- **Status:** Proposta (Fase 1: só tools; agents fora de escopo)
+- **Status:** Aceito (Fase 1 entregue; Fase 2 = [ADR 0012](0012-mcp-hub-agents-as-tools.md))
 - **Data:** 2026-09-13
-- **Atualizado:** 2026-09-14 — auth IDE = OAuth IdP ([ADR 0011](0011-mcp-hub-oauth-idp.md)); mint removido
+- **Atualizado:** 2026-09-14 — Fase 2 agents como tools ([ADR 0012](0012-mcp-hub-agents-as-tools.md))
 - **Decisores:** Mantenedores da plataforma / extensão local
 - **Relacionada a:**
   [ADR 0001 — IdP](0001-keycloak-as-identity-provider.md),
@@ -70,7 +70,8 @@ mcp-runtime / MCP HTTP remotos
 4. **Autorização:** [ADR 0008](0008-mcp-hub-clients.md) + grants por perfil
    ([ADR 0010](0010-mcp-hub-profile-grants.md)); discovery `clientInfo`
    ([ADR 0009](0009-mcp-hub-client-identification.md)).
-5. **Só tools MCP.** Sem `list_agents` / `invoke_agent` / A2A nesta fase.
+5. **Só tools MCP na Fase 1.** Fase 2 = agents como tools MCP
+   ([ADR 0012](0012-mcp-hub-agents-as-tools.md)); sem A2A por default.
 6. **Nomes sem prefixo de produto.** Tools do Hub não usam prefixo `loom_`.
    Em colisão entre servidores, namespacar pelo **servidor/template**.
 7. **Extensão ADR 0006.** Código em `local-runtime/services/mcp-hub`;
@@ -122,17 +123,18 @@ Detalhe de auth: [ADR 0011](0011-mcp-hub-oauth-idp.md).
 
 ### Fora de escopo (Fase 1)
 
-- Invocar agents Loom via Hub (Fase 2 — tool MCP ou A2A/API).
+- Invocar agents Loom via Hub — decidido em
+  [ADR 0012](0012-mcp-hub-agents-as-tools.md) (Fase 2).
 - Segundo catálogo MCP ou templates no Hub.
-- Validação JWT IdP dentro do `mcp-hub`.
 - Expor Hub em `0.0.0.0` sem auth em produção.
 - Substituir o Chat do Loom; Chat continua no caminho invoke atual.
 
-### Fase 2 (não decide detalhes aqui)
+### Fase 2
 
-Expor invocação de agents permitidos à conta (nomes sem prefixo `loom_`),
-reusando o contrato de invoke. Pode ser tools MCP adicionais ou protocolo
-A2A; decisão em ADR futura.
+[ADR 0012](0012-mcp-hub-agents-as-tools.md): agents como tools MCP
+(`agent__{slug}`), opt-in por canal (`agents_enabled`), RBAC via
+`loom:group` (sem grants de agent por perfil). A2A gateway **não** é o
+default.
 
 ## Alternativas consideradas
 
@@ -170,7 +172,8 @@ A2A; decisão em ADR futura.
 7. [ADR 0009 — Identificação MCP Client](0009-mcp-hub-client-identification.md)
 8. [ADR 0010 — Grants por perfil](0010-mcp-hub-profile-grants.md)
 9. [ADR 0011 — OAuth IdP](0011-mcp-hub-oauth-idp.md)
-10. [021](../specs/021-mcp-hub-clients.md) · [022](../specs/022-mcp-hub-client-identification.md) · [023](../specs/023-mcp-hub-profile-grants.md)
+10. [ADR 0012 — Agents como tools](0012-mcp-hub-agents-as-tools.md)
+11. [021](../specs/021-mcp-hub-clients.md) · [022](../specs/022-mcp-hub-client-identification.md) · [023](../specs/023-mcp-hub-profile-grants.md) · [025](../specs/025-mcp-hub-agents-as-tools.md)
 
 Na segurança (019), v1 prefere `tools/call` via BFF Loom para não guardar
 secrets de MCP remotos no Hub.

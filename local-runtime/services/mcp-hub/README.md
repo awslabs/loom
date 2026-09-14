@@ -54,4 +54,4 @@ If Keycloak was created before this client existed, either
 | `MCP_HUB_OIDC_AUDIENCE` | Default `loom-mcp-hub` |
 | `MCP_HUB_OIDC_JWKS_URL` | JWKS reachable from container |
 
-Contract: `2026-09-hub-1`. Docs: ADR 0011, specs 017 / 024.
+Contract: `2026-09-hub-1`. Docs: ADR 0011 / 0012, specs 017 / 024 / 025.

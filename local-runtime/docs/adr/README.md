@@ -11,10 +11,12 @@ canônicas ficam em `docs/adr/` na raiz do Loom:
 - [0009 — Identificação do MCP Client](../../docs/adr/0009-mcp-hub-client-identification.md)
 - [0010 — Grants por perfil IdP](../../docs/adr/0010-mcp-hub-profile-grants.md)
 - [0011 — Auth OAuth IdP (sem mint)](../../docs/adr/0011-mcp-hub-oauth-idp.md)
+- [0012 — Agents como tools MCP](../../docs/adr/0012-mcp-hub-agents-as-tools.md)
 
-Specs Hub: `docs/specs/016`–`024` (clients = [021](../../docs/specs/021-mcp-hub-clients.md),
+Specs Hub: `docs/specs/016`–`025` (clients = [021](../../docs/specs/021-mcp-hub-clients.md),
 identificação = [022](../../docs/specs/022-mcp-hub-client-identification.md),
 perfil = [023](../../docs/specs/023-mcp-hub-profile-grants.md),
-OAuth = [024](../../docs/specs/024-mcp-hub-oauth.md)).
+OAuth = [024](../../docs/specs/024-mcp-hub-oauth.md),
+agents = [025](../../docs/specs/025-mcp-hub-agents-as-tools.md)).
 
 Ao extrair este diretório para um repo git próprio, copiar essas ADRs para cá.

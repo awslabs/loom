@@ -2,9 +2,10 @@
 
 - **Status:** Rascunho
 - **Data:** 2026-09-13
-- **Atualizado:** 2026-09-13 — grants por perfil IdP ([ADR 0010](../adr/0010-mcp-hub-profile-grants.md))
-- **Implementa:** [ADR 0008](../adr/0008-mcp-hub-clients.md), [ADR 0010](../adr/0010-mcp-hub-profile-grants.md)
-- **Depende de:** [ADR 0006](../adr/0006-local-runtime-extension-repo.md), [017](017-mcp-hub-session.md), [018](018-mcp-hub-allowlist.md), [022](022-mcp-hub-client-identification.md), [023](023-mcp-hub-profile-grants.md)
+- **Atualizado:** 2026-09-14 — `agents_enabled` ([ADR 0012](../adr/0012-mcp-hub-agents-as-tools.md))
+- **Implementa:** [ADR 0008](../adr/0008-mcp-hub-clients.md), [ADR 0010](../adr/0010-mcp-hub-profile-grants.md),
+  [ADR 0012](../adr/0012-mcp-hub-agents-as-tools.md)
+- **Depende de:** [ADR 0006](../adr/0006-local-runtime-extension-repo.md), [017](017-mcp-hub-session.md), [018](018-mcp-hub-allowlist.md), [022](022-mcp-hub-client-identification.md), [023](023-mcp-hub-profile-grants.md), [025](025-mcp-hub-agents-as-tools.md)
 
 ## 1. Objetivo
 
@@ -23,6 +24,7 @@ conhecidos a priori.
 | `declared_name` / `declared_version` | último `clientInfo` visto |
 | `declared_family` | cursor \| claude-code \| … \| unknown |
 | `status` | `discovered` \| `enabled` \| `disabled` |
+| `agents_enabled` | `bool` — default `false`; se `true` e `enabled`, Hub inclui tools `agent__*` (ADR 0012 / [025](025-mcp-hub-agents-as-tools.md)) |
 | `first_seen_at` / `last_seen_at` | |
 | `allowed_groups` | derivado: união dos `group` nos grants (índice) |
 
@@ -59,8 +61,9 @@ enabled ──(admin)──► disabled
 disabled ──(admin)──► enabled
 ```
 
-`discovered` / `disabled` → allowlist vazia.
-`enabled` sem grant para o perfil do user → allowlist vazia.
+`discovered` / `disabled` → allowlist MCP vazia; sem `agent__*`.
+`enabled` sem grant para o perfil → subset MCP vazio.
+`enabled` + `agents_enabled` → subset agent via RBAC ([025](025-mcp-hub-agents-as-tools.md)).
 
 Seeds opcionais (atalho): admin pode pré-criar slug+grants; o initialize
 ainda faz UPSERT por `clientInfo`.
@@ -68,9 +71,9 @@ ainda faz UPSERT por `clientInfo`.
 ## 4. APIs (extensão / plugin)
 
 ```text
-GET    .../mcp-clients                 # summary (granted_profiles, grant_count)
+GET    .../mcp-clients                 # summary (granted_profiles, grant_count, agents_enabled)
 GET    .../mcp-clients/{slug}
-PATCH  .../mcp-clients/{slug}          # status, display_name
+PATCH  .../mcp-clients/{slug}          # status, display_name, agents_enabled
 GET    .../mcp-clients/{slug}/profile-grants?group=…  # on demand; vazio → 200 []
 PUT    .../mcp-clients/{slug}/profile-grants   # { group, grants[] } — um perfil
 DELETE .../mcp-clients/{slug}
@@ -89,6 +92,7 @@ token Hub ou store embutido no mcp-hub.
 - [ ] Enable + grant do perfil → list/call ok para esse user
 - [ ] GET profile-grants vazio → 200 [] e UI editável
 - [ ] Outro perfil no mesmo canal → toolset distinto
-- [ ] Sem Agent / sem Chat
+- [ ] `agents_enabled` default false; toggle inclui/exclui `agent__*` ([025](025-mcp-hub-agents-as-tools.md))
+- [ ] Sem grants de agent por perfil
 - [ ] Dois `clientInfo.name` distintos → dois clients
 - [ ] Código/UI em `local-runtime/` (+ proxy BFF `profile-grants`)

@@ -24,15 +24,20 @@ Store: `MCP_HUB_STORE_PATH` (default `/data/hub_clients.json`).
 {
   "mcpServers": {
     "loom-hub": {
-      "url": "http://127.0.0.1:8790/mcp"
+      "url": "http://127.0.0.1:8790/mcp",
+      "auth": {
+        "CLIENT_ID": "loom-mcp-hub",
+        "scopes": ["openid", "profile"]
+      }
     }
   }
 }
 ```
 
-Do **not** put `Authorization` headers. Cursor runs OAuth against Keycloak
-client `loom-mcp-hub` (realm import). After connect, configure profile
-grants in Local runtime.
+Do **not** put `Authorization` headers. Use static `auth.CLIENT_ID` so Cursor
+skips Dynamic Client Registration (Keycloak Trusted Hosts rejects DCR by
+default). Redirect allowlist includes `http://localhost:8787/callback`.
+After connect, configure profile grants in Local runtime.
 
 If Keycloak was created before this client existed, either
 `make local.reset` (fresh import) or run

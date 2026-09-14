@@ -31,7 +31,9 @@ Manager. As senhas locais são `Loom-Local-Dev-1` para os usuários do realm e
   direto entre o navegador e o Keycloak.
 
 - **Client `loom-mcp-hub`** — OAuth público + PKCE para MCP Clients (Cursor).
-  Audience `loom-mcp-hub` no access token; redirect `cursor://…` e localhost.
+  Audience `loom-mcp-hub` no access token; redirects `cursor://…` e
+  `http://localhost:8787/callback` (loopback atual do Cursor). No `mcp.json`
+  use `auth.CLIENT_ID: "loom-mcp-hub"` para evitar DCR (Trusted Hosts).
   Ver ADR 0011 / spec 024.
 
 ## Usuários

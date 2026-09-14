@@ -1,7 +1,8 @@
 # Spec 026 — Templates de agents locais
 
-- **Status:** Rascunho (aprovado em ADR; implementação A1+)
+- **Status:** A1 implementado (loader + `guia-biblioteca.yaml`; A2+ pendente)
 - **Data:** 2026-09-14
+- **Atualizado:** 2026-09-14 — A1 loader/tests
 - **Implementa:** [ADR 0013](../adr/0013-local-agent-templates-worker-pool.md)
 - **Depende de:** [ADR 0005](../adr/0005-local-agent-runtime.md),
   [Spec 011 — contrato](011-local-agent-runtime-contract.md),
@@ -124,12 +125,12 @@ invoke usa a config materializada; “reset to template” relê o YAML
 
 ## 8. Critérios de aceite (A1)
 
-- [ ] Diretório `templates/` + pelo menos um YAML de exemplo
+- [x] Diretório `templates/` + pelo menos um YAML de exemplo
       (ex. `guia-biblioteca.yaml`)
-- [ ] Loader allowlist (id desconhecido → erro claro)
-- [ ] Teste unitário: parse + reject schema inválido
-- [ ] Docs: ADR 0013 + este spec + entrada changelog
-- [ ] Sem mudança obrigatória de Core nesta fase
+- [x] Loader allowlist (id desconhecido → erro claro)
+- [x] Teste unitário: parse + reject schema inválido
+- [x] Docs: ADR 0013 + este spec + entrada changelog
+- [x] Sem mudança obrigatória de Core nesta fase
 
 ## 9. Não fazer
 

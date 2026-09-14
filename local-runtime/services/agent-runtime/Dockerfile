@@ -6,9 +6,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent_runtime ./agent_runtime
+COPY templates ./templates
 
 ENV AGENT_RUNTIME_HOST=0.0.0.0
 ENV AGENT_RUNTIME_PORT=8766
+ENV AGENT_TEMPLATES_DIR=/app/templates
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 

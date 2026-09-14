@@ -361,7 +361,7 @@ Não misturar com schema/ORM do Loom Core.
 | Modelo LLM | LiteLLM (único gateway do control plane) | OpenAI / Anthropic / …; `cursor-local` → cursor-adapter. Bedrock → AgentCore |
 | IdP ativo | **Fork (PG)** `identity_providers` | Keycloak/Entra (**local-runtime** / SaaS) |
 | Template stdio | **Fork** colunas em `mcp_servers` | **mcp-runtime** YAML allowlist |
-| Template agent local | **Extension** YAML (`agent-runtime/templates/`, [spec 026](../specs/026-local-agent-templates.md)) | `agents.source=local` + escopo no invoke ([ADR 0013](../adr/0013-local-agent-templates-worker-pool.md)) |
+| Template agent local | **Extension** YAML (`agent-runtime/templates/`, [spec 026](../specs/026-local-agent-templates.md)); loader `yaml_agent_templates` | `agents.source=local` + escopo materializado no invoke ([ADR 0013](../adr/0013-local-agent-templates-worker-pool.md)) |
 
 ```text
                     ┌──────────────────────────┐

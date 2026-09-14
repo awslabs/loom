@@ -7,3 +7,7 @@ class AgentRuntimeError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+class TemplateError(ValueError):
+    """Invalid or unknown local agent template (Spec 026)."""

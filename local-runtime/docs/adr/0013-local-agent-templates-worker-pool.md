@@ -204,7 +204,7 @@ flowchart TB
 | Fase | Entrega |
 |------|---------|
 | **A0** | Pool no compose (`AGENT_RUNTIME_REPLICAS≥2`); SSE `Connection: close` — *feito / em curso* |
-| **A1** | Spec templates + schema YAML + template de exemplo (`guia-biblioteca`) |
+| **A1** | Spec templates + schema YAML + template de exemplo (`guia-biblioteca`) — **feito** (loader) |
 | **A2** | Registro create local a partir de template (BFF/UI — Core só com ok do Dev) |
 | **A3** | Deployment K8s do mesmo contrato HTTP + HPA |
 | **A4** | (Opcional) isolamento mais forte / multi-tenant limits |

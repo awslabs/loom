@@ -75,6 +75,13 @@ Checklist pós-merge:
 
 ## Registro
 
+### 2026-09-14 — A1: agent templates loader (`guia-biblioteca`)
+
+| Zona | Path | Nota |
+|------|------|------|
+| **Extension** | `services/agent-runtime/templates/`, `domain/agent_template.py`, `adapters/outbound/yaml_agent_templates.py` | Spec 026 allowlist + materialize config; sem Core |
+| **Extension** | compose mount `AGENT_TEMPLATES_DIR`, Dockerfile `COPY templates` | |
+
 ### 2026-09-14 — ADR 0013 + specs 026/027 (templates + worker pool)
 
 | Zona | Path | Nota |

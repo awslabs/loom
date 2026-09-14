@@ -189,7 +189,8 @@ else:
 Local runtime → MCP Client selecionado:
 
 1. Toggle **Expose Loom agents** (`agents_enabled`).
-2. Texto de ajuda: visibilidade = `loom:group` do user OAuth no IDE.
+2. Texto de ajuda: visibilidade = `loom:group` do user OAuth no IDE
+   (IdP ativo: Keycloak / Microsoft Entra ID).
 3. Sem dropdown de perfil para agents; profile dropdown continua só para
    grants de **servers** (023).
 

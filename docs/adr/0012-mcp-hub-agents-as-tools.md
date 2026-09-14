@@ -118,7 +118,7 @@ flowchart TB
   user(["Usuario IDE"])
   ide(["MCP Client<br/>Cursor / Claude Code"])
   loom["Loom local stack<br/>Hub + Backend + Runtimes"]
-  idp{{"Keycloak"}}
+  idp{{"IdP ativo<br/>Keycloak / Microsoft Entra ID"}}
 
   user -->|"login OAuth"| idp
   ide -->|"MCP /mcp + Bearer"| loom
@@ -142,7 +142,7 @@ flowchart TB
     db[("PostgreSQL<br/>agents + tags")]
   end
 
-  idp{{"Keycloak"}}
+  idp{{"IdP ativo<br/>Keycloak / Microsoft Entra ID"}}
   remote{{"MCP HTTP / AgentCore"}}
 
   ide -->|"tools/list · tools/call"| hub

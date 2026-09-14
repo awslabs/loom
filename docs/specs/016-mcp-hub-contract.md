@@ -18,7 +18,8 @@ que agrega:
 2. **tools de agents** (`agent__*`) quando o canal tem `agents_enabled`
    (ADR 0012 / [025](025-mcp-hub-agents-as-tools.md)).
 
-Auth do IDE = OAuth IdP ([024](024-mcp-hub-oauth.md)); **sem mint**.
+Auth do IDE = OAuth contra o **IdP ativo** (Keycloak / Microsoft Entra ID;
+[024](024-mcp-hub-oauth.md)); **sem mint**.
 
 `contract_version`: `"2026-09-hub-1"`. Mudança incompatível → nova versão.
 

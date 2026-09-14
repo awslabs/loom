@@ -1,14 +1,14 @@
 # MCP Hub
 
-User-facing MCP facade (ADR 0007 / 0008 / 0010 / **0011**). Discovers MCP
-Clients on `initialize`. Admin grants catalog tools **per IdP profile**.
-IDE auth = **OAuth IdP** (Keycloak) — **no mint**, no `hs_…` Bearer in
-`mcp.json`.
+User-facing MCP facade (ADR 0007 / 0008 / 0010 / **0011** / **0012**).
+Discovers MCP Clients on `initialize`. Admin grants catalog tools **per
+IdP profile**. IDE auth = **OAuth against the active IdP** (Keycloak /
+Microsoft Entra ID / …) — **no mint**, no `hs_…` Bearer in `mcp.json`.
 
 ```text
 IDE (URL only)
   → 401 + Protected Resource Metadata
-  → Keycloak Authorization Code + PKCE
+  → Active IdP (Keycloak / Microsoft Entra ID) Authorization Code + PKCE
   → Bearer access_token (aud=loom-mcp-hub)
   → mcp-hub validates JWKS → grants for user groups
       → Loom BFF materialize / tools/call (service token)
@@ -35,13 +35,15 @@ Store: `MCP_HUB_STORE_PATH` (default `/data/hub_clients.json`).
 ```
 
 Do **not** put `Authorization` headers. Use static `auth.CLIENT_ID` so Cursor
-skips Dynamic Client Registration (Keycloak Trusted Hosts rejects DCR by
-default). Redirect allowlist includes `http://localhost:8787/callback`.
-After connect, configure profile grants in Local runtime.
+skips Dynamic Client Registration (some IdPs, e.g. Keycloak Trusted Hosts,
+reject anonymous DCR). Redirect allowlist includes
+`http://localhost:8787/callback`. After connect, configure profile grants
+in Local runtime.
 
-If Keycloak was created before this client existed, either
-`make local.reset` (fresh import) or run
-`scripts/ensure-kc-mcp-hub-client.sh` against the running stack.
+Local stack: if Keycloak was created before the Hub OAuth client existed,
+either `make local.reset` (fresh import) or run
+`scripts/ensure-kc-mcp-hub-client.sh`. With Microsoft Entra ID as the
+active IdP, register an equivalent public PKCE app instead.
 
 ## Env
 
@@ -50,8 +52,8 @@ If Keycloak was created before this client existed, either
 | `MCP_HUB_SERVICE_TOKEN` | Hub ↔ Loom only |
 | `LOOM_BACKEND_URL` | Hub → backend |
 | `MCP_HUB_RESOURCE` | Canonical resource URL (aud/resource check) |
-| `MCP_HUB_OIDC_ISSUER` | Token `iss` (browser Keycloak URL) |
+| `MCP_HUB_OIDC_ISSUER` | Token `iss` (browser URL of the **active** IdP) |
 | `MCP_HUB_OIDC_AUDIENCE` | Default `loom-mcp-hub` |
-| `MCP_HUB_OIDC_JWKS_URL` | JWKS reachable from container |
+| `MCP_HUB_OIDC_JWKS_URL` | JWKS reachable from container (may differ from browser issuer host) |
 
 Contract: `2026-09-hub-1`. Docs: ADR 0011 / 0012, specs 017 / 024 / 025.

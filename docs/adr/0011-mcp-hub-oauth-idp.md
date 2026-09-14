@@ -4,7 +4,7 @@
 - **Data:** 2026-09-14
 - **Decisores:** Mantenedores da plataforma / extensão local
 - **Relacionada a:**
-  [ADR 0001 — Keycloak](0001-keycloak-as-identity-provider.md),
+  [ADR 0001 — IdP](0001-keycloak-as-identity-provider.md),
   [ADR 0007 — MCP Hub](0007-mcp-hub.md),
   [ADR 0008 — MCP Clients](0008-mcp-hub-clients.md),
   [ADR 0009 — Identificação](0009-mcp-hub-client-identification.md),
@@ -23,8 +23,10 @@ A Fase 1 do Hub exige **mint manual** na UI Loom: o user copia
    Resource Metadata) que Cursor e outros clients já implementam;
 4. mantém um segundo tipo de token (`hs_…`) paralelo ao IdP.
 
-Queremos: o **MCP Client** autentica no IdP e recebe o token de forma
-segura; o Hub **não** oferece mint nem fallback `hs_…`.
+Queremos: o **MCP Client** autentica no **IdP ativo** do Loom e recebe o
+token de forma segura; o Hub **não** oferece mint nem fallback `hs_…`.
+O comportamento **não depende** de qual adapter está ativo
+(Keycloak / Microsoft Entra ID / … — ADR 0001).
 
 ## Decisão
 
@@ -32,14 +34,14 @@ segura; o Hub **não** oferece mint nem fallback `hs_…`.
 
 ```text
 Resource (MCP Hub)     = http://127.0.0.1:8790/mcp  (URL canônica do resource)
-Authorization Server   = Keycloak (mesmo IdP do Loom — ADR 0001)
+Authorization Server   = IdP ativo do Loom (Keycloak / Microsoft Entra ID / …)
 MCP Client (Cursor, …) = OAuth public client + PKCE
 ```
 
 1. IDE conecta ao Hub **só com a URL** (sem Bearer no `mcp.json`).
 2. Hub responde `401` + `WWW-Authenticate` apontando Protected Resource
    Metadata (PRM).
-3. Client descobre AS (Keycloak), faz Authorization Code + PKCE +
+3. Client descobre AS (issuer do IdP ativo), faz Authorization Code + PKCE +
    `resource=<canonical Hub URL>`.
 4. User autentica/consent no browser do IdP.
 5. Client guarda `access_token` (e refresh) no cofre do IDE.
@@ -61,17 +63,21 @@ Introspect/`mcp_hub_sessions` de mint **não** são API do IDE. Se o
 código legado existir durante migração, deve falhar fechado para
 clientes MCP (não documentar como fallback).
 
-### Keycloak como AS
+### IdP ativo como AS (Keycloak / Microsoft Entra ID)
 
-- Client OAuth dedicado ao Hub (ex. `loom-mcp-hub`) ou reuso controlado
-  do frontend **somente se** redirect URIs do IDE forem registráveis;
-  preferir client MCP separado.
-- Scopes mínimos: o necessário para groups + resource Hub (ex. `openid`,
-  claim `groups`, scope de API do resource).
+Independente do provider registrado no Loom:
+
+- Client OAuth dedicado ao Hub (ex. `loom-mcp-hub`) ou app registration
+  equivalente no Entra; preferir client MCP separado do frontend.
+- Scopes/claims mínimos: groups Loom + resource Hub (ex. `openid`,
+  claim `groups` / groups Entra mapeados ao vocabulário `g-users-*`).
 - PKCE `S256` obrigatório.
 - Tokens com audiência/resource amarrados à URL canônica do Hub
   (RFC 8707). Tokens emitidos só para o frontend Loom **não** autenticam
   o Hub.
+
+Local compose usa Keycloak como AS de desenvolvimento; produção pode
+usar Microsoft Entra ID — Hub só consome `issuer` / JWKS / `groups`.
 
 ### Hub (resource server)
 
@@ -82,7 +88,7 @@ Publica:
 - Em request sem Bearer / Bearer inválido: `401` + `WWW-Authenticate`
   com `resource_metadata`.
 
-Valida access token localmente (JWKS Keycloak) **ou** via endpoint de
+Valida access token localmente (JWKS do IdP ativo) **ou** via endpoint de
 introspecção do AS se o token for opaco — v1 preferir **JWT validável
 por JWKS** para o Hub não depender do BFF a cada request de auth.
 
@@ -91,10 +97,10 @@ Service token `MCP_HUB_SERVICE_TOKEN` continua **só** Hub↔Loom
 
 ### Fronteira Loom
 
-| Extensão (Hub) | Loom / IdP |
-|----------------|------------|
-| PRM + 401 challenge | Keycloak authorize/token/JWKS |
-| Validar JWT do resource | Realm/client OAuth do Hub |
+| Extensão (Hub) | Loom / IdP ativo |
+|----------------|------------------|
+| PRM + 401 challenge | authorize/token/JWKS (Keycloak / Entra / …) |
+| Validar JWT do resource | Client OAuth do Hub no IdP ativo |
 | Grants / discovery | Intactos (0008–0010) |
 | Sem mint UI | Remover endpoints mint do BFF |
 
@@ -103,10 +109,11 @@ Service token `MCP_HUB_SERVICE_TOKEN` continua **só** Hub↔Loom
 | # | Opção | Resultado |
 |---|--------|-----------|
 | 1 | Manter mint + OAuth como fallback | **Rejeitada** — dois caminhos de credencial; mint permanece atrito. |
-| 2 | Loom como AS intermediário (code → token Loom) | Adiada; Keycloak direto é suficiente se `resource`/audience forem configuráveis. Reavaliar se DCR/CIMD ou resource indicators falharem no realm. |
+| 2 | Loom como AS intermediário (code → token Loom) | Adiada; IdP direto é suficiente se `resource`/audience forem configuráveis. Reavaliar se DCR/CIMD ou resource indicators falharem no IdP. |
 | 3 | JWT IdP do frontend (aud=loom-frontend) no Hub | **Rejeitada** — audience errada; replay entre superfícies. |
 | 4 | Hub valida JWT via BFF a cada request | Possível; v1 prefere JWKS no Hub para latência/fail-closed local. |
 | 5 | client_credentials (M2M) para IDE | **Rejeitada** para user tools; IDE é user-delegated. |
+| 6 | Acoplar Hub só a Keycloak | **Rejeitada** — comportamento deve seguir o IdP ativo (Keycloak / Microsoft Entra ID). |
 
 ## Consequências
 
@@ -114,7 +121,7 @@ Service token `MCP_HUB_SERVICE_TOKEN` continua **só** Hub↔Loom
   reescrita (validação de token; mint removido), [016](../specs/016-mcp-hub-contract.md) /
   [019](../specs/019-mcp-hub-security.md) atualizadas.
 - ADR 0007/0008/0009: Bearer do IDE = access token OAuth do resource Hub.
-- Compose/Keycloak: client + audience/resource do Hub; docs de `mcp.json`
+- Config do IdP ativo: client + audience/resource do Hub; docs de `mcp.json`
   sem `headers.Authorization` fixo.
 - Implementação **não** começa até 024 + 017 revistos serem aceitos.
 

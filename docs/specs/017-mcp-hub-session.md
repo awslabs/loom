@@ -2,7 +2,7 @@
 
 - **Status:** Rascunho
 - **Data:** 2026-09-13
-- **Atualizado:** 2026-09-14 — mint removido; OAuth IdP ([ADR 0011](../adr/0011-mcp-hub-oauth-idp.md))
+- **Atualizado:** 2026-09-14 — IdP ativo = Keycloak / Microsoft Entra ID (comportamento IdP-agnóstico)
 - **Implementa:** [ADR 0007](../adr/0007-mcp-hub.md), [ADR 0011](../adr/0011-mcp-hub-oauth-idp.md)
 - **Depende de:** [016](016-mcp-hub-contract.md), [024](024-mcp-hub-oauth.md),
   [018](018-mcp-hub-allowlist.md), [019](019-mcp-hub-security.md),
@@ -11,9 +11,10 @@
 ## 1. Objetivo
 
 Definir como o Hub autentica o **usuário** em cada request MCP.
-Credencial = **access token OAuth** emitido pelo Keycloak para o
-**resource** Hub (024). O **MCP Client** continua sendo descoberto no
-`initialize` (022), não na auth.
+Credencial = **access token OAuth** emitido pelo **IdP ativo**
+(Keycloak / Microsoft Entra ID / …) para o **resource** Hub (024).
+O **MCP Client** continua sendo descoberto no `initialize` (022), não na
+auth.
 
 **Mint / `hs_…`:** removidos. Sem fallback.
 
@@ -23,8 +24,8 @@ Credencial = **access token OAuth** emitido pelo Keycloak para o
 Authorization: Bearer <access_token>
 ```
 
-Somente header. Token deve ser JWT validável via JWKS do issuer Keycloak
-(v1).
+Somente header. Token deve ser JWT validável via JWKS do issuer do IdP
+ativo (v1).
 
 ## 3. Validação (Hub)
 
@@ -48,7 +49,7 @@ Falha em qualquer passo → `401` (+ challenge 024 se aplicável).
 | Env | Uso |
 |-----|-----|
 | `MCP_HUB_RESOURCE` | URL canônica do resource (default local acima) |
-| `MCP_HUB_OIDC_ISSUER` | Issuer Keycloak |
+| `MCP_HUB_OIDC_ISSUER` | Issuer do IdP ativo (Keycloak / Entra / …) |
 | `MCP_HUB_OIDC_AUDIENCE` | Audience esperada (se distinta do resource URL) |
 | JWKS | Discovery do issuer (`/.well-known/openid-configuration`) |
 

@@ -34,6 +34,8 @@ Manager. As senhas locais são `Loom-Local-Dev-1` para os usuários do realm e
   Audience `loom-mcp-hub` no access token; redirects `cursor://…` e
   `http://localhost:8787/callback` (loopback atual do Cursor). No `mcp.json`
   use `auth.CLIENT_ID: "loom-mcp-hub"` para evitar DCR (Trusted Hosts).
+  Este client é o AS **local** (Keycloak); com Microsoft Entra ID como IdP
+  ativo, use app registration equivalente — o Hub só lê issuer/JWKS/groups.
   Ver ADR 0011 / spec 024.
 
 ## Usuários

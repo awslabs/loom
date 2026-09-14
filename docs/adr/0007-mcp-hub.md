@@ -53,7 +53,7 @@ mcp-hub  (local-runtime, data plane)
 Loom FastAPI (control plane)
     │  catálogo, materialize, tools/call, grants
     ▼
-Keycloak (AS)  ←── browser OAuth PKCE do IDE
+Keycloak / Microsoft Entra ID (AS)  ←── browser OAuth PKCE do IDE
 mcp-runtime / MCP HTTP remotos
 ```
 
@@ -62,9 +62,10 @@ mcp-runtime / MCP HTTP remotos
 1. **Um catálogo.** O Hub não cadastra servidores. Lê o catálogo Loom e
    encaminha para as fachadas já existentes (`stdio` via mcp-runtime,
    `sse` / `streamable_http` remotos).
-2. **Login = IdP do Loom (Keycloak).** O MCP Client faz OAuth Authorization
-   Code + PKCE; token no secret store do IDE ([ADR 0011](0011-mcp-hub-oauth-idp.md)).
-   **Sem mint** e **sem fallback** `hs_…`.
+2. **Login = IdP ativo do Loom (Keycloak / Microsoft Entra ID).** O MCP
+   Client faz OAuth Authorization Code + PKCE; token no secret store do
+   IDE ([ADR 0011](0011-mcp-hub-oauth-idp.md)). **Sem mint** e **sem
+   fallback** `hs_…`. O fluxo é o mesmo qualquer que seja o IdP ativo.
 3. **Hub como resource server.** Publica PRM; valida access token (JWKS /
    audience = URL canônica do Hub). Service token Hub↔Loom separado.
 4. **Autorização:** [ADR 0008](0008-mcp-hub-clients.md) + grants por perfil
@@ -95,7 +96,7 @@ flowchart TB
     mr["mcp-runtime"]
   end
 
-  idp{{"Keycloak AS<br/>OAuth PKCE"}}
+  idp{{"IdP ativo<br/>Keycloak / Microsoft Entra ID<br/>OAuth PKCE"}}
   remote{{"MCP HTTP remoto"}}
 
   ide -->|"1 URL /mcp"| hub
@@ -114,7 +115,8 @@ flowchart TB
 
 1. IDE configura **só** a URL do Hub (`mcp.json` sem Bearer fixo).
 2. Primeiro request → `401` + Protected Resource Metadata (024).
-3. IDE completa OAuth no Keycloak (PKCE, `resource` = Hub).
+3. IDE completa OAuth no IdP ativo — Keycloak / Microsoft Entra ID
+   (PKCE, `resource` = Hub).
 4. IDE envia `Authorization: Bearer <access_token>` em `/mcp`.
 5. Hub valida JWT; `initialize` descobre MCP Client; allowlist por perfil.
 6. Refresh = OAuth do client; **não** há mint na UI Loom.

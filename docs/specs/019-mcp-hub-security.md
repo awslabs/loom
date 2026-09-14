@@ -2,7 +2,7 @@
 
 - **Status:** Rascunho
 - **Data:** 2026-09-13
-- **Atualizado:** 2026-09-14 — OAuth IdP; mint removido ([ADR 0011](../adr/0011-mcp-hub-oauth-idp.md))
+- **Atualizado:** 2026-09-14 — OAuth IdP ativo (Keycloak / Microsoft Entra ID); mint removido ([ADR 0011](../adr/0011-mcp-hub-oauth-idp.md))
 - **Implementa:** [ADR 0007](../adr/0007-mcp-hub.md), [ADR 0011](../adr/0011-mcp-hub-oauth-idp.md)
 - **Depende de:** [016](016-mcp-hub-contract.md), [017](017-mcp-hub-session.md),
   [024](024-mcp-hub-oauth.md), [018](018-mcp-hub-allowlist.md),
@@ -26,7 +26,7 @@
               ▼
 ┌─ zona Loom (control plane) ──────────────────────────┐
 │  catálogo, materialize, tools/call, ACL grants       │
-│  IdP = Keycloak (AS do resource Hub)                 │
+│  IdP ativo = Keycloak / Microsoft Entra ID / … (AS do resource Hub) │
 └──────────────────────────────────────────────────────┘
               │
               ▼
@@ -40,7 +40,7 @@
 | IDE → mcp-hub | Access token OAuth (017 / 024) |
 | mcp-hub → Loom materialize/call | `MCP_HUB_SERVICE_TOKEN` + contexto user |
 | mcp-hub → mcp-runtime | via BFF Loom (preferido) / `MCP_RUNTIME_TOKEN` só compose |
-| Usuário → IdP | Authorization Code + PKCE (Keycloak) |
+| Usuário → IdP ativo | Authorization Code + PKCE (Keycloak / Microsoft Entra ID) |
 
 **Proibido:** mint UI; Bearer `hs_…`; JWT com audience do frontend Loom;
 token na query string.

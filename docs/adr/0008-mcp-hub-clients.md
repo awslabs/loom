@@ -84,7 +84,7 @@ prova do aplicativo (ADR 0009).
 
 | Loom (core) | Extensão |
 |-------------|----------|
-| IdP (Keycloak) + BFF `info` / materialize / tools-call | Store MCP Clients + grants |
+| IdP ativo (Keycloak / Microsoft Entra ID) + BFF `info` / materialize / tools-call | Store MCP Clients + grants |
 | Service token Hub↔Loom | UPSERT no initialize; allowlist |
 | Mint endpoints → **410** (ADR 0011) | UI: descobertos → enable → grants |
 
@@ -94,7 +94,7 @@ Bind client↔conexão ocorre no Hub após `initialize` (side-state por
 ### Fluxo
 
 ```text
-IDE ─URL Hub─► 401 + PRM → OAuth PKCE Keycloak → Bearer JWT
+IDE ─URL Hub─► 401 + PRM → OAuth PKCE (IdP ativo: Keycloak / Entra) → Bearer JWT
 IDE ─initialize + Bearer─► Hub
          │ UPSERT mcp_client (discovered)
          │ connection_id = oauth:{sub}

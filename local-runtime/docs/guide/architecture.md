@@ -3,10 +3,15 @@
 Visão atual do **fork** Loom + `local-runtime` (co-located).  
 Atualizar **sempre** que a arquitetura mudar — ver [rules.md](rules.md) § Manutenção desta arquitetura.
 
+**Princípio:** `local-runtime` **estende** o Loom — não substitui o data plane de
+produção. AgentCore / harness na AWS e Bedrock (via LiteLLM ou AgentCore)
+continuam no desenho; sidecars locais são caminhos **adicionais** (laptop /
+compose), com o mesmo BFF como control plane.
+
 | Nível C4 | Conteúdo |
 |----------|----------|
 | **L1 Context** | Sistema no mundo (pessoas + sistemas externos) |
-| **L2 Containers** | Processos / deployables |
+| **L2 Containers** | Processos / deployables (Core + extensão local) |
 | **L3 Components** | Peças internas dos containers críticos |
 | **Dados** | Postgres (Loom) + store Hub + IdP |
 
@@ -17,11 +22,13 @@ Não usar sintaxe `C4Context`/`C4Container`/`C4Component` (muitos previews não 
 (`MCP_HUB_*`, `AGENT_RUNTIME_*`, `LOOM_DATABASE_URL`, issuer IdP, etc.). Nada disso
 é contrato fixo da arquitetura — o diagrama descreve **papéis e relações**.
 
-Relacionados: [ADR 0006](../adr/0006-local-runtime-extension-repo.md), [overview](overview.md),
-[scalability-reliability.md](scalability-reliability.md),
+Relacionados: [ADR 0005](../adr/0005-local-agent-runtime.md),
+[ADR 0006](../adr/0006-local-runtime-extension-repo.md),
+[spec 003 LiteLLM](../specs/003-litellm-as-sole-llm-gateway.md),
+[overview](overview.md), [scalability-reliability.md](scalability-reliability.md),
 [CHANGELOG-LOOM-FORK.md](../CHANGELOG-LOOM-FORK.md).
 
-**Última revisão:** 2026-09-14 (Hub store → Postgres `mcp_hub`)
+**Última revisão:** 2026-09-14 (repor AgentCore/Bedrock — extend, not replace)
 
 ---
 
@@ -34,11 +41,13 @@ flowchart TB
     ADM[Admin IdP]
   end
 
-  SYS[Loom + local-runtime<br/>agents, MCP catalog, Hub, runtimes]
+  SYS[Loom + local-runtime<br/>control plane + extensões]
 
   IDP[Identity Provider<br/>OIDC / OAuth AS]
   IDE[Cursor IDE<br/>MCP client]
-  LLM[LLM providers<br/>via LiteLLM gateway]
+  AC[AWS AgentCore / Harness<br/>data plane produção]
+  BR[Amazon Bedrock<br/>modelos / tokens]
+  LLMGW[LiteLLM gateway<br/>único front de modelo]
   MCPX[MCP servers externos<br/>ADO, Grafana, Rancher, …]
 
   DEV -->|HTTPS UI| SYS
@@ -47,9 +56,16 @@ flowchart TB
   SYS -->|discover JWKS token| IDP
   IDE -->|PKCE client loom-mcp-hub| IDP
   ADM --> IDP
-  SYS --> LLM
+  SYS -->|invoke deploy/harness| AC
+  SYS --> LLMGW
+  AC -->|provider litellm / Bedrock| BR
+  LLMGW -->|bedrock e outros| BR
   SYS -->|tools allowlisted| MCPX
 ```
+
+AgentCore e Bedrock são **sistemas externos AWS** do produto Loom. O stack
+`local-runtime` não os remove do contexto — acrescenta runtimes/MCP locais e o
+Hub OAuth no mesmo control plane.
 
 ---
 
@@ -61,18 +77,21 @@ flowchart TB
 
   subgraph LoomExt[Loom-ext deployables]
     FE[Frontend SPA<br/>Extension Host + plugin]
-    BE[Backend BFF<br/>FastAPI]
+    BE[Backend BFF<br/>FastAPI control plane]
     PG[(PostgreSQL<br/>estado Loom)]
     HUB[mcp-hub<br/>MCP resource server]
     HSTORE[(Hub store<br/>clients / grants)]
     MCPR[mcp-runtime<br/>stdio supervisor]
-    AR[agent-runtime<br/>agent loop]
+    AR[agent-runtime<br/>loop local — extensão]
     CA[cursor-adapter]
     LL[LiteLLM proxy]
     IDPL[IdP deploy<br/>ex. Keycloak ou Entra]
   end
 
+  AC[AgentCore / Harness AWS<br/>data plane produção]
+  BR[Amazon Bedrock]
   MCPX[MCP externos]
+  CURSOR[Cursor Agent SDK]
 
   USER --> FE
   USER -->|MCP OAuth| HUB
@@ -81,16 +100,25 @@ flowchart TB
   BE -->|OIDC bootstrap / JWKS config| IDPL
   BE -->|service token| HUB
   BE -->|service token| MCPR
-  BE -->|service token| AR
+  BE -->|source=local invoke| AR
+  BE -->|source=deploy/harness invoke_agent| AC
   BE --> LL
   HUB -->|materialize / tools / agents| BE
   HUB --> HSTORE
   HUB -->|validate access_token| IDPL
   AR --> LL
   AR --> MCPR
-  LL --> CA
+  AC -->|provider=litellm| LL
+  LL -->|bedrock / outros| BR
+  LL -->|cursor-local| CA
+  CA --> CURSOR
   MCPR --> MCPX
 ```
+
+Invoke no BFF escolhe o **adapter** (`local` | `agentcore` | `harness`) — ver
+[ADR 0005](../adr/0005-local-agent-runtime.md). LiteLLM permanece o único gateway
+de modelo ([spec 003](../specs/003-litellm-as-sole-llm-gateway.md)); Bedrock é um
+*backend* atrás do proxy (e/ou do AgentCore), não um segundo cliente no BFF.
 
 ### Endpoints (configuráveis)
 
@@ -104,8 +132,10 @@ local de desenvolvimento; em produção use DNS/TLS e secrets store.
 | MCP Hub resource | `MCP_HUB_PUBLIC_URL` | `http://127.0.0.1:8790/mcp` |
 | Hub → BFF | `MCP_HUB_INTERNAL_URL` + `MCP_HUB_SERVICE_TOKEN` | service network |
 | mcp-runtime | `MCP_RUNTIME_URL` + `MCP_RUNTIME_TOKEN` | service network |
-| agent-runtime | `AGENT_RUNTIME_URL` + `AGENT_RUNTIME_TOKEN` | service network |
+| agent-runtime (extensão) | `AGENT_RUNTIME_URL` + `AGENT_RUNTIME_TOKEN` | service network |
+| AgentCore / harness (produção) | credenciais AWS / ARNs no BFF | conta AWS |
 | LiteLLM | discovery / proxy URL | compose service |
+| Bedrock (via LiteLLM) | modelos no config LiteLLM | AWS region + IAM |
 | Postgres | `LOOM_DATABASE_URL` | compose service |
 | IdP | issuer / JWKS from `identity_providers` or env bootstrap | Keycloak ou Entra |
 
@@ -144,15 +174,19 @@ flowchart TB
   subgraph be[Backend FastAPI]
     AUTH[auth / idp ACL]
     MCPR[routers mcp* / hub proxy]
-    INV[invocations / local_invoke]
+    INV[invocations<br/>adapter: local / agentcore / harness]
     HSVC[mcp_hub* services]
     ORM[SQLAlchemy models]
   end
+  AR[agent-runtime<br/>extensão local]
+  AC[AgentCore / Harness AWS]
   MCPR --> AUTH
   MCPR --> HSVC
   HSVC --> ORM
   INV --> ORM
   INV --> AUTH
+  INV -->|source=local| AR
+  INV -->|source=deploy/harness| AC
 ```
 
 ### L3c — Frontend + plugin
@@ -317,7 +351,8 @@ Não misturar com schema/ORM do Loom Core.
 |----------|--------|--------|
 | `profile_grants[].server_id` | **local-runtime** Hub PG | **Core** `mcp_servers.id` |
 | `agents_enabled` | **local-runtime** Hub PG | **Core** `agents` + RBAC tags (invoke via BFF) |
-| Runs `agent__*` | BFF cria **Core** `invocation_sessions` / `invocations` | — |
+| Runs `agent__*` / Chat invoke | BFF cria **Core** `invocation_sessions` / `invocations` | Adapter **local** → agent-runtime; **deploy/harness** → AgentCore (produção) |
+| Modelo LLM | LiteLLM (único gateway) | Bedrock e outros como *backends*; `cursor-local` → cursor-adapter |
 | IdP ativo | **Fork (PG)** `identity_providers` | Keycloak/Entra (**local-runtime** / SaaS) |
 | Template stdio | **Fork** colunas em `mcp_servers` | **local-runtime** YAML + mcp-runtime |
 

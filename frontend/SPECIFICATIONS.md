@@ -84,6 +84,7 @@ frontend/
 │   │   ├── LoginPage.tsx        # Cognito login + NEW_PASSWORD_REQUIRED challenge
 │   │   ├── McpServersPage.tsx  # MCP server management: list, detail, tools, access
 │   │   ├── A2aAgentsPage.tsx       # A2A agent management with card/access tabs
+│   │   ├── SkillsPage.tsx          # Read-only browser for registry SKILL records (list + detail)
 │   │   ├── MemoryManagementPage.tsx # Memory persona: memory resource management
 │   │   ├── TaggingPage.tsx         # Tagging persona: tag policy + tag profile CRUD
 │   │   ├── SettingsPage.tsx        # Settings persona: display preferences + cost estimation settings

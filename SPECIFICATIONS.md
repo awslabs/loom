@@ -18,6 +18,7 @@ The frontend is organized around persona-based workflows, accessible via a sideb
 - **Agents** (Build) — Deploy new agents or import existing ones. Includes agent listing with card/table view toggle.
 - **Memory** (Build) — Create new AgentCore Memory resources with configurable strategies or import existing ones.
 - **Integrations** (Build) — MCP Servers and A2A Agents as tabs: register/manage MCP servers (tools, access control) and A2A agents (Agent Cards, access control to skills).
+- **Skills** (Build) — Read-only browser for the SKILL records of the bound Agent Registry: card listing with status badges and a per-record detail view (description, version, repository/website links). Gated by `registry:read`; shown as an empty-state guide when no registry is configured. A matching "Skills" section appears in the Platform Catalog when the registry is enabled.
 - **Security Admin** (Operate) — Manage IAM roles, authorizer configurations, credentials, and permission requests.
 - **Analytics** (Operate) — "User Activity" tab: platform usage analytics for super-admins, tracking user logins, user actions, and page navigation at the browser session level, with summary cards, charts, and per-session drill-down. "Costs" tab: cost dashboard.
 - **Settings** (System) — Manage display preferences (theme, timezone), models, networking, infrastructure, and a Tagging tab (tag policies and tag profiles). Accessible to all scopes; write operations require `*:write`.

@@ -2,11 +2,11 @@
 import logging
 import os
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.dependencies.auth import UserInfo, get_current_user
+from app.services.net_guard import safe_post
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ def exchange_token(request: TokenExchangeRequest) -> dict:
             if client_secret:
                 params["client_secret"] = client_secret
 
-        resp = httpx.post(
+        resp = safe_post(
             idp.token_endpoint,
             data=params,
             headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},

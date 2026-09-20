@@ -2,12 +2,9 @@
 
 import base64
 import logging
-import urllib.parse
-import urllib.request
-import json
 from typing import Any
 
-from app.services.oidc import require_https_url
+from app.services.net_guard import safe_post
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +41,9 @@ def get_cognito_token(
     if scopes:
         body_params["scope"] = " ".join(scopes)
 
-    require_https_url(token_url)
-    data = urllib.parse.urlencode(body_params).encode()
-    req = urllib.request.Request(token_url, data=data, headers=headers, method="POST")
-
-    with urllib.request.urlopen(req) as resp:  # nosec B310
-        result = json.loads(resp.read().decode())
-
-    return result
+    resp = safe_post(token_url, data=body_params, headers=headers)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _get_pool_domain(pool_id: str, region: str) -> str:

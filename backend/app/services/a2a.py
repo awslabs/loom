@@ -5,7 +5,14 @@ from typing import Any
 
 import httpx
 
-from app.services.net_guard import SSRFBlockedError, guarded_get, safe_get, safe_post
+from app.services.net_guard import (
+    SSRFBlockedError,
+    get_trusted_oauth_hosts,
+    guarded_get,
+    is_trusted_oauth_host,
+    safe_get,
+    safe_post,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +53,13 @@ def _get_oauth2_token(agent: Any) -> str | None:
             logger.warning("Failed to discover token endpoint from %s: %s", agent.oauth2_well_known_url, e)
 
     if not token_url:
+        return None
+
+    if not is_trusted_oauth_host(token_url, get_trusted_oauth_hosts()):
+        logger.warning(
+            "Refusing to send OAuth2 client credentials to untrusted token endpoint %s "
+            "(host is not a configured identity provider or authorizer)", token_url,
+        )
         return None
 
     try:

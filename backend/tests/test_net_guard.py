@@ -11,8 +11,10 @@ from app.services.net_guard import (
     SSRFBlockedError,
     _is_always_disallowed_ip,
     _is_disallowed_ip,
+    get_trusted_oauth_hosts,
     guarded_get,
     guarded_post,
+    is_trusted_oauth_host,
     safe_get,
     safe_post,
 )
@@ -234,6 +236,71 @@ class TestGuardedGetPost(unittest.TestCase):
             sent_request = mock_client.send.call_args[0][0]
             self.assertIn("10.0.0.5", str(sent_request.url))
             self.assertEqual(sent_request.method, "POST")
+
+
+class TestIsTrustedOauthHost(unittest.TestCase):
+    def test_matching_host_case_insensitive(self) -> None:
+        self.assertTrue(is_trusted_oauth_host("https://Auth.Example.com/token", {"auth.example.com"}))
+
+    def test_non_matching_host_rejected(self) -> None:
+        self.assertFalse(is_trusted_oauth_host("https://attacker.example.net/collect", {"auth.example.com"}))
+
+    def test_empty_trusted_set_rejects_everything(self) -> None:
+        self.assertFalse(is_trusted_oauth_host("https://auth.example.com/token", set()))
+
+
+class TestGetTrustedOauthHosts(unittest.TestCase):
+    """Exercises the real DB query against an isolated in-memory SQLite DB,
+    since app.services.mcp/a2a tests mock get_trusted_oauth_hosts directly."""
+
+    def setUp(self) -> None:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+        from app.db import Base
+        from app.models.authorizer_config import AuthorizerConfig  # noqa: F401
+        from app.models.identity_provider import IdentityProvider  # noqa: F401
+
+        self.engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=self.engine)
+        self.TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+
+    def test_empty_db_returns_empty_set(self) -> None:
+        with patch("app.db.SessionLocal", self.TestingSessionLocal):
+            self.assertEqual(get_trusted_oauth_hosts(), set())
+
+    def test_collects_hosts_from_identity_providers_and_authorizer_configs(self) -> None:
+        from app.models.authorizer_config import AuthorizerConfig
+        from app.models.identity_provider import IdentityProvider
+
+        session = self.TestingSessionLocal()
+        try:
+            session.add(IdentityProvider(
+                name="okta-login", provider_type="okta",
+                issuer_url="https://login.example.com/oauth2/default",
+                client_id="client",
+            ))
+            session.add(AuthorizerConfig(
+                name="entra-authorizer", authorizer_type="other",
+                discovery_url="https://login.microsoftonline.com/tenant/v2.0/.well-known/openid-configuration",
+            ))
+            # A row with no discovery_url configured must not blow up the query.
+            session.add(AuthorizerConfig(name="cognito-authorizer", authorizer_type="cognito", discovery_url=None))
+            session.commit()
+        finally:
+            session.close()
+
+        with patch("app.db.SessionLocal", self.TestingSessionLocal):
+            hosts = get_trusted_oauth_hosts()
+        self.assertEqual(hosts, {"login.example.com", "login.microsoftonline.com"})
+
+    def test_db_failure_fails_closed_to_empty_set(self) -> None:
+        with patch("app.db.SessionLocal", side_effect=RuntimeError("db unavailable")):
+            self.assertEqual(get_trusted_oauth_hosts(), set())
 
 
 if __name__ == "__main__":

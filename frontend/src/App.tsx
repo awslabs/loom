@@ -30,6 +30,9 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { IntegrationsPage } from "@/pages/IntegrationsPage";
 import type { SessionResponse, InvocationResponse } from "@/api/types";
 import { getRegistryConfig } from "@/api/settings";
+import { listMemories } from "@/api/memories";
+import { listMcpServers } from "@/api/mcp";
+import { listA2aAgents } from "@/api/a2a";
 import { AuthProvider, useAuth, GROUP_SCOPES, type Scope } from "@/contexts/AuthContext";
 import { LoginPage } from "@/pages/LoginPage";
 import { BookOpen, Shield, Bot, Brain, Network, LogOut, User, Settings, Eye, BarChart3, Sun, Moon } from "lucide-react";
@@ -311,6 +314,26 @@ function AppContent() {
     if (isAuthenticated) void getRegistryConfig().then((c) => setRegistryEnabled(c.enabled)).catch(() => {});
   }, [isAuthenticated]);
 
+  // Sidebar counts for Memory and Integrations (Agents already gets its count from `agents`).
+  const [memoryCount, setMemoryCount] = useState(0);
+  const [mcpCount, setMcpCount] = useState(0);
+  const [a2aCount, setA2aCount] = useState(0);
+  useEffect(() => {
+    if (isAuthenticated && effectiveHasScope("memory:read")) {
+      void listMemories().then((data) => setMemoryCount(data.length)).catch(() => {});
+    }
+  }, [isAuthenticated, effectiveHasScope]);
+  useEffect(() => {
+    if (isAuthenticated && effectiveHasScope("mcp:read")) {
+      void listMcpServers().then((data) => setMcpCount(data.length)).catch(() => {});
+    }
+  }, [isAuthenticated, effectiveHasScope]);
+  useEffect(() => {
+    if (isAuthenticated && effectiveHasScope("a2a:read")) {
+      void listA2aAgents().then((data) => setA2aCount(data.length)).catch(() => {});
+    }
+  }, [isAuthenticated, effectiveHasScope]);
+
   type ViewMode = "cards" | "table";
   const [catalogViewMode, setCatalogViewMode] = useState<ViewMode>("cards");
   const [agentsViewMode, setAgentsViewMode] = useState<ViewMode>("cards");
@@ -522,6 +545,7 @@ function AppContent() {
                 label={t("nav.memory")}
                 active={activePersona === "memory"}
                 onClick={() => setActivePersona("memory")}
+                count={memoryCount}
               />
             )}
             {(effectiveHasScope("mcp:read") || effectiveHasScope("mcp:write") || effectiveHasScope("a2a:read") || effectiveHasScope("a2a:write")) && (
@@ -530,6 +554,7 @@ function AppContent() {
                 label={t("nav.integrations")}
                 active={activePersona === "integrations"}
                 onClick={() => setActivePersona("integrations")}
+                count={mcpCount + a2aCount}
               />
             )}
           </SidebarSection>

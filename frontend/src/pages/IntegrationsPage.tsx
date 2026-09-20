@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { McpServersPage } from "@/pages/McpServersPage";
 import { A2aAgentsPage } from "@/pages/A2aAgentsPage";
+import { listMcpServers } from "@/api/mcp";
+import { listA2aAgents } from "@/api/a2a";
 import type { AgentResponse } from "@/api/types";
 
 export type IntegrationsTab = "mcp" | "a2a";
@@ -48,6 +50,16 @@ export function IntegrationsPage({
   const { t } = useTranslation();
   const [mcpCount, setMcpCount] = useState(0);
   const [a2aCount, setA2aCount] = useState(0);
+
+  // Fetch tab counts independently of which tab is mounted — Radix unmounts
+  // inactive TabsContent, so relying solely on each page's onCountChange
+  // would leave the other tab's badge stuck at 0 until it's first opened.
+  useEffect(() => {
+    if (canViewMcp) void listMcpServers().then((data) => setMcpCount(data.length)).catch(() => {});
+  }, [canViewMcp]);
+  useEffect(() => {
+    if (canViewA2a) void listA2aAgents().then((data) => setA2aCount(data.length)).catch(() => {});
+  }, [canViewA2a]);
 
   // If the caller only has access to one of the two tabs, render it directly
   // without the Tabs shell so a single-scope user isn't shown an empty tab list.

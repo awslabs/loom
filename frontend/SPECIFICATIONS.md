@@ -139,7 +139,7 @@ The 7 personas are grouped under four section headers (`SidebarSection` in `App.
 
 | Persona | Icon | Description | Sidebar visibility gate | Default |
 |---------|------|-------------|--------------------------|---------|
-| Platform Catalog | BookOpen | Aggregate dashboard: agents, memory, MCP servers, A2A agents, and (folded in per R4) Registry records, each in its own collapsible section | `catalog:read` | Yes |
+| Platform Catalog | BookOpen | Aggregate dashboard: agents, memory, MCP servers, and A2A agents, each in its own collapsible section (the Registry section was removed — see [issue #37 design decisions](#page-modernization--shared-components-issue-37)) | `catalog:read` | Yes |
 | Agents | Bot | Deploy new agents or import existing ones | `agent:read` or `agent:write` | |
 | Memory | Brain | Create and manage AgentCore Memory resources | `memory:read` or `memory:write` | |
 | Security Admin | Shield | Manage roles, authorizers, credentials, permissions | `security:read` or `security:write` | |
@@ -149,12 +149,13 @@ The 7 personas are grouped under four section headers (`SidebarSection` in `App.
 
 Sidebar items are conditionally rendered based on the user's scopes derived from their Cognito group membership (`effectiveHasScope`). When auth is not configured, all items are visible.
 
+**Resource counts:** Agents, Memory, and Integrations show a live count badge next to their label (`SidebarItem`'s `count` prop). Agents reuses the already-fetched `agents` list. Memory and Integrations counts are fetched independently in `App.tsx` (`listMemories`, `listMcpServers`, `listA2aAgents`) gated behind `isAuthenticated` and the relevant `*:read` scope, mirroring the `registryEnabled` fetch pattern — Integrations shows the sum of the MCP and A2A counts.
+
 **Scope-gate reference (per-tab visibility vs. edit-ability), documented at the `Persona` type declaration in `App.tsx`:**
 
 - **Integrations** sidebar item: `mcp:read || a2a:read`. MCP tab visible iff `mcp:read`, editable iff `mcp:write`. A2A tab visible iff `a2a:read`, editable iff `a2a:write`. If the caller has only one of the two read scopes, `IntegrationsPage` renders that page directly without the `Tabs` shell rather than showing an empty tab list.
 - **Settings > Tagging tab**: visible iff `tagging:read`, editable iff `tagging:write`. Previously gated by `agent:write || security:write || memory:write`, which had nothing to do with tag management — every currently-defined `GROUP_SCOPES` entry already carries `tagging:read`/`tagging:write` alongside those write scopes, so this was a no-op change for all existing groups and a correctness fix for future ones.
 - **Analytics > Costs tab**: visible iff `costs:read`, editable iff `costs:write`. Previously gated by `catalog:read`, unrelated to cost data. `g-admins-super` and `g-admins-demo` already have `costs:read`/`costs:write` in `GROUP_SCOPES` (the latter without `admin:read`), so Analytics' own sidebar/page gate was widened to `admin:read || costs:read || costs:write` — otherwise a costs-only group would lose Costs access entirely once it moved under a page gated solely by `admin:read`. The "User Activity" tab (Sessions/Actions/Page Views) remains specifically gated by `admin:read` (rendered only when `canViewSessions` is true). When both scopes are present, both render as tabs inside `AdminDashboardPage`; when only one is present, that content renders directly with no `Tabs` shell, so a costs-only caller sees just the Costs content, not an empty tab strip.
-- **Catalog > Registry section**: visible iff `registry:read`, editable iff `registry:write` — unchanged from the standalone Registry page's gate. Clicking a record drills into the full `RegistryPage` component (list + `LifecycleTimeline`/`DescriptorView` detail) rendered inline within Catalog via an `initialSelectedRecordId` prop, rather than duplicating that logic in `CatalogPage`.
 
 `GROUP_SCOPES` was previously duplicated between `AuthContext.tsx` and `App.tsx` (manually kept in sync, and had already drifted — the `App.tsx` copy was missing `mcp:read` for the `g-users-*` groups). `App.tsx` now imports the canonical `GROUP_SCOPES` from `AuthContext.tsx` (exported for this purpose) rather than maintaining its own copy.
 
@@ -187,32 +188,26 @@ Catalog  >  [Agent Name]  >  [Session ID]
 **Content:**
 - Page description: "Browse and manage registered agents and resources." with estimates disclaimer: "Costs for agents and memory resources are *estimates*."
 - Page header: "Platform Catalog" with card/table view toggle (top-right)
-- Organized into collapsible sections: Agents, Memory Resources, MCP Servers, A2A Agents, and (since issue #20) Registry. Each section header has a ChevronRight/ChevronDown toggle. Collapse state persisted to `localStorage` under `loom:collapsedSections:catalog`.
-- **Registry section** (`canViewRegistry`, gated by `registry:read`): card/table grid of registry records (`RegistryRecord`: name, descriptor type, status badge via `RegistryStatusBadge`, description, created timestamp), fetched independently of the other sections via its own loading state so a caller lacking `registry:read` never issues the `listRegistryRecords` call. Clicking a record replaces Catalog's aggregate view with the full `RegistryPage` component (list + `LifecycleTimeline`/`DescriptorView` detail), opened directly to that record via `initialSelectedRecordId`, with a "&larr; Back to Catalog" button returning to the aggregate view. `isEndUserRole` is forwarded so end-users see only `APPROVED` records, matching the standalone page's prior behavior.
+- Organized into collapsible sections: Agents, Memory Resources, MCP Servers, A2A Agents. Each section header has a ChevronRight/ChevronDown toggle. Collapse state persisted to `localStorage` under `loom:collapsedSections:catalog`. The Registry section (issue #20) was removed as part of the issue #37 redesign — registry approval status/actions remain available inline on each resource card/detail view via `RegistryStatusBadge`/`RegistryActions`.
 - Tag-based filter bar above the agents grid, with multi-select dropdowns (checkbox-based) for each tag policy with `show_on_card=true`. Client-side AND filtering with "Clear filters" button and agent count display (e.g., "Showing 3 of 12 agents")
 - Card/table view toggle applies to all sections on the page
 - Agents section: responsive grid of `AgentCard` components (3 columns on large screens) or table view
 - Memory Resources section: responsive grid of `MemoryCard` components with delete and refresh wired to API, manual RefreshCw button next to section header; or table view
+- MCP Servers / A2A Agents sections: cards match the styling used on the Integrations page ([8-integrations](#8-integrations-integrations-view)) — `CopyField` for the endpoint/base URL, a 2-col definition grid, and a footer with a health-status dot plus a dependent-agent count (cross-referencing `agents[].mcp_names`/`a2a_names`) instead of "Created" — see [Page Modernization](#page-modernization--shared-components-issue-37).
 - Transitional-state polling: if any memory is in CREATING or DELETING state, polls at 3-second intervals; stops when all resources are stable. Memories returning 404 on refresh are automatically purged.
 - Loading skeleton placeholders during data fetch
 - Empty state with instructions when no agents/memories exist
 
 ### AgentCard
 
-Each card displays:
-- Agent name (or runtime ID fallback)
-- Protocol badge (e.g., `HTTP`) — inline with name
-- Status badge (color-coded: READY=default, CREATING=secondary, FAILED=destructive) — inline with name
-- Deployment type badge (`MANAGED` or `CUSTOM`) and cost badge displayed below the info box as outline badges (not in the header row)
-- Progressive deployment status phases: `initializing`, `creating_credentials` (Creating credential provider), `creating_role` (Creating IAM role), `building_artifact` (Building artifact), `creating_ci_resource` (Building artifact & creating Code Interpreter), `deploying` (Deploying runtime / Creating harness), then "Completing deployment" / "Creating harness", "Finalizing endpoint"
-- Spinner animation when agent is in a creating/deploying state
-- Spinner animation and elapsed timer when agent is in DELETING state, using `deleteStartTime` prop for accurate timer display
-- Endpoint status badge hidden during DELETING state
-- `DEPLOY_IN_PROGRESS` set for determining transitional states
-- Active session count badge (when > 0)
-- Region, Account ID, Network mode, Available qualifiers, Authorizer (name, "Cognito", "external", or "None"), Registered timestamp
-- Tag badges (secondary variant) for tags marked `show_on_card` in tag policies, formatted as `key: value`
-- Refresh button (RefreshCw icon) and Trash2 icon (top-right) for refresh/deletion
+Redesigned in issue #37 around the shared card grammar (header · cost hero · 2-col definition grid · footer) used across all listing pages — see [Page Modernization](#page-modernization--shared-components-issue-37). Each card displays:
+- Header: mono agent name (or runtime ID fallback), `RegistryStatusBadge`, active-session-count pill (when > 0), and hover-reveal Edit/Delete icon buttons
+- `StatusPill` (dot + mono-caps text) for non-`READY` lifecycle status, using the shared semantic dot vocabulary (success/warning/destructive/neutral) rather than a solid-fill badge
+- Progressive deployment status phases (shown while transitional, with a spinner and elapsed timer): `initializing`, `creating_credentials` (Creating credential provider), `creating_role` (Creating IAM role), `building_artifact` (Building artifact), `creating_ci_resource` (Building artifact & creating Code Interpreter), `deploying` (Deploying runtime / Creating harness), then "Completing deployment" / "Finalizing endpoint". `DEPLOY_IN_PROGRESS` set drives which `deployment_status` values count as transitional.
+- Cost hero: est. cost/run in large tabular-nums mono, with a share-of-highest-shown-cost percentage and thin progress bar (`maxCost` prop, computed per listing page across its currently-shown agents)
+- 2-col definition grid (9.5px uppercase mono labels): Runtime (+ framework, e.g. "Custom · Strands"), Network (+ region), Memory, and a fourth field that resolves to MCP servers, Authorizer, or A2A agents depending on what the agent uses
+- Footer (pinned via `mt-auto` for equal-height grid rows): registered timestamp, tag/label count, and a "Details" link
+- Tag/label badges from tag policies with `show_on_card=true` are no longer rendered directly on the card (moved to the label-count footer entry + the detail view) to reduce visual noise
 
 ### Delete Confirmation
 
@@ -330,14 +325,16 @@ Full deployment form with sections:
 
 ## 7. Security Admin View
 
-**Purpose:** Manage IAM roles, authorizer configurations, authorizer credentials, and permission requests.
+**Purpose:** Manage identity providers, IAM roles, authorizer configurations, authorizer credentials, approval policies, and permission requests.
 
-**Content:**
-- `SecurityAdminPage` with sections for:
-  - **Managed Roles**: list, create (import existing / wizard), view policy document, delete. Uses `SortableCardGrid` with drag-to-reorder (storage key `security-roles`), full-width single-column layout (role cards contain long ARNs and expandable policy documents), default alphabetical sort by role name, and A-Z/Z-A sort toggle. Roles are grouped by `role_type` into collapsible sections ("Agent Roles" for `"agent"`, "Code Interpreter Roles" for `"code_interpreter"`). The import form includes a role type selector to set this field on import. `AgentResponse` includes `code_interpreter_id?: string | null` and `code_interpreter_status?: string | null` to surface CI resource status. `ManagedRole` interface includes `role_type: "agent" | "code_interpreter"`.
-  - **Authorizer Configs**: list, create (Amazon Cognito, Microsoft Entra ID, Okta, or Other type with auto-populated discovery URL for Cognito), update, delete. Uses `SortableCardGrid` with drag-to-reorder (storage key `security-authorizers`), default alphabetical sort by config name, and A-Z/Z-A sort toggle.
-  - **Authorizer Credentials**: per-config credential management (add label + client_id + client_secret, list, delete). Credential form uses 1/4 / 1/4 / 1/2 field widths. Authorizer type displayed as "Amazon Cognito", "Microsoft Entra ID", or "Okta" for known types.
-  - **Permission Requests**: create requests for additional IAM permissions, review (approve/deny) with role application. Uses `SortableCardGrid` with drag-to-reorder (storage key `security-permissions`), default alphabetical sort by role name, and A-Z/Z-A sort toggle.
+**Content (redesigned in issue #37 — see [Page Modernization](#page-modernization--shared-components-issue-37)):**
+- `SecurityAdminPage`: one "Security" header, underlined `Tabs` with a live count badge per tab, for: Identity providers, IAM roles, Authorizers, Approval policies, Permission requests.
+- All five tabs render their list rows through the shared `ExpandableRow` component (chevron · mono name · type pill · status `StatusPill` · secondary line, right-aligned meta/actions, and — when expanded — a definition-grid body inside the same card rather than a nested bordered box):
+  - **Identity providers**: a status bar states the active provider by name (or that none is active) instead of a paragraph of instructions; expanded body shows the OIDC config grid, `CopyField`s for the JWKS/authorize/token endpoints, and a scoped group-mappings panel clamped to 7 rows with "N more / show all".
+  - **IAM roles**: still grouped by `role_type` ("Agent roles" / "Code interpreter roles"), import existing / view policy / delete. The policy document renders as a table of statements — effect chip + a human-readable label for what the statement grants (derived heuristically from its actions/service, since generated policies carry no `Sid`) + service/action count, then Actions/Resources as two truncating columns clamped to 4 rows with "N more", plus a grouped/JSON view toggle. `role.role_arn` cross-referenced against `agents[].execution_role_arn` shows a live "used by N agents" count.
+  - **Authorizers**: config list plus per-config credential management, unchanged functionally; the "Linkable" indicator and credentials-empty state now use the shared status-pill/empty-state pattern.
+  - **Approval policies**: rendered as a `Table` (policy · type · matches as a mono chip · timeout · state) instead of a grid of near-identical cards; edit/delete are hover-reveal row actions.
+  - **Permission requests**: unchanged create/review/approve-deny flow; empty state now explains what will appear there instead of a bare "No permission requests." line.
 
 ---
 
@@ -424,13 +421,16 @@ When no memory resources exist: centered muted text "No memory resources yet. Ad
 
 **Purpose:** Consolidated (issue #20) sidebar entry for the two resource types that share an identical list/table/detail pattern — MCP Servers and A2A Agents — presented as tabs of one page rather than two standalone personas.
 
-`IntegrationsPage.tsx` wraps the existing `McpServersPage`/`A2aAgentsPage` components ([8a](#8a-mcp-servers-view-mcp-server-administration)/[8b](#8b-a2a-agents-view-a2a-agent-administration), both unchanged internally) with a shadcn `Tabs`. Each tab is independently gated:
+`IntegrationsPage.tsx` wraps `McpServersPage`/`A2aAgentsPage` ([8a](#8a-mcp-servers-view-mcp-server-administration)/[8b](#8b-a2a-agents-view-a2a-agent-administration)) with a shadcn `Tabs`. Each tab is independently gated:
 
-- If the caller has both `mcp:read` and `a2a:read`, both tabs render inside the `Tabs`/`TabsList`/`TabsTrigger` shell.
+- If the caller has both `mcp:read` and `a2a:read`, both tabs render inside the `Tabs`/`TabsList`/`TabsTrigger` shell, each with a live count badge.
 - If the caller has only one of the two read scopes, that page renders directly with no `Tabs` wrapper — a single-scope caller never sees an empty/disabled sibling tab.
 - Edit affordances (`readOnly` passed to each inner page) are gated by `mcp:write`/`a2a:write` respectively, independent of the other tab.
+- **Tab counts** (`mcpCount`/`a2aCount`) are fetched by `IntegrationsPage` itself via `listMcpServers`/`listA2aAgents`, independent of which tab is mounted — Radix `Tabs` unmounts inactive `TabsContent` by default, so relying solely on each child page's `onCountChange` callback would leave the not-yet-opened tab's badge stuck at its initial value until first opened.
 
 `viewMode` state (cards/table) is maintained separately per resource type in `App.tsx` (`mcpViewMode`/`a2aViewMode`), unchanged from before the consolidation. Navigating from Catalog's MCP/A2A sections (`onNavigateToMcp`/`onNavigateToA2a`) sets `activePersona("integrations")` plus `integrationsTab`/`pendingMcpId`/`pendingA2aId` so the correct tab and record open directly.
+
+**Card design (issue #37 — see [Page Modernization](#page-modernization--shared-components-issue-37)):** both list views use the shared card grammar — mono name + `RegistryStatusBadge`, a `CopyField` for the endpoint/base URL (replacing the old nested `bg-input-bg` box), a 2-col definition grid, and a footer with a health-status dot (`active`/`error`/`inactive` mapped to reachable/unreachable/inactive for MCP; last-fetched-at for A2A) plus a "used by N agents" count computed by cross-referencing `agents[].mcp_names`/`a2a_names`. Detail views use a breadcrumb (`Integrations / MCP servers|A2A agents / name`) in place of a "← Back" button, an identity header matching Agent Detail's (mono name, status pills, inline-editable description), and a right rail (Connection/Agent-card facts + "Used by" list) alongside the Tools/Skills tab.
 
 ---
 
@@ -440,20 +440,19 @@ When no memory resources exist: centered muted text "No memory resources yet. Ad
 
 **Purpose:** Register and manage MCP (Model Context Protocol) servers, view available tools, and control persona access. MCP servers can be selected during agent deployment for runtime integration.
 
-**Layout:** Page header "MCP Server Administration" with card/table view toggle (top-right), followed by "Add MCP Server" button, create form (toggle), and server list (cards default or table).
+**Layout:** "MCP servers" sub-header with card/table view toggle (top-right), followed by "Add MCP Server" button, create form (toggle), and server list (cards default or table). See [8-integrations](#8-integrations-integrations-view) for the current card design.
 
 ### Server List
 
-**Card view** (default): `SortableCardGrid` with drag-to-reorder (storage key `mcp-servers`), default alphabetical sort by name, and A-Z/Z-A sort toggle. Each card displays server name, status badge (`active`=default, `inactive`=secondary, `error`=destructive), endpoint URL, transport type badge, auth type badge, created timestamp. Delete with inline confirmation overlay (same pattern as AgentCard).
+**Card view** (default): `SortableCardGrid` with drag-to-reorder (storage key `mcp-servers`), default alphabetical sort by name, and A-Z/Z-A sort toggle. Delete with inline confirmation overlay (same pattern as AgentCard); hover-reveal Edit/Delete icons.
 
 **Table view**: Sortable columns — Name (18%), Endpoint (46%), Transport (10%), Auth (10%), Created (16%).
 
 ### Server Detail View
 
 Accessed by clicking a server card/row. Shows:
-- Header with server name, endpoint URL, status/transport/auth badges
-- "Edit Server" button (opens inline McpServerForm with pre-filled data)
-- Tab bar: Tools | Access
+- Breadcrumb (`Integrations / MCP servers / {name}`), identity header with name/status pills/inline-editable description, right-aligned "Edit" (opens inline `McpServerForm` with pre-filled data) and delete
+- Tab bar: Tools | Access, with a Connection/"Used by" rail alongside the Tools tab
 
 **Tools tab** (`McpToolList`):
 - Tool count and last-refreshed timestamp
@@ -487,27 +486,21 @@ Create/edit form with:
 
 **Purpose:** Register and manage A2A (Agent-to-Agent) protocol integrations, view structured Agent Card information, and control persona access to agent skills.
 
-**Layout:** Page header "A2A Agent Administration" with card/table view toggle (top-right), followed by "Add A2A Agent" button, create form (toggle), and agent list (cards default or table).
+**Layout:** "A2A agents" sub-header with card/table view toggle (top-right), followed by "Add A2A Agent" button, create form (toggle), and agent list (cards default or table). See [8-integrations](#8-integrations-integrations-view) for the current card design.
 
 ### Agent List
 
-**Card view** (default): `SortableCardGrid` with drag-to-reorder (storage key `a2a-agents`), default alphabetical sort by name, and A-Z/Z-A sort toggle. Each card displays agent name, version badge, base URL, provider, auth type, created timestamp. Edit/Delete buttons with inline confirmation overlay.
+**Card view** (default): `SortableCardGrid` with drag-to-reorder (storage key `a2a-agents`), default alphabetical sort by name, and A-Z/Z-A sort toggle. Hover-reveal Edit/Delete icons with inline confirmation overlay.
 
 **Table view**: Sortable columns — Name (18%), URL (46%), Version (10%), Auth (10%), Created (16%). No Provider or Status column; structure matches the MCP Servers table.
 
 ### Agent Detail View
 
 Accessed by clicking an agent card/row. Shows:
-- Header with agent name, edit button, and description
-- "Edit Agent" opens inline A2aAgentForm with pre-filled data
-- Tab bar: Agent Card | Access
+- Breadcrumb (`Integrations / A2A agents / {name}`), identity header with name/version/status pills/inline-editable description, right-aligned "Refetch card" and delete
+- Tab bar: Skills | Access, with an Agent-card-facts/"Used by"/raw-JSON rail alongside the Skills tab. `A2aSkillList` renders skills as hairline-separated rows in one card (name column + description column) rather than one bordered box per skill.
 
-**Agent Card tab** (`A2aAgentCardView`):
-- Header section: agent name, version badge, status badge, provider info, documentation link, "Refresh Card" button with last-fetched timestamp
-- Capabilities section: enabled/disabled badges for Streaming, Push Notifications, State History
-- Authentication Schemes section: badges for each scheme (e.g., Bearer, Basic)
-- Input/Output Modes section: MIME type badges
-- Skills section (`A2aSkillList`): expandable skill cards with name, skill ID, description, tag badges, examples (bulleted list), and input/output mode overrides
+**Skills tab:** main column is `A2aSkillList` (flat hairline-separated rows: name + optional tag chip, description, expandable for skill ID/examples/input-output modes); rail is `A2aAgentCardView` — facts-only now (name/description/refresh moved to the detail header): `CopyField` for the URL, protocol/auth/streaming rows, input/output mode chips, provider, and a "card fetched" status line — plus a separate "Used by" card and a collapsible raw-JSON viewer.
 
 **Access tab** (`A2aAccessControl`):
 - Lists all registered agents (personas) with checkbox to grant/revoke access
@@ -531,12 +524,15 @@ Create/edit form with:
 
 **Purpose:** Manage display preferences, platform configuration, and (per the issue #20 consolidation) tag policies/profiles via a Tagging tab.
 
-**Content:**
-- Page header: "Settings" with description "Manage preferences, models, networking, infrastructure, and tagging."
+**Content (redesigned in issue #37 — see [Page Modernization](#page-modernization--shared-components-issue-37)):**
+- Page header: "Settings" with description "Platform-wide preferences, models, networking, infrastructure, and tagging."
 - Tab bar (manual tab-pill pattern, `SettingsTab = "general" | "models" | "networking" | "infrastructure" | "tagging"`): General, Models, Networking, Infrastructure always shown; **Tagging** tab conditionally appended only when the caller has `tagging:read` (see [3. Application Shell](#3-application-shell) for the scope-gate rationale).
-- **General tab — Preferences** section: Theme selector (grouped by Light/Dark using SelectGroup/SelectLabel, always drops down via `position="popper"`) and Timezone selector (local/UTC)
-- **Models tab — Enabled Models** section (requires `settings:read`/`settings:write`): Split into a Bedrock block and an optional LiteLLM block (connection toggle, base URLs, write-only master key, Refresh button) — see [17. Alternate LLM Providers](#17-alternate-llm-providers-litellm-proxy). Per-vendor grouped checkboxes within each provider block for selecting which models are available platform-wide, plus a text filter. When none are selected for a provider, all of that provider's models are available. Save button with confirmation indicator. Status text shows count (e.g., "8 of 22 models enabled"). Uses `groupModels()` utility for alphabetical vendor grouping. Configuration is saved via `PUT /api/settings/models`.
-- **Tagging tab**: renders `TaggingPage`'s content (see below) via `readOnly={!canEditTagging}` and `userGroups` props passed from `App.tsx`.
+- Every tab uses a shared `SettingsCard`/`SettingsRow` grammar (`grid-cols-[200px_minmax(0,1fr)]`: label + helper text left, control right, hairline between rows, card max-width 980px) instead of ad hoc field layout.
+- **General tab**: a *Preferences* card (Theme — two-way segmented Light/Dark control wired to `ThemeContext`, Timezone, Language) and a *Cost estimation* card (CPU I/O-wait-discount slider, vCPU/memory rate display) linking out to Analytics.
+- **Models tab — Enabled Models** section (requires `settings:read`/`settings:write`): grouped by real vendor (Anthropic, Amazon, OpenAI, DeepSeek, Qwen, Z.AI, …, from the model catalog's `group` field) rather than by infrastructure provider (Bedrock/LiteLLM) — each vendor is a collapsible row with a tri-state checkbox (checked/unchecked/indeterminate via `TriCheckbox`), `n / total` count, share bar, and sample names; expanded rows list 2-col checkbox · display name · mono model id. A Chat/Embeddings/All segmented filter (heuristic: model id/name containing "embed") separates embedding models from chat models. When nothing is restricted, the card shows a 3-cell summary (chat count / embedding count / vendor count) plus a "Restrict models" button instead of rendering every checkbox. The LiteLLM connection (enable toggle, base URLs, write-only master key, Refresh) is its own collapsible row — its models merge into the vendor list once configured, they no longer live under a separate "LiteLLM" provider container. The save bar tracks the last-saved baseline and, when models are being newly disabled, cross-references `agents[].model_id`/`allowed_model_ids` to flag how many agents currently use a model about to be disabled. Configuration is saved via `PUT /api/settings/models`. (Family/generation bands and DEFAULT/LEGACY chips from the design mockup were not implemented — the model catalog has no generation or default-model metadata to back them.)
+- **Networking tab** (`VpcConfigPanel`): VPC configs as `ExpandableRow`s (mono name + VPC-id pill + one-line mono summary "N subnets · N AZs · N IPs available · N security groups"); expanded body is two columns — subnet tiles (id, AZ, CIDR, available IPs) on the left, one security-group rules table with `↓ INBOUND` / `↑ OUTBOUND` band rows on the right (replacing three stacked tables). "Used by N agents" (via `agents[].vpc_config_id`) is shown in the row and blocks Delete while non-zero.
+- **Infrastructure tab**: Agent registry as a `SettingsCard` with a status pill, `CopyField` for the ARN, and a dedicated destructive row (bold red label + consequence line + outline-destructive "Disable" button) instead of a bare red text link beside the Save button.
+- **Tagging tab**: renders `TaggingPage`'s content (see below) via `readOnly={!canEditTagging}`, `userGroups`, and `agents` props passed from `App.tsx`.
 - Sidebar visibility gate: `settings:read || tagging:read || tagging:write` (any grants entry to the Settings persona; the Tagging tab itself requires `tagging:read` independently).
 
 ### Tagging (Settings Tab)
@@ -548,11 +544,9 @@ Create/edit form with:
 - `custom:optional` — user-defined tags without `loom:` prefix. Optional, editable, deletable. In the profile form, each appears as a checkbox; checking it reveals a value input.
 - Designation is computed from the key (not stored). The legacy `source` column is retained in the DB for backward compatibility but is not exposed in the API or UI.
 
-**Content:**
-- **Tag Policies** section (top): displays `platform:required` tags as read-only rows with a Lock icon and designation badge, followed by `custom:optional` tags (editable/deletable with designation badge). "Add Custom Tag" button shows a form with: key (text, required), default value (optional text), show on card (checkbox, default true). Custom tags are always created as `required=false`. Sort toggle (A-Z/Z-A) available for policies and profiles.
-- **Tag Profiles** section (below policies): list, create, edit, delete named tag presets
-  - Each profile card shows: name, timestamps, and tag value badges
-  - Collapsible profile groups: platform required tags and custom optional tags are in collapsible sections (ChevronDown/ChevronRight toggle)
+**Content (redesigned in issue #37):** both sections are now real `Table`s (columns are the tag keys/profile fields themselves) instead of grids of near-identical cards — see [Page Modernization](#page-modernization--shared-components-issue-37).
+- **Tag keys** table (top): key · source pill (`PLATFORM · REQUIRED` / `CUSTOM · OPTIONAL`) · default value · on-cards · a locked icon for platform keys or hover edit/delete for custom ones. "Add Custom Tag" button shows a form with: key (text, required), default value (optional text), show on card (checkbox, default true). Custom tags are always created as `required=false`. Sort toggle (A-Z/Z-A) available.
+- **Tag profiles** table (below tag keys): rows grouped by `loom:group` under collapsible band header rows (profile · application · owner · additional-tag chips · a "used by" count computed by matching each agent's tag snapshot against the profile's tags — answering whether a profile is safe to delete)
   - Create/edit form has two sections:
     1. **Platform (Required)** — input fields for each `platform:required` tag (mandatory, marked with `*`)
     2. **Custom (Optional)** — checkbox per custom tag; checking reveals a value input. Unchecking removes the tag from the profile.
@@ -602,8 +596,8 @@ Model selection uses `SearchableSelect` with group headers sorted alphabetically
 
 ### Theme System
 Two themes (issue #37 reduced this from an earlier 10-theme set — Ayu, Catppuccin, Dracula, Everforest, Nord, Rosé Pine, Solarized, Tokyo Night — down to one light and one dark theme, both a cool-neutral-gray palette with a blue accent, closer to the restrained aesthetic of Claude's own product design):
-- **Light:** background `#fafafa`, card `#ffffff`, foreground `#18181b`, accent `#3b82f6`
-- **Dark:** background `#18181b`, card `#27272a`, foreground `#e4e4e7`, accent `#60a5fa`
+- **Light:** background `#e9ebef`, card `#ffffff`, foreground `#18181b`, accent `#3b82f6`
+- **Dark:** background `#09090b`, card `#292930`, foreground `#e4e4e7`, accent `#60a5fa`
 
 `ThemeContext` manages theme state (`Theme = "light" | "dark"`) with `localStorage` persistence (`loom-theme` key). Light applies via `:root` (no class); dark applies via a `.dark` class on `<html>`, matching Tailwind's default dark-mode convention (`@custom-variant dark (&:is(.dark *))`). A single sun/moon toggle button (in `App.tsx`'s sidebar footer and the equivalent spot in `ChatPage.tsx`) replaces the old grouped Light/Dark theme-picker dropdown, since there's no longer a choice to make within either mode. Badge `default` and `secondary` variants include `border-border` for visibility across both themes.
 
@@ -612,7 +606,25 @@ Both themes target WCAG 2.1 AA or better:
 - Text contrast (`--foreground`, `--muted-foreground`): ≥ 4.5:1 against their background surface
 - Border contrast (`--border`): ≥ 3:1 against adjacent surfaces
 
-Card backgrounds are distinct from page background in both themes (light: `#ffffff` card vs. `#fafafa` background; dark: `#27272a` card vs. `#18181b` background) so cards remain visually distinct from the page without needing a separate elevation/shadow system.
+Card backgrounds are distinct from page background in both themes (light: `#ffffff` card vs. `#e9ebef` background; dark: `#292930` card vs. `#09090b` background) so cards remain visually distinct from the page without needing a separate elevation/shadow system. Background/card/border/muted-foreground values were tightened further during the issue #37 visual pass for contrast (e.g. light `--muted-foreground` `#71717a` → `#52525b`; dark `--background` `#18181b` → `#09090b`, dark `--card` `#27272a` → `#292930`, dark `--border` `#3f3f46` → `#44444c`).
+
+Semantic status tokens added for the dot+text `StatusPill` convention (both themes): `--status-neutral`/`--status-neutral-bg`, `--warning`/`--warning-bg`, `--success`/`--success-bg`, plus `--card-shadow`. `lib/status.ts` exposes `statusDotClass(variant)` mapping a `BadgeVariant` to the corresponding dot color class.
+
+### Page Modernization — Shared Components (issue #37)
+
+Following the theme-system reduction, issue #37's second half applied a consistent visual/interaction language across every remaining page (Catalog, Agent Detail/Invoke, Session/Invocation Detail, Integrations, Security, Analytics, Settings). New shared components:
+
+- **`StatusPill`** (`components/StatusPill.tsx`) — dot + mono-caps-label pill for lifecycle/health status, taking a `variant: BadgeVariant` (`success`/`warning`/`destructive`/`neutral`) and `statusDotClass(variant)` for the dot color. Replaces plain `Badge` for status everywhere it was previously used (`AgentCard`, `MemoryCard`, `MemoryManagementPanel`, `CatalogPage` table views, Security, Integrations, Session/Invocation Detail) so status reads identically across the app. `RegistryStatusBadge` remains the separate dot+text component specifically for registry approval state.
+- **`CopyField`** (`components/CopyField.tsx`) — single-line truncated value + tooltip (full value) + copy button + toast, used anywhere a long identifier/URL/ARN needs to be both scannable and copyable (MCP/A2A endpoint URLs, IAM role ARNs, OIDC endpoints, registry ARN). Requires a `TooltipProvider` ancestor — added once at the app root in `App.tsx` (a bare `Tooltip` with no provider throws with no error boundary to catch it, which was the root cause of an earlier "screen goes gray on card click" bug).
+- **`ExpandableRow`** (`components/ExpandableRow.tsx`) — the row primitive shared across Security's five tabs and Settings' Networking tab: chevron · mono name · type pill · status `StatusPill` · secondary line, right-aligned meta + actions, and (expanded) a definition-grid body inside the same card rather than a nested bordered box on a tinted fill.
+- **`SettingsCard`/`SettingsRow`** (`components/SettingsRow.tsx`) — the `grid-cols-[200px_minmax(0,1fr)]` label/control row grammar used by every Settings tab, replacing ad hoc per-tab field layout.
+- **`ViewModeToggle`** (`components/ViewModeToggle.tsx`) — the Cards/Table segmented switch, factored out of per-page duplication and reused by Catalog, Agent List, Memory Management, MCP Servers, and A2A Agents.
+- **`MarkdownRenderer`** (`components/MarkdownRenderer.tsx`) — the shared `markdownComponents`/`MarkdownBlock` used by the Invoke response pane, Session/Invocation Detail, previously duplicated three times; GFM tables now render with a `bg-muted` header row and hairline row separators instead of full cell borders.
+- **`lib/logParser.ts`** — best-effort log-line parsing for Session Detail's log viewer (the `LogEvent` API type only carries `{timestamp_ms, timestamp_iso, message, session_id}`, no structured level/logger fields).
+
+Card grid pattern applied everywhere a resource is listed: header (mono name + status pill, hover-reveal edit/delete icons) · an optional cost/metric hero with a share-of-highest-shown bar · a 2-col definition grid with 9.5px uppercase mono labels · a footer (`mt-auto`, pinned for equal-height rows) with a date/health indicator, a secondary count, and a "Details" link. MCP/A2A cards additionally get a "used by N agents" dependent count computed by cross-referencing `agents[].mcp_names`/`a2a_names` client-side (no new API calls) — the same technique used for IAM role and VPC config "used by" counts (`execution_role_arn`, `vpc_config_id`) and tag-profile "used by" counts (matching each agent's tag snapshot against the profile's tags).
+
+**Deliberate scope trims** (documented here rather than silently dropped, since the underlying design mockups occasionally specified UI beyond what the data model or existing component library supports): hover-reveal Edit/Delete icons were kept in place of overflow (`···`) menus + `AlertDialog`s, since no dropdown-menu/alert-dialog primitive existed yet and the rest of the app already used the icon convention; MCP reachability is approximated from the existing `status` field (no live handshake polling exists); Models-tab family/generation bands and DEFAULT/LEGACY chips were not implemented (no such metadata in the model catalog); Settings' global sticky dirty-state save bar was not built for tabs that already auto-save per field (General, Infrastructure) to avoid changing save semantics — only the Models tab, which needed multi-field batch save anyway, got one.
 
 ### Drag-to-Reorder Card Grid with Alphabetical Sorting
 `SortableCardGrid` uses @dnd-kit/core + @dnd-kit/sortable for drag-and-drop reordering of cards within grid sections. Order is persisted to localStorage keyed by `storageKey`. Uses `PointerSensor` with 8px activation distance, `rectSortingStrategy`, and `closestCenter` collision detection.
@@ -761,7 +773,7 @@ The invoke panel's credential dropdown includes a "Manual token" sentinel value.
 
 ### Key Components
 - **A2aAgentForm** — Create/edit form for A2A agents with base URL input and progressive OAuth2 disclosure (auth_type toggle reveals well-known URL, client ID, secret, scopes). Test connection button in edit mode.
-- **A2aAgentCardView** — Structured display of the full Agent Card: header (name, version, status, provider, documentation, refresh button with last-fetched timestamp), capabilities and default modes displayed inline (streaming yes/no, push notifications, state history as badges, input/output modes with "none" fallback for empty arrays), authentication schemes, and skills list.
+- **A2aAgentCardView** — Rail-only facts card for the fetched Agent Card (URL `CopyField`, protocol/auth/streaming, input/output modes, provider, last-fetched status line); name/description/refresh live in the detail page header, not this component, as of issue #37.
 - **A2aSkillList** — Compact expandable skill rows matching MCP tool list style. Each row shows name and description with chevron toggle. Expanded view shows skill ID, tag badges, examples (bulleted list), and input/output mode overrides. Single-column grid layout.
 - **A2aAccessControl** — Per-persona access control for A2A agent skills. Checkbox to grant/revoke access, all_skills/selected_skills radio, individual skill checkboxes with descriptions. Deny by default.
 
@@ -770,25 +782,17 @@ The invoke panel's credential dropdown includes a "Manual token" sentinel value.
 | View | Persona | Description |
 |------|---------|-------------|
 | A2aAgentsPage | Integrations (A2A tab) | A2A agent CRUD, agent detail with Agent Card and Access tabs, card/table views. Rendered as a tab within `IntegrationsPage`, alongside McpServersPage — see [3. Application Shell](#3-application-shell) for the consolidation. |
-| CostDashboardPage | Analytics (Costs tab) | Cost dashboard with time-range selector (7d/30d/90d/All), summary cards (Total Cost, Model Tokens, Runtime, Memory), Estimated Costs table with per-agent breakdown and methodology formulas, Actual Costs with separate Runtime and Memory sub-sections, collapsible agent groups for Runtime, consolidated per-resource rows for Memory, sortable columns. Rendered within `AdminDashboardPage`, gated independently by `costs:read`/`costs:write`. |
+| CostDashboardPage | Analytics (Costs tab) | Cost dashboard with a shared time-range control (7d/30d/90d/All) lifted to `AdminDashboardPage`, a status bar ("ESTIMATED" pill + "How this is calculated" + last-N-days/invocation count), a hero total (30px mono) with cost-per-invocation and an 8px composition bar whose 3 segments are the Model/Runtime/Memory legend cells, a "Spend by agent" table sorted by total desc with a per-row composition bar and a "N agents with no invocations · show · $0.00" disclosure row collapsing zero-cost agents, and an Actual-costs rail leading with the actual total and its variance vs. estimate (`± N.N% vs est.`). Rendered within `AdminDashboardPage`, gated independently by `costs:read`/`costs:write`. |
 
 ### Token Usage and Cost Display
 
 - **LatencySummary** renamed to "Invocation Metrics": single-row layout with 7 metrics — Client Invoke, Agent Start, Cold Start, Duration, Input Tokens, Output Tokens, Est. Cost.
 - **InvocationTable**: 3 additional columns — Input Tokens, Output Tokens, Est. Cost with formatting helpers.
-- **AgentCard**: READY status badge hidden; cost badge shown when `total_estimated_cost > 0`.
+- **AgentCard**: cost rendered as the card's hero metric (see [AgentCard](#agentcard), issue #37) rather than a small badge; shown only when `total_estimated_cost > 0`.
 - **Agent table view**: Includes an Estimated Cost column (12%) showing the agent's total estimated cost from `cost_summary.total_cost`. Formatted as `~N.NNNNNN` for costs below $0.01 or `~N.NNNN` otherwise. Shows `—` (U+2014) when no cost data is available.
 - **Memory table view**: Includes an Estimated Cost column (12%) showing `cost_summary.total_memory_estimated_cost`. Same formatting as agent cost column.
 - **MemoryCard**: ACTIVE status badge hidden for visual cleanliness.
-- **CostDashboardPage**: Three-section cost dashboard:
-  - **Summary cards**: Total Cost (Model + Runtime + Memory), Model Tokens (with invocation count), Runtime (CPU + Mem breakdown), Memory (STM + LTM breakdown).
-  - **Estimated Costs table**: Per-agent breakdown with columns Agent, Model, Invocations, Model Tokens, AgentCore Runtime, AgentCore Memory, Per Invoke, Total. Single-row per agent with sub-details as `text-[10px]` inline divs (token in/out, CPU+Mem split, STM+LTM split). Methodology formulas displayed below header. Sortable columns via `SortableTableHead`. Estimates disclaimer: costs are estimates based on token heuristics and pricing defaults.
-  - **Actual Costs** with separate Runtime and Memory sub-cards:
-    - **Runtime**: Collapsible agent groups — each agent row shows agent name, session count, total CPU cost, total memory cost, and subtotal. Expand to see individual session rows with event counts, time range, resource hours (vCPU·h, GB·h), and per-session costs. Sortable at the agent level. Description: "Costs from runtime USAGE_LOGS for the runtime within the time window. CPU I/O wait discount: N%, configurable in Settings." Note: USAGE_LOGS session IDs are internal to AgentCore and do not match Loom's runtimeSessionId.
-    - **Memory**: Consolidated per-resource table with columns Memory, Log Events, Extractions, Consolidations, LTM Retrievals, Records Stored, Total. One row per memory resource. Sortable columns. Description: "Costs from memory APPLICATION_LOGS. Memory pipeline session IDs are internal to AgentCore and do not correlate with runtime session IDs."
-    - NOTE: "Delivery of usage logs for calculating actual costs can be delayed. If costs are not showing up, try again in 15 minutes."
-  - Pull Actuals button with loading timer. Module-level cache preserves actuals across page navigation.
-  - Time-range selector: 7d, 30d, 90d, All buttons. Changing time range clears cached actuals.
+- **CostDashboardPage**: see the Views table entry above and [12. Analytics](#12-analytics) for the current (issue #37) hero-total/composition-bar/zero-rows-disclosure/actuals-rail design. Estimates disclaimer, "Pull Actuals" with loading timer, module-level actuals cache across navigation, and Memory actuals (log events/extractions/consolidations/LTM retrievals/records stored, one row per memory resource) are unchanged in substance, just restyled — Memory actuals now render as a secondary table below "Spend by agent" once actuals are pulled. Runtime actuals (per-agent, expandable to per-session rows with event counts/resource hours) now live in the compact "Actual costs" rail rather than a full-width collapsible table. NOTE unchanged: "Delivery of usage logs for calculating actual costs can be delayed. If costs are not showing up, try again in 15 minutes." Time range is shared with User Activity (7d/30d/90d/All); changing it clears cached actuals.
 - **SettingsPage**: CPU I/O Wait Discount input (0–99%) with save-on-blur and Enter key support. Description: "Assumed % of CPU time spent waiting on I/O. Applied as a discount to runtime CPU cost across estimates and actuals."
 
 ---
@@ -829,15 +833,16 @@ Formerly a standalone top-level "Costs" sidebar persona (`CostDashboardPage.tsx`
 
 `remove_conversation` is emitted from `ChatPage` when a user removes a conversation from the sidebar (calls `hideSession` then records the action with the agent name as the resource name).
 
-**Dashboard layout (`AdminDashboardPage.tsx`):**
-- **Global user filter:** Multi-select dropdown in the header (labeled "Users:") listing all unique user IDs from the loaded data. Selecting users filters all summary cards, charts, and tab tables to only that subset. When no users are selected ("All users"), the full unfiltered data is shown. When a filter is active, summary stats are recomputed client-side from the filtered sessions, actions, and page views (rather than relying on the API summary, which is unfiltered). Pagination page counters reset when the filter changes.
-- Time range selector: Today / Last 7 days / Last 30 days / All time.
-- Summary cards (5): Total Logins, Total Page Views, Total Actions, Total Duration, Most Active Page. Stats reflect the active user filter when set.
-- Charts (recharts, 3): Logins Over Time (bar chart, daily), Actions Over Time (bar chart, daily), Page Views by page name (horizontal bar chart). All charts use custom tooltip components for consistent theme-aware styling. Chart data reflects the active user filter.
-- Tabs (3): Sessions, Actions, Page Views.
-  - **Sessions:** Table of aggregated browser sessions (session ID, user, login time, last activity, page view count, action count, duration). Clicking a row shows the full interleaved event timeline (logins, actions, page views). Filtered by the global user filter.
-  - **Actions:** Table with category and action type filters. Filtered by the global user filter.
-  - **Page Views:** Table with page name filter. Filtered by the global user filter.
+**Dashboard layout (`AdminDashboardPage.tsx`, redesigned in issue #37):** one shared "Analytics" header (title/subtitle, right-aligned time-range control + user filter + Export) with underlined `Tabs` for Costs/User activity, replacing the previous floating pill tab-group above the page title.
+- **Global user filter:** Multi-select dropdown in the header (labeled "Users:") listing all unique user IDs from the loaded data. Selecting users filters all metrics, charts, and tab tables to only that subset. When no users are selected ("All users"), the full unfiltered data is shown. When a filter is active, summary stats are recomputed client-side from the filtered sessions, actions, and page views (rather than relying on the API summary, which is unfiltered). Pagination page counters reset when the filter changes.
+- Time range selector (shared with Costs): 7d / 30d / 90d / All.
+- Metrics strip (5 cells in one bordered row): Logins, Page views, Actions, Session time, Top page.
+- **One grouped daily bar chart** (Logins / Page views / Actions as three series with a legend in the card header) replaces the previous three single-bar-per-card charts; page-views-by-day is computed client-side from the raw page-view records (the backend summary only aggregates page views by page name, not by day) and merged with the logins/actions day-series. Days with no data render as a flat baseline rather than an empty 300px card.
+- One card holds a Sessions/Actions/Page-views segmented switcher (replacing three separate `Tabs`) with a single footer-only `Pagination` component (previously duplicated at both the top and bottom of each table).
+  - **Sessions:** session id (truncated, with a status dot) · user · login time · views · actions · duration. Clicking a row shows the full interleaved event timeline (logins, actions, page views).
+  - **Actions:** category/type filters; session id · category · type · user · resource · time.
+  - **Page views:** session id · page · user · entered · duration.
+- Rail: "Top pages" (bar-per-page list), "Audit trail" (latest actions with a real empty state), "Export" (CSV download for the currently visible table).
 
 ---
 

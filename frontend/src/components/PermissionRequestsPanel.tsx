@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { StatusPill } from "@/components/StatusPill";
+import { ShieldCheck } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -15,8 +17,15 @@ import { CheckCircle, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { trackAction } from "@/api/audit";
+import type { BadgeVariant } from "@/lib/status";
 
-export function PermissionRequestsPanel({ readOnly }: { readOnly?: boolean }) {
+function requestStatusVariant(status: string): BadgeVariant {
+  if (status === "pending") return "warning";
+  if (status === "approved") return "success";
+  return "destructive";
+}
+
+export function PermissionRequestsPanel({ readOnly, onCountChange }: { readOnly?: boolean; onCountChange?: (count: number) => void }) {
   const { user, browserSessionId } = useAuth();
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
   const { requests, loading, error, reviewRequest } = usePermissionRequests(statusFilter);
@@ -24,6 +33,8 @@ export function PermissionRequestsPanel({ readOnly }: { readOnly?: boolean }) {
   const [reviewerNotes, setReviewerNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [sortDir, setSortDir] = useState<SortDirection>(() => loadSortDirection("security-permissions"));
+
+  useEffect(() => { onCountChange?.(requests.filter((r) => r.status === "pending").length); }, [requests, onCountChange]);
 
   const handleApprove = async (id: number) => {
     setSubmitting(true);
@@ -64,7 +75,7 @@ export function PermissionRequestsPanel({ readOnly }: { readOnly?: boolean }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium">Permission Requests</h3>
+        <h3 className="text-sm font-medium">Permission requests</h3>
         <div className="flex items-center gap-2">
           <SortButton direction={sortDir} onClick={() => setSortDir(toggleSortDirection("security-permissions", sortDir))} />
           <Select value={statusFilter ?? "all"} onValueChange={(v) => setStatusFilter(v === "all" ? undefined : v)}>
@@ -82,7 +93,18 @@ export function PermissionRequestsPanel({ readOnly }: { readOnly?: boolean }) {
       </div>
 
       {requests.length === 0 ? (
-        <p className="text-sm text-muted-foreground py-8">No permission requests.</p>
+        <div className="flex flex-col items-center gap-2.5 rounded-lg border px-6 py-9 text-center">
+          <div className="rounded-lg border bg-muted p-2">
+            <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+          </div>
+          <p className="text-[13.5px] font-medium">No pending requests</p>
+          <p className="max-w-[360px] text-[12.5px] leading-[1.55] text-muted-foreground">
+            When a builder requests access to a role, authorizer, or MCP server, it lands here for review. Nothing is waiting on the security team.
+          </p>
+          {statusFilter !== undefined && (
+            <Button size="sm" variant="outline" onClick={() => setStatusFilter(undefined)}>View all requests</Button>
+          )}
+        </div>
       ) : (
         <SortableCardGrid
           items={requests}
@@ -98,17 +120,7 @@ export function PermissionRequestsPanel({ readOnly }: { readOnly?: boolean }) {
                 <div className="flex-1 min-w-0 space-y-1">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium">{req.role_name ?? `Role #${req.managed_role_id}`}</span>
-                    <span
-                      className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                        req.status === "pending"
-                          ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400"
-                          : req.status === "approved"
-                            ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"
-                            : "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
-                      }`}
-                    >
-                      {req.status}
-                    </span>
+                    <StatusPill label={req.status} variant={requestStatusVariant(req.status)} />
                   </div>
                   <div className="text-xs text-muted-foreground">
                     <span className="font-medium">Actions: </span>
@@ -138,7 +150,7 @@ export function PermissionRequestsPanel({ readOnly }: { readOnly?: boolean }) {
                       disabled={submitting}
                       title="Approve"
                     >
-                      <CheckCircle className="h-4 w-4 text-green-600" />
+                      <CheckCircle className="h-4 w-4 text-success" />
                     </Button>
                     <Button
                       size="sm"
@@ -147,7 +159,7 @@ export function PermissionRequestsPanel({ readOnly }: { readOnly?: boolean }) {
                       disabled={submitting}
                       title="Deny"
                     >
-                      <XCircle className="h-4 w-4 text-red-600" />
+                      <XCircle className="h-4 w-4 text-destructive" />
                     </Button>
                   </div>
                 )}

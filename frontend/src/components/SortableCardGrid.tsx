@@ -52,7 +52,7 @@ export function SortableCardGrid<T>({
   sortDirection,
   renderItem,
   prependItems,
-  className = "grid gap-4 md:grid-cols-2 lg:grid-cols-3",
+  className = "grid gap-3.5 auto-rows-fr md:grid-cols-2 lg:grid-cols-3",
 }: SortableCardGridProps<T>) {
   const sortedItems = [...items].sort((a, b) =>
     alphabeticalCompare(getName(a), getName(b), sortDirection)
@@ -62,7 +62,7 @@ export function SortableCardGrid<T>({
     <div className={className}>
       {prependItems}
       {sortedItems.map((item) => (
-        <div key={getId(item)}>
+        <div key={getId(item)} className="h-full">
           {renderItem(item)}
         </div>
       ))}

@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef, Children } from "react";
 import { useTranslation } from "react-i18next";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -15,7 +14,7 @@ import {
   TimezoneProvider,
   useTimezone,
 } from "@/contexts/TimezoneContext";
-import { ThemeProvider, useTheme, isLightTheme, THEME_LABELS, type Theme } from "@/contexts/ThemeContext";
+import { ThemeProvider, useTheme, isLightTheme } from "@/contexts/ThemeContext";
 import { useAgents } from "@/hooks/useAgents";
 import { useSessions } from "@/hooks/useSessions";
 import { clearInvokeState } from "@/hooks/useInvoke";
@@ -31,9 +30,12 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { IntegrationsPage } from "@/pages/IntegrationsPage";
 import type { SessionResponse, InvocationResponse } from "@/api/types";
 import { getRegistryConfig } from "@/api/settings";
+import { listMemories } from "@/api/memories";
+import { listMcpServers } from "@/api/mcp";
+import { listA2aAgents } from "@/api/a2a";
 import { AuthProvider, useAuth, GROUP_SCOPES, type Scope } from "@/contexts/AuthContext";
 import { LoginPage } from "@/pages/LoginPage";
-import { BookOpen, Shield, Bot, Brain, Network, LogOut, User, Settings, Eye, BarChart3, Palette } from "lucide-react";
+import { BookOpen, Shield, Bot, Brain, Network, LogOut, User, Settings, Eye, BarChart3, Sun, Moon } from "lucide-react";
 import { AdminDashboardPage } from "./pages/AdminDashboardPage";
 import { ChatPage } from "./pages/ChatPage";
 import { OAuthLinkCallbackPage } from "./pages/OAuthLinkCallbackPage";
@@ -140,6 +142,7 @@ function SidebarItem({
   onClick,
   disabled,
   badge,
+  count,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
@@ -147,23 +150,28 @@ function SidebarItem({
   onClick: () => void;
   disabled?: boolean;
   badge?: string;
+  count?: number;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm whitespace-nowrap transition-colors ${
+      className={`relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm whitespace-nowrap transition-colors ${
         disabled
           ? "text-muted-foreground/50 cursor-not-allowed"
           : active
-            ? "bg-primary text-primary-foreground"
-            : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+            ? "bg-accent text-foreground"
+            : "text-muted-foreground hover:bg-accent/50 hover:text-accent-foreground"
       }`}
     >
+      {active && <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full bg-primary" />}
       <Icon className="h-4 w-4 shrink-0" />
       <span className="truncate">{label}</span>
       {badge && <span className="text-[10px] italic shrink-0">{badge}</span>}
+      {typeof count === "number" && (
+        <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">{count}</span>
+      )}
     </button>
   );
 }
@@ -171,19 +179,7 @@ function SidebarItem({
 function AppContent() {
   const { t } = useTranslation();
   const { isAuthenticated, isLoading, user, logout, hasScope, browserSessionId } = useAuth();
-  const { theme, setTheme } = useTheme();
-  const [showThemePicker, setShowThemePicker] = useState(false);
-  const themePickerRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!showThemePicker) return;
-    function handleClickOutside(e: MouseEvent) {
-      if (themePickerRef.current && !themePickerRef.current.contains(e.target as Node)) {
-        setShowThemePicker(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [showThemePicker]);
+  const { theme, toggleTheme } = useTheme();
 
   // Determine default persona based on user's scopes
   const getDefaultPersona = useCallback((): Persona => {
@@ -318,6 +314,26 @@ function AppContent() {
     if (isAuthenticated) void getRegistryConfig().then((c) => setRegistryEnabled(c.enabled)).catch(() => {});
   }, [isAuthenticated]);
 
+  // Sidebar counts for Memory and Integrations (Agents already gets its count from `agents`).
+  const [memoryCount, setMemoryCount] = useState(0);
+  const [mcpCount, setMcpCount] = useState(0);
+  const [a2aCount, setA2aCount] = useState(0);
+  useEffect(() => {
+    if (isAuthenticated && effectiveHasScope("memory:read")) {
+      void listMemories().then((data) => setMemoryCount(data.length)).catch(() => {});
+    }
+  }, [isAuthenticated, effectiveHasScope]);
+  useEffect(() => {
+    if (isAuthenticated && effectiveHasScope("mcp:read")) {
+      void listMcpServers().then((data) => setMcpCount(data.length)).catch(() => {});
+    }
+  }, [isAuthenticated, effectiveHasScope]);
+  useEffect(() => {
+    if (isAuthenticated && effectiveHasScope("a2a:read")) {
+      void listA2aAgents().then((data) => setA2aCount(data.length)).catch(() => {});
+    }
+  }, [isAuthenticated, effectiveHasScope]);
+
   type ViewMode = "cards" | "table";
   const [catalogViewMode, setCatalogViewMode] = useState<ViewMode>("cards");
   const [agentsViewMode, setAgentsViewMode] = useState<ViewMode>("cards");
@@ -329,6 +345,7 @@ function AppContent() {
   const [sessionDetail, setSessionDetail] = useState<SessionResponse | null>(null);
   const [selectedInvocationId, setSelectedInvocationId] = useState<string | null>(null);
   const [invocationDetail, setInvocationDetail] = useState<InvocationResponse | null>(null);
+  const [pendingScopedInvocationId, setPendingScopedInvocationId] = useState<string | null>(null);
 
   const selectedAgent = agents.find((a) => a.id === selectedAgentId) ?? null;
   const { sessions, loading: sessionsLoading, refetch: refetchSessions } =
@@ -373,19 +390,6 @@ function AppContent() {
   if (!isAuthenticated) {
     return <LoginPage />;
   }
-
-  const handleBack = () => {
-    if (selectedInvocationId) {
-      setSelectedInvocationId(null);
-      setInvocationDetail(null);
-    } else if (selectedSessionId) {
-      setSelectedSessionId(null);
-      setSessionDetail(null);
-    } else {
-      setSelectedAgentId(null);
-      void fetchAgents();
-    }
-  };
 
 
 
@@ -532,6 +536,7 @@ function AppContent() {
                 label={t("nav.agents")}
                 active={activePersona === "builder"}
                 onClick={() => setActivePersona("builder")}
+                count={agents.length}
               />
             )}
             {(effectiveHasScope("memory:read") || effectiveHasScope("memory:write")) && (
@@ -540,6 +545,7 @@ function AppContent() {
                 label={t("nav.memory")}
                 active={activePersona === "memory"}
                 onClick={() => setActivePersona("memory")}
+                count={memoryCount}
               />
             )}
             {(effectiveHasScope("mcp:read") || effectiveHasScope("mcp:write") || effectiveHasScope("a2a:read") || effectiveHasScope("a2a:write")) && (
@@ -548,6 +554,7 @@ function AppContent() {
                 label={t("nav.integrations")}
                 active={activePersona === "integrations"}
                 onClick={() => setActivePersona("integrations")}
+                count={mcpCount + a2aCount}
               />
             )}
           </SidebarSection>
@@ -620,44 +627,14 @@ function AppContent() {
             <span className="inline-flex items-center rounded-full border border-border bg-input-bg px-2 py-0.5 text-[10px] text-muted-foreground">
               v{__APP_VERSION__}
             </span>
-            <div className="relative" ref={themePickerRef}>
-              <button
-                type="button"
-                onClick={() => setShowThemePicker((v) => !v)}
-                className="text-muted-foreground hover:text-foreground transition-colors"
-                title={t("common.changeTheme")}
-              >
-                <Palette className="h-3.5 w-3.5" />
-              </button>
-              {showThemePicker && (
-                <div className="absolute bottom-6 right-0 z-50 w-44 rounded border bg-white shadow-md py-1">
-                  <div className="px-3 py-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Light</div>
-                  {(Object.entries(THEME_LABELS) as [Theme, string][])
-                    .filter(([k]) => isLightTheme(k as Theme))
-                    .map(([k, v]) => (
-                      <button
-                        key={k}
-                        onClick={() => { setTheme(k); setShowThemePicker(false); }}
-                        className={`w-full text-left px-3 py-1.5 text-xs transition-colors hover:bg-gray-100 text-gray-700 ${theme === k ? "font-bold" : ""}`}
-                      >
-                        {v}
-                      </button>
-                    ))}
-                  <div className="px-3 py-1 mt-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-t border-gray-100">Dark</div>
-                  {(Object.entries(THEME_LABELS) as [Theme, string][])
-                    .filter(([k]) => !isLightTheme(k as Theme))
-                    .map(([k, v]) => (
-                      <button
-                        key={k}
-                        onClick={() => { setTheme(k); setShowThemePicker(false); }}
-                        className={`w-full text-left px-3 py-1.5 text-xs transition-colors hover:bg-gray-100 text-gray-700 ${theme === k ? "font-bold" : ""}`}
-                      >
-                        {v}
-                      </button>
-                    ))}
-                </div>
-              )}
-            </div>
+            <button
+              type="button"
+              onClick={toggleTheme}
+              className="text-muted-foreground hover:text-foreground transition-colors"
+              title={t("common.changeTheme")}
+            >
+              {theme === "light" ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -715,9 +692,6 @@ function AppContent() {
               canViewMemories={effectiveHasScope("memory:read")}
               canViewMcp={effectiveHasScope("mcp:read")}
               canViewA2a={effectiveHasScope("a2a:read")}
-              canViewRegistry={effectiveHasScope("registry:read")}
-              registryReadOnly={!effectiveHasScope("registry:write")}
-              isEndUserRole={effectiveUserGroups.includes("t-user") && !effectiveUserGroups.includes("t-admin")}
               groupRestriction={groupRestriction}
               userGroups={viewAsUser ? (USER_GROUPS[viewAsUser] ?? []) : (user?.groups ?? [])}
               onNavigateToMcp={(serverId) => { setPendingMcpId(serverId); setIntegrationsTab("mcp"); setActivePersona("integrations"); }}
@@ -727,12 +701,6 @@ function AppContent() {
 
           {activePersona === "builder" && (
             <>
-              {selectedAgentId !== null && (
-                <Button variant="ghost" size="sm" onClick={handleBack} className="mb-4">
-                  &larr; Back
-                </Button>
-              )}
-
               {selectedAgentId === null && (
                 <AgentListPage
                   agents={agents}
@@ -781,6 +749,12 @@ function AppContent() {
                   agent={selectedAgent}
                   session={sessionDetail}
                   onSelectInvocation={handleSelectInvocation}
+                  onRerunInInvoke={() => {
+                    setSelectedSessionId(null);
+                    setSessionDetail(null);
+                    setAgentInitialTab("invoke");
+                  }}
+                  initialScopedInvocationId={pendingScopedInvocationId}
                 />
               )}
 
@@ -789,12 +763,27 @@ function AppContent() {
                   agent={selectedAgent}
                   session={sessionDetail}
                   invocation={invocationDetail}
+                  onOpenLogs={() => {
+                    setPendingScopedInvocationId(invocationDetail.invocation_id);
+                    setSelectedInvocationId(null);
+                    setInvocationDetail(null);
+                  }}
+                  onRerunPrompt={() => {
+                    if (invocationDetail.prompt_text) {
+                      sessionStorage.setItem(`loom:invokePrompt:${selectedAgent.id}`, invocationDetail.prompt_text);
+                    }
+                    setSelectedSessionId(null);
+                    setSessionDetail(null);
+                    setSelectedInvocationId(null);
+                    setInvocationDetail(null);
+                    setAgentInitialTab("invoke");
+                  }}
                 />
               )}
             </>
           )}
 
-          {activePersona === "security" && <SecurityAdminPage readOnly={!effectiveHasScope("security:write")} />}
+          {activePersona === "security" && <SecurityAdminPage readOnly={!effectiveHasScope("security:write")} agents={agents} />}
           {activePersona === "memory" && <MemoryManagementPage viewMode={memoryViewMode} onViewModeChange={setMemoryViewMode} readOnly={!effectiveHasScope("memory:write")} groupRestriction={groupRestriction} ownerRestriction={ownerRestriction} userGroups={viewAsUser ? (USER_GROUPS[viewAsUser] ?? []) : (user?.groups ?? [])} />}
           {activePersona === "integrations" && (
             <IntegrationsPage
@@ -810,6 +799,7 @@ function AppContent() {
               onA2aViewModeChange={setA2aViewMode}
               pendingMcpId={pendingMcpId}
               pendingA2aId={pendingA2aId}
+              agents={agents}
             />
           )}
           {activePersona === "settings" && (
@@ -817,6 +807,7 @@ function AppContent() {
               canViewTagging={effectiveHasScope("tagging:read")}
               canEditTagging={effectiveHasScope("tagging:write")}
               userGroups={user?.groups || []}
+              agents={agents}
             />
           )}
           {activePersona === "admin" && (
@@ -840,7 +831,9 @@ export default function App() {
     <AuthProvider>
       <ThemeProvider>
         <TimezoneProvider>
-          <AppContent />
+          <TooltipProvider>
+            <AppContent />
+          </TooltipProvider>
         </TimezoneProvider>
       </ThemeProvider>
     </AuthProvider>

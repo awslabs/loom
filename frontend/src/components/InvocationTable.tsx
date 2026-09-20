@@ -6,9 +6,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
+import { StatusPill } from "@/components/StatusPill";
 import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatTimestamp, formatMs } from "@/lib/format";
+import type { BadgeVariant } from "@/lib/status";
 import type { InvocationResponse } from "@/api/types";
 
 interface InvocationTableProps {
@@ -29,17 +30,17 @@ function formatCost(cost: number | null | undefined): string {
   return `~$${cost.toFixed(4)}`;
 }
 
-function statusVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
+function statusVariant(status: string): BadgeVariant {
   switch (status) {
     case "complete":
-      return "default";
+      return "success";
     case "streaming":
     case "pending":
-      return "secondary";
+      return "warning";
     case "error":
       return "destructive";
     default:
-      return "outline";
+      return "neutral";
   }
 }
 
@@ -99,7 +100,7 @@ export function InvocationTable({ invocations, onSelectInvocation }: InvocationT
               {inv.request_id ?? "—"}
             </TableCell>
             <TableCell>
-              <Badge variant={statusVariant(inv.status)}>{inv.status}</Badge>
+              <StatusPill label={inv.status} variant={statusVariant(inv.status)} />
             </TableCell>
             <TableCell className="font-mono text-xs text-right">
               {formatMs(inv.cold_start_latency_ms)}

@@ -1,14 +1,16 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { SortableCardGrid, SortButton, loadSortDirection, toggleSortDirection, saveSortDirection, type SortDirection } from "@/components/SortableCardGrid";
+import { SortButton, loadSortDirection, toggleSortDirection, type SortDirection } from "@/components/SortableCardGrid";
+import { sortRows } from "@/components/SortableTableHead";
 import { JsonConfigSection } from "@/components/JsonConfigSection";
-import { ChevronDown, ChevronRight, Trash2, Plus, Pencil, Loader2, Network, Shield, LogIn, LogOut } from "lucide-react";
+import { ExpandableRow } from "@/components/ExpandableRow";
+import { Loader2, Plus } from "lucide-react";
 import { toast } from "sonner";
 import * as settingsApi from "@/api/settings";
-import type { VpcConfig, VpcConfigCreateRequest, VpcConfigDetail, VpcSgRuleDetail } from "@/api/types";
+import type { AgentResponse, VpcConfig, VpcConfigCreateRequest, VpcConfigDetail, VpcSgRuleDetail } from "@/api/types";
 
 function parseIds(raw: string): string[] {
   return raw.split(",").map((s) => s.trim()).filter(Boolean);
@@ -55,58 +57,56 @@ function configToFormState(cfg: VpcConfig): FormState {
 }
 
 function formatPortRange(rule: VpcSgRuleDetail): string {
-  if (rule.protocol === "All") return "All";
-  if (rule.from_port === null && rule.to_port === null) return "All";
+  if (rule.protocol === "All") return "all";
+  if (rule.from_port === null && rule.to_port === null) return "all";
   if (rule.from_port === rule.to_port) return String(rule.from_port);
   return `${rule.from_port}–${rule.to_port}`;
 }
 
-function SgRulesTable({ rules, label, icon }: { rules: VpcSgRuleDetail[]; label: string; icon: React.ReactNode }) {
+function ruleSource(rule: VpcSgRuleDetail): string {
+  if (rule.cidr) return rule.cidr;
+  if (rule.source_sg_id) return rule.source_sg_name ? `${rule.source_sg_id} (${rule.source_sg_name})` : rule.source_sg_id;
+  return "—";
+}
+
+/** One rules table with INBOUND / OUTBOUND as labeled band rows, matching the security-group row grammar used elsewhere. */
+function SgRulesBanded({ ingress, egress }: { ingress: VpcSgRuleDetail[]; egress: VpcSgRuleDetail[] }) {
   return (
-    <div className="space-y-1.5">
-      <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-        {icon}
-        {label}
+    <div className="flex flex-col overflow-hidden rounded-md border">
+      <div className="grid grid-cols-[52px_52px_100px_minmax(0,1fr)] gap-2.5 bg-muted px-2.5 py-1.5 font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">
+        <span>Proto</span><span>Port</span><span>Source</span><span>Note</span>
       </div>
-      <table className="text-xs w-full border-collapse border border-border rounded table-fixed">
-        <colgroup>
-          <col className="w-20" />
-          <col className="w-24" />
-          <col className="w-[25%]" />
-          <col />
-        </colgroup>
-        <thead>
-          <tr className="text-muted-foreground bg-accent">
-            <th className="text-left font-medium px-2 py-1 border border-border">Protocol</th>
-            <th className="text-left font-medium px-2 py-1 border border-border">Port</th>
-            <th className="text-left font-medium px-2 py-1 border border-border">Source / Destination</th>
-            <th className="text-left font-medium px-2 py-1 border border-border">Description</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rules.length === 0 ? (
-            <tr className="bg-background">
-              <td colSpan={4} className="px-2 py-1 border border-border text-muted-foreground italic">No rules</td>
-            </tr>
-          ) : rules.map((r, i) => (
-            <tr key={i} className="bg-background align-top">
-              <td className="px-2 py-0.5 font-mono border border-border">{r.protocol}</td>
-              <td className="px-2 py-0.5 font-mono border border-border">{formatPortRange(r)}</td>
-              <td className="px-2 py-0.5 font-mono border border-border break-all">
-                {r.cidr ?? (r.source_sg_id
-                  ? (r.source_sg_name ? `${r.source_sg_id} (${r.source_sg_name})` : r.source_sg_id)
-                  : "—")}
-              </td>
-              <td className="px-2 py-0.5 border border-border text-muted-foreground break-words">{r.description ?? ""}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="flex items-center gap-1.5 border-t bg-card px-2.5 py-1.5 font-mono text-[9.5px] tracking-wide text-success">
+        ↓ INBOUND
+      </div>
+      {ingress.length === 0 ? (
+        <div className="border-t px-2.5 py-1.5 text-[11px] text-muted-foreground">No inbound rules</div>
+      ) : ingress.map((r, i) => (
+        <div key={`in-${i}`} className="grid grid-cols-[52px_52px_100px_minmax(0,1fr)] items-center gap-2.5 border-t px-2.5 py-1.5">
+          <span className="font-mono text-[11px]">{r.protocol}</span>
+          <span className="font-mono text-[11px] tabular-nums">{formatPortRange(r)}</span>
+          <span className="truncate font-mono text-[11px]" title={ruleSource(r)}>{ruleSource(r)}</span>
+          <span className="truncate text-[11px] text-muted-foreground">{r.description ?? ""}</span>
+        </div>
+      ))}
+      <div className="flex items-center gap-1.5 border-t bg-card px-2.5 py-1.5 font-mono text-[9.5px] tracking-wide text-muted-foreground">
+        ↑ OUTBOUND
+      </div>
+      {egress.length === 0 ? (
+        <div className="border-t px-2.5 py-1.5 text-[11px] text-muted-foreground">No outbound rules</div>
+      ) : egress.map((r, i) => (
+        <div key={`out-${i}`} className="grid grid-cols-[52px_52px_100px_minmax(0,1fr)] items-center gap-2.5 border-t px-2.5 py-1.5">
+          <span className="font-mono text-[11px]">{r.protocol}</span>
+          <span className="font-mono text-[11px] tabular-nums">{formatPortRange(r)}</span>
+          <span className="truncate font-mono text-[11px]" title={ruleSource(r)}>{ruleSource(r)}</span>
+          <span className="truncate text-[11px] text-muted-foreground">{r.description ?? ""}</span>
+        </div>
+      ))}
     </div>
   );
 }
 
-export function VpcConfigPanel({ readOnly }: { readOnly?: boolean }) {
+export function VpcConfigPanel({ readOnly, agents = [] }: { readOnly?: boolean; agents?: AgentResponse[] }) {
   const [configs, setConfigs] = useState<VpcConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -128,6 +128,8 @@ export function VpcConfigPanel({ readOnly }: { readOnly?: boolean }) {
 
   useEffect(() => { loadConfigs(); }, []);
 
+  const dependentsOf = (id: number) => agents.filter((a) => a.vpc_config_id === id);
+
   const resetForm = () => {
     setForm(EMPTY_FORM_STATE);
     setShowAddForm(false);
@@ -138,7 +140,6 @@ export function VpcConfigPanel({ readOnly }: { readOnly?: boolean }) {
     setEditingId(cfg.id);
     setForm(configToFormState(cfg));
     setShowAddForm(false);
-    setExpandedId(null);
   };
 
   const handleSave = async () => {
@@ -245,28 +246,22 @@ export function VpcConfigPanel({ readOnly }: { readOnly?: boolean }) {
   }
 
   const isEditing = editingId !== null;
+  const sorted = sortRows(configs, "name", sortDir, { name: (c) => c.name });
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-sm font-medium">VPC Configurations</h3>
-          <p className="text-xs text-muted-foreground mt-1">
-            Named VPC configurations approved for use in Loom.<br />
-            Builders select from these when deploying VPC-enabled agents instead of entering subnet and security group IDs directly.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 shrink-0 ml-4">
+    <div className="flex max-w-[1000px] flex-col gap-3">
+      <div className="flex items-center gap-2.5">
+        <span className="text-[13px] font-semibold">VPC configurations</span>
+        <span className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{configs.length}</span>
+        <span className="text-[12.5px] text-muted-foreground">Builders pick from these instead of typing subnet and security-group ids.</span>
+        <div className="ml-auto flex items-center gap-2 shrink-0">
           <SortButton direction={sortDir} onClick={() => setSortDir(toggleSortDirection("settings-vpc-configs", sortDir))} />
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => { resetForm(); setShowAddForm(!showAddForm); }}
-            disabled={readOnly}
-          >
-            <Plus className="h-3.5 w-3.5 mr-1" />
-            Add Config
-          </Button>
+          {!readOnly && (
+            <Button size="sm" onClick={() => { resetForm(); setShowAddForm(!showAddForm); }}>
+              <Plus className="h-3.5 w-3.5 mr-1" />
+              Add config
+            </Button>
+          )}
         </div>
       </div>
 
@@ -327,157 +322,121 @@ export function VpcConfigPanel({ readOnly }: { readOnly?: boolean }) {
       {configs.length === 0 ? (
         <p className="text-sm text-muted-foreground py-8">No VPC configurations yet. Add one above.</p>
       ) : (
-        <SortableCardGrid
-          items={configs}
-          getId={(c) => c.id.toString()}
-          getName={(c) => c.name}
-          storageKey="settings-vpc-configs"
-          sortDirection={sortDir}
-          onSortDirectionChange={(d) => { if (d) { setSortDir(d); saveSortDirection("settings-vpc-configs", d); } }}
-          className="grid gap-2"
-          renderItem={(cfg) => (
-            <Card className="relative py-3 gap-1 transition-colors hover:bg-accent/50">
-              <CardHeader className="gap-1 pb-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <button
-                      type="button"
-                      onClick={() => toggleExpand(cfg.id)}
-                      className="text-muted-foreground hover:text-foreground"
-                    >
-                      {expandedId === cfg.id ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                    </button>
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium truncate">{cfg.name}</div>
-                      <div className="text-xs text-muted-foreground font-mono truncate">{cfg.vpc_id}</div>
-                    </div>
-                  </div>
-                  {!readOnly && (
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => startEdit(cfg)}
-                        className="text-muted-foreground/50 hover:text-foreground transition-colors"
-                        title="Edit"
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
+        <div className="flex flex-col gap-3">
+          {sorted.map((cfg) => {
+            const detail = detailCache[cfg.id];
+            const dependents = dependentsOf(cfg.id);
+            const azCount = detail && detail !== "loading" ? new Set(detail.subnets.map((s) => s.availability_zone).filter(Boolean)).size : null;
+            const ipTotal = detail && detail !== "loading" ? detail.subnets.reduce((sum, s) => sum + (s.available_ips ?? 0), 0) : null;
+            const subtitle = detail && detail !== "loading"
+              ? `${detail.subnets.length} subnets · ${azCount} AZ${azCount === 1 ? "" : "s"} · ${ipTotal} IPs available · ${detail.security_groups.length} security group${detail.security_groups.length === 1 ? "" : "s"}`
+              : `${cfg.subnet_ids.length} subnets · ${cfg.sg_ids.length} security group${cfg.sg_ids.length === 1 ? "" : "s"}`;
+
+            return (
+              <ExpandableRow
+                key={cfg.id}
+                expanded={expandedId === cfg.id || editingId === cfg.id}
+                onToggle={() => toggleExpand(cfg.id)}
+                title={cfg.name}
+                typeBadge={cfg.vpc_id}
+                subtitle={subtitle}
+                meta={<span className="text-[11.5px] text-muted-foreground">used by {dependents.length} agent{dependents.length === 1 ? "" : "s"}</span>}
+                actions={
+                  !readOnly ? (
+                    <>
+                      <Button size="sm" variant="outline" className="h-[29px]" onClick={() => startEdit(cfg)}>Edit</Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-[29px] border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                        disabled={dependents.length > 0}
+                        title={dependents.length > 0 ? "Blocked while agents depend on this config" : undefined}
                         onClick={() => setConfirmDeleteId(cfg.id)}
-                        className="text-muted-foreground/50 hover:text-destructive transition-colors"
-                        title="Delete"
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {expandedId === cfg.id && (
-                  <div className="ml-6 space-y-2">
-                    {detailCache[cfg.id] === "loading" ? (
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
+                        Delete
+                      </Button>
+                    </>
+                  ) : undefined
+                }
+              >
+                {editingId === cfg.id ? (
+                  <Card>
+                    <CardContent className="pt-4 space-y-3">
+                      <JsonConfigSection onApply={handleJsonApply} onExport={handleJsonExport} placeholder="" />
+                      <div className="grid grid-cols-2 gap-2">
+                        <Input placeholder="Name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
+                        <Input placeholder="Description (optional)" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} />
+                      </div>
+                      <Input placeholder="VPC ID" value={form.vpc_id} onChange={(e) => setForm((f) => ({ ...f, vpc_id: e.target.value }))} className="font-mono text-xs" />
+                      <Input placeholder="Subnet IDs (comma-separated)" value={form.subnet_ids_raw} onChange={(e) => setForm((f) => ({ ...f, subnet_ids_raw: e.target.value }))} className="font-mono text-xs" />
+                      <Input placeholder="Security group IDs (comma-separated)" value={form.sg_ids_raw} onChange={(e) => setForm((f) => ({ ...f, sg_ids_raw: e.target.value }))} className="font-mono text-xs" />
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={handleSave} disabled={submitting || !form.name.trim() || !form.vpc_id.trim()}>{submitting ? "Saving..." : "Update"}</Button>
+                        <Button size="sm" variant="ghost" onClick={resetForm}>Cancel</Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <>
+                    {confirmDeleteId === cfg.id && (
+                      <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
+                        <span>Delete <span className="font-mono">{cfg.name}</span>? This can't be undone.</span>
+                        <div className="flex items-center gap-2">
+                          <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setConfirmDeleteId(null)}>Cancel</Button>
+                          <Button size="sm" variant="destructive" className="h-6 text-xs" onClick={() => handleDelete(cfg.id)} disabled={submitting}>Confirm</Button>
+                        </div>
+                      </div>
+                    )}
+                    {detail === "loading" ? (
+                      <div className="flex items-center gap-2 py-2 text-xs text-muted-foreground">
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         Loading details…
                       </div>
-                    ) : detailCache[cfg.id] ? (() => {
-                      const detail = detailCache[cfg.id] as import("@/api/types").VpcConfigDetail;
-                      return (
-                        <>
-                          <div className="space-y-1.5">
-                            <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                              <Network className="h-3.5 w-3.5" />
-                              Subnets ({detail.subnets.length})
-                            </div>
-                            <table className="text-xs w-full border-collapse border border-border rounded">
-                              <thead>
-                                <tr className="text-muted-foreground bg-accent">
-                                  <th className="text-left font-medium px-2 py-1 border border-border">Subnet ID</th>
-                                  <th className="text-left font-medium px-2 py-1 border border-border">Availability Zone / ID</th>
-                                  <th className="text-left font-medium px-2 py-1 border border-border">CIDR</th>
-                                  <th className="text-left font-medium px-2 py-1 border border-border">Available IPs</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {detail.subnets.map((s) => (
-                                  <tr key={s.subnet_id} className="bg-background align-top">
-                                    <td className="px-2 py-0.5 font-mono border border-border">
-                                      {s.subnet_id}
-                                      {s.name && <span className="ml-1 text-muted-foreground">({s.name})</span>}
-                                    </td>
-                                    <td className="px-2 py-0.5 font-mono border border-border">
-                                      {s.availability_zone ?? "—"}
-                                      {s.availability_zone_id && (
-                                        <span className="ml-1 text-muted-foreground">({s.availability_zone_id})</span>
-                                      )}
-                                    </td>
-                                    <td className="px-2 py-0.5 font-mono border border-border">{s.cidr_block ?? "—"}</td>
-                                    <td className="px-2 py-0.5 border border-border text-muted-foreground">{s.available_ips ?? "—"}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                        <div className="flex flex-col gap-2 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Subnets</span>
+                            <span className="font-mono text-[10.5px] text-muted-foreground">{detail ? detail.subnets.length : cfg.subnet_ids.length}</span>
                           </div>
-                          {detail.security_groups.map((sg) => (
-                            <div key={sg.sg_id} className="space-y-2">
-                              <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                                <Shield className="h-3.5 w-3.5" />
-                                {sg.sg_id}{sg.name ? ` — ${sg.name}` : ""}
+                          <div className="flex flex-col gap-2">
+                            {detail ? detail.subnets.map((s) => (
+                              <div key={s.subnet_id} className="flex flex-col gap-1 rounded-md border bg-muted px-3 py-2.5">
+                                <span className="truncate font-mono text-[11.5px]" title={s.subnet_id}>{s.subnet_id}{s.name ? ` (${s.name})` : ""}</span>
+                                <div className="flex items-center gap-3.5 font-mono text-[10.5px] text-muted-foreground">
+                                  <span>{s.availability_zone ?? "—"}</span>
+                                  <span>{s.cidr_block ?? "—"}</span>
+                                  <span className="ml-auto tabular-nums text-foreground">{s.available_ips != null ? `${s.available_ips} IPs` : "—"}</span>
+                                </div>
                               </div>
-                              <SgRulesTable rules={sg.ingress} label="Inbound rules" icon={<LogIn className="h-3 w-3" />} />
-                              <SgRulesTable rules={sg.egress} label="Outbound rules" icon={<LogOut className="h-3 w-3" />} />
+                            )) : cfg.subnet_ids.map((id) => (
+                              <div key={id} className="rounded-md border bg-muted px-3 py-2 font-mono text-[11.5px]">{id}</div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col gap-2 min-w-0">
+                          {detail ? detail.security_groups.map((sg) => (
+                            <div key={sg.sg_id} className="flex flex-col gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Security group</span>
+                                <span className="truncate font-mono text-[10.5px]">{sg.name ?? sg.sg_id}</span>
+                                <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{sg.sg_id}</span>
+                              </div>
+                              <SgRulesBanded ingress={sg.ingress} egress={sg.egress} />
                             </div>
+                          )) : cfg.sg_ids.map((id) => (
+                            <div key={id} className="rounded-md border bg-muted px-3 py-2 font-mono text-[11.5px]">{id}</div>
                           ))}
-                        </>
-                      );
-                    })() : (
-                      <div className="space-y-1.5">
-                        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                          <Network className="h-3.5 w-3.5" />
-                          Subnets ({cfg.subnet_ids.length})
                         </div>
-                        <table className="text-xs w-full border-collapse border border-border rounded">
-                          <tbody>
-                            {cfg.subnet_ids.map((id) => (
-                              <tr key={id} className="bg-background">
-                                <td className="px-2 py-0.5 font-mono border border-border">{id}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground pt-1">
-                          <Shield className="h-3.5 w-3.5" />
-                          Security Groups ({cfg.sg_ids.length})
-                        </div>
-                        <table className="text-xs w-full border-collapse border border-border rounded">
-                          <tbody>
-                            {cfg.sg_ids.map((id) => (
-                              <tr key={id} className="bg-background">
-                                <td className="px-2 py-0.5 font-mono border border-border">{id}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
                       </div>
                     )}
-                  </div>
+                  </>
                 )}
-                {confirmDeleteId === cfg.id && (
-                  <div className="flex items-center justify-end gap-2 pt-1">
-                    <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setConfirmDeleteId(null)}>
-                      Cancel
-                    </Button>
-                    <Button size="sm" variant="destructive" className="h-6 text-xs" onClick={() => handleDelete(cfg.id)} disabled={submitting}>
-                      Confirm
-                    </Button>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
-        />
+              </ExpandableRow>
+            );
+          })}
+        </div>
       )}
     </div>
   );

@@ -1,15 +1,16 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, Fragment } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";
 import { Plus, Pencil, Trash2, Lock, ChevronDown, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { trackAction } from "@/api/audit";
 import { JsonConfigSection } from "@/components/JsonConfigSection";
-import { SortableCardGrid, SortButton, loadSortDirection, toggleSortDirection, saveSortDirection, type SortDirection } from "@/components/SortableCardGrid";
+import { SortButton, loadSortDirection, toggleSortDirection, type SortDirection } from "@/components/SortableCardGrid";
+import { sortRows } from "@/components/SortableTableHead";
 import {
   listTagPolicies,
   listTagProfiles,
@@ -20,14 +21,25 @@ import {
   updateTagProfile,
   deleteTagProfile,
 } from "@/api/settings";
-import type { TagPolicy, TagProfile } from "@/api/types";
+import type { TagPolicy, TagProfile, AgentResponse } from "@/api/types";
+
+const RESERVED_PROFILE_KEYS = ["loom:application", "loom:group", "loom:owner"];
+
+function tagsEqual(a: Record<string, string> | undefined, b: Record<string, string>): boolean {
+  if (!a) return false;
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k) => a[k] === b[k]);
+}
 
 interface TaggingPageProps {
   readOnly?: boolean;
   userGroups?: string[];
+  agents?: AgentResponse[];
 }
 
-export function TaggingPage({ readOnly, userGroups = [] }: TaggingPageProps) {
+export function TaggingPage({ readOnly, userGroups = [], agents = [] }: TaggingPageProps) {
   const { user, browserSessionId } = useAuth();
   const isSuperAdmin = userGroups.includes("g-admins-super");
   const isAdminUser = userGroups.includes("t-admin");
@@ -36,7 +48,6 @@ export function TaggingPage({ readOnly, userGroups = [] }: TaggingPageProps) {
   const [profiles, setProfiles] = useState<TagProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [policySortDir, setPolicySortDir] = useState<SortDirection>(() => loadSortDirection("tag-policies"));
-  const [profileSortDir, setProfileSortDir] = useState<SortDirection>(() => loadSortDirection("tag-profiles"));
 
   // Policy form state
   const [showPolicyForm, setShowPolicyForm] = useState(false);
@@ -74,6 +85,8 @@ export function TaggingPage({ readOnly, userGroups = [] }: TaggingPageProps) {
 
   const platformPolicies = tagPolicies.filter((tp) => tp.designation === "platform:required");
   const customPolicies = tagPolicies.filter((tp) => tp.designation === "custom:optional");
+
+  const usedByCount = (profile: TagProfile) => agents.filter((a) => tagsEqual(a.tags, profile.tags)).length;
 
   // --- Policy CRUD ---
   const resetPolicyForm = () => {
@@ -249,6 +262,15 @@ export function TaggingPage({ readOnly, userGroups = [] }: TaggingPageProps) {
     });
   };
 
+  const toggleGroup = (group: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(group)) next.delete(group);
+      else next.add(group);
+      return next;
+    });
+  };
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -265,6 +287,24 @@ export function TaggingPage({ readOnly, userGroups = [] }: TaggingPageProps) {
     );
   }
 
+  const sortedPolicies = sortRows(tagPolicies, "key", policySortDir, {
+    key: (p) => `${p.designation === "platform:required" ? "0" : "1"}:${p.key}`,
+  });
+
+  const visibleProfiles = !isAdminUser && userGroup
+    ? profiles.filter((p) => p.tags?.["loom:group"] === userGroup)
+    : profiles;
+  const grouped = new Map<string, TagProfile[]>();
+  for (const p of visibleProfiles) {
+    const group = p.tags?.["loom:group"] || "ungrouped";
+    const list = grouped.get(group);
+    if (list) list.push(p);
+    else grouped.set(group, [p]);
+  }
+  const sortedGroups = [...grouped.entries()].sort((a, b) =>
+    a[0] === "ungrouped" ? 1 : b[0] === "ungrouped" ? -1 : a[0].localeCompare(b[0])
+  );
+
   return (
     <div className="space-y-6">
       <div>
@@ -272,34 +312,28 @@ export function TaggingPage({ readOnly, userGroups = [] }: TaggingPageProps) {
         <p className="text-sm text-muted-foreground">Manage tag policies and tag profiles.</p>
       </div>
 
-      {/* Tags Section */}
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-sm font-medium">Tags</h3>
-            <p className="text-xs text-muted-foreground mt-1">
-              Platform tags are required for all resources. Custom tags are optional and can be included in profiles.
-            </p>
+      {/* Tag keys */}
+      <div className="flex max-w-[1040px] flex-col gap-3">
+        <Card className="gap-0 overflow-hidden py-0">
+          <div className="flex flex-wrap items-center gap-2.5 border-b px-[18px] py-3.5">
+            <span className="text-[13.5px] font-semibold">Tag keys</span>
+            <span className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{tagPolicies.length}</span>
+            <span className="text-[12.5px] text-muted-foreground">Platform keys are required on every resource.</span>
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              <SortButton direction={policySortDir} onClick={() => setPolicySortDir(toggleSortDirection("tag-policies", policySortDir))} />
+              {!readOnly && (
+                <Button size="sm" variant="outline" onClick={() => { resetPolicyForm(); setShowPolicyForm(true); }}>
+                  <Plus className="h-3.5 w-3.5 mr-1" />
+                  Add custom tag
+                </Button>
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0 ml-4">
-            <SortButton direction={policySortDir} onClick={() => setPolicySortDir(toggleSortDirection("tag-policies", policySortDir))} />
-            {!readOnly && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => { resetPolicyForm(); setShowPolicyForm(true); }}
-              >
-                <Plus className="h-3.5 w-3.5 mr-1" />
-                Add Custom Tag
-              </Button>
-            )}
-          </div>
-        </div>
 
-        {showPolicyForm && (
-          <Card>
-            <CardContent className="pt-4 space-y-3">
-              <JsonConfigSection
+          {showPolicyForm && (
+            <div className="border-b px-[18px] py-4">
+              <div className="space-y-3">
+                <JsonConfigSection
                   hideApply={!!editingPolicyId}
                   placeholder='{ "key": "cost-center", "default_value": "engineering", "show_on_card": true }'
                   onApply={(json) => {
@@ -329,193 +363,135 @@ export function TaggingPage({ readOnly, userGroups = [] }: TaggingPageProps) {
                     );
                   }}
                 />
-              <div className="flex gap-3">
-                {editingPolicyId ? (
+                <div className="flex gap-3">
+                  {editingPolicyId ? (
+                    <div className="w-1/3 min-w-0 space-y-1">
+                      <label className="text-xs text-muted-foreground">Key</label>
+                      <Input value={policyFormKey} disabled className="text-sm" />
+                    </div>
+                  ) : (
+                    <div className="w-1/3 min-w-0 space-y-1">
+                      <label className="text-xs text-muted-foreground">Key *</label>
+                      <Input
+                        value={policyFormKey}
+                        onChange={(e) => setPolicyFormKey(e.target.value)}
+                        placeholder="e.g. cost-center"
+                        maxLength={128}
+                        className="text-sm"
+                      />
+                    </div>
+                  )}
                   <div className="w-1/3 min-w-0 space-y-1">
-                    <label className="text-xs text-muted-foreground">Key</label>
-                    <Input value={policyFormKey} disabled className="text-sm" />
-                  </div>
-                ) : (
-                  <div className="w-1/3 min-w-0 space-y-1">
-                    <label className="text-xs text-muted-foreground">Key *</label>
+                    <label className="text-xs text-muted-foreground">Default Value</label>
                     <Input
-                      value={policyFormKey}
-                      onChange={(e) => setPolicyFormKey(e.target.value)}
-                      placeholder="e.g. cost-center"
+                      value={policyFormDefault}
+                      onChange={(e) => setPolicyFormDefault(e.target.value)}
+                      placeholder="Optional default"
                       maxLength={128}
                       className="text-sm"
                     />
                   </div>
-                )}
-                <div className="w-1/3 min-w-0 space-y-1">
-                  <label className="text-xs text-muted-foreground">Default Value</label>
-                  <Input
-                    value={policyFormDefault}
-                    onChange={(e) => setPolicyFormDefault(e.target.value)}
-                    placeholder="Optional default"
-                    maxLength={128}
-                    className="text-sm"
-                  />
+                  <div className="flex items-end pb-1">
+                    <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={policyFormShowOnCard}
+                        onChange={(e) => setPolicyFormShowOnCard(e.target.checked)}
+                        className="h-3.5 w-3.5 accent-primary"
+                      />
+                      Show on card
+                    </label>
+                  </div>
                 </div>
-                <div className="flex items-end pb-1">
-                  <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={policyFormShowOnCard}
-                      onChange={(e) => setPolicyFormShowOnCard(e.target.checked)}
-                      className="h-3.5 w-3.5"
-                    />
-                    Show on card
-                  </label>
+                <div className="flex items-center gap-2 pt-1">
+                  <Button
+                    size="sm"
+                    className="min-w-[100px]"
+                    onClick={handlePolicySubmit}
+                    disabled={submitting || (!editingPolicyId && !policyFormKey.trim())}
+                  >
+                    {submitting ? "Saving..." : editingPolicyId ? "Update" : "Create"}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={resetPolicyForm}>
+                    Cancel
+                  </Button>
                 </div>
               </div>
-              <div className="flex items-center gap-2 pt-1">
-                <Button
-                  size="sm"
-                  className="min-w-[100px]"
-                  onClick={handlePolicySubmit}
-                  disabled={submitting || (!editingPolicyId && !policyFormKey.trim())}
-                >
-                  {submitting ? "Saving..." : editingPolicyId ? "Update" : "Create"}
+            </div>
+          )}
+
+          {tagPolicies.length === 0 && !showPolicyForm ? (
+            <p className="px-[18px] py-6 text-sm text-muted-foreground">No tag policies defined.</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-muted hover:bg-muted">
+                  <TableCell className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Key</TableCell>
+                  <TableCell className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Source</TableCell>
+                  <TableCell className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Default</TableCell>
+                  <TableCell className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">On cards</TableCell>
+                  <TableCell />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sortedPolicies.map((policy) => {
+                  const isPlatform = policy.designation === "platform:required";
+                  return (
+                    <TableRow key={policy.id} className="group">
+                      <TableCell className="font-mono text-[12px]">{policy.key}</TableCell>
+                      <TableCell>
+                        <span className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[10px] tracking-wide text-muted-foreground">
+                          {isPlatform ? "PLATFORM · REQUIRED" : "CUSTOM · OPTIONAL"}
+                        </span>
+                      </TableCell>
+                      <TableCell className="font-mono text-[11.5px] text-muted-foreground">{policy.default_value || "—"}</TableCell>
+                      <TableCell className="text-[12px]">{policy.show_on_card ? "Yes" : "No"}</TableCell>
+                      <TableCell className="text-right">
+                        {isPlatform ? (
+                          <Lock className="ml-auto h-3.5 w-3.5 text-muted-foreground/50" />
+                        ) : confirmDeletePolicyId === policy.id ? (
+                          <div className="flex items-center justify-end gap-1.5">
+                            <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setConfirmDeletePolicyId(null)}>Cancel</Button>
+                            <Button size="sm" variant="destructive" className="h-6 text-xs" onClick={() => handlePolicyDelete(policy.id)} disabled={submitting}>Confirm</Button>
+                          </div>
+                        ) : !readOnly && isSuperAdmin ? (
+                          <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                            <button type="button" onClick={() => startEditPolicy(policy)} className="text-muted-foreground/60 hover:text-foreground transition-colors" title="Edit">
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                            <button type="button" onClick={() => setConfirmDeletePolicyId(policy.id)} className="text-muted-foreground/60 hover:text-destructive transition-colors" title="Delete">
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        ) : null}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </Card>
+
+        {/* Tag profiles */}
+        <Card className="gap-0 overflow-hidden py-0">
+          <div className="flex flex-wrap items-center gap-2.5 border-b px-[18px] py-3.5">
+            <span className="text-[13.5px] font-semibold">Tag profiles</span>
+            <span className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{visibleProfiles.length}</span>
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              {!readOnly && (
+                <Button size="sm" variant="outline" onClick={startCreateProfile}>
+                  <Plus className="h-3.5 w-3.5 mr-1" />
+                  Add profile
                 </Button>
-                <Button size="sm" variant="ghost" onClick={resetPolicyForm}>
-                  Cancel
-                </Button>
-                <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal ml-2">
-                  custom:optional
-                </Badge>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {tagPolicies.length === 0 && !showPolicyForm ? (
-          <p className="text-sm text-muted-foreground py-4">No tag policies defined.</p>
-        ) : (
-          <SortableCardGrid
-            items={tagPolicies}
-            getId={(p) => p.id.toString()}
-            getName={(p) => `${p.designation === "platform:required" ? "0" : "1"}:${p.key}`}
-            storageKey="tag-policies"
-            sortDirection={policySortDir}
-            onSortDirectionChange={(d) => { if (d) { setPolicySortDir(d); saveSortDirection("tag-policies", d); } }}
-            className="grid gap-2 md:grid-cols-2 lg:grid-cols-3"
-            renderItem={(policy) =>
-              policy.designation === "platform:required" ? (
-                <Card className="relative py-3 gap-1 transition-colors hover:bg-accent/50">
-                  <CardHeader className="gap-1 pb-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-medium truncate min-w-0">{policy.key}</span>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <Lock className="h-3.5 w-3.5 text-muted-foreground/50" />
-                      </div>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="flex flex-wrap gap-1">
-                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal">
-                      platform:required
-                    </Badge>
-                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal">
-                      {policy.show_on_card ? "displayed on cards" : "not displayed on cards"}
-                    </Badge>
-                  </CardContent>
-                </Card>
-              ) : (
-                <Card className="relative py-3 gap-1 transition-colors hover:bg-accent/50">
-                  <CardHeader className="gap-1 pb-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-medium truncate min-w-0">{policy.key}</span>
-                      {!readOnly && isSuperAdmin && (
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => startEditPolicy(policy)}
-                            className="text-muted-foreground/50 hover:text-foreground transition-colors"
-                            title="Edit"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setConfirmDeletePolicyId(policy.id)}
-                            className="text-muted-foreground/50 hover:text-destructive transition-colors"
-                            title="Delete"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </CardHeader>
-                  <CardContent className="space-y-1.5">
-                    {policy.default_value && (
-                      <div className="text-[10px] text-muted-foreground truncate">default: {policy.default_value}</div>
-                    )}
-                    <div className="flex flex-wrap gap-1">
-                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal">
-                        custom:optional
-                      </Badge>
-                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal">
-                        {policy.show_on_card ? "displayed on cards" : "not displayed on cards"}
-                      </Badge>
-                    </div>
-                    {confirmDeletePolicyId === policy.id && (
-                      <div className="flex items-center justify-end gap-2 pt-1">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="h-6 text-xs"
-                          onClick={() => setConfirmDeletePolicyId(null)}
-                        >
-                          Cancel
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          className="h-6 text-xs"
-                          onClick={() => handlePolicyDelete(policy.id)}
-                          disabled={submitting}
-                        >
-                          Confirm
-                        </Button>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              )
-            }
-          />
-        )}
-      </div>
-
-      {/* Tag Profiles Section */}
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-sm font-medium">Tag Profiles</h3>
-            <p className="text-xs text-muted-foreground mt-1">
-              Tag profiles are named sets of tag values applied to resources deployed by Loom.
-            </p>
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0 ml-4">
-            <SortButton direction={profileSortDir} onClick={() => setProfileSortDir(toggleSortDirection("tag-profiles", profileSortDir))} />
-            {!readOnly && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={startCreateProfile}
-              >
-                <Plus className="h-3.5 w-3.5 mr-1" />
-                Add Profile
-              </Button>
-            )}
-          </div>
-        </div>
 
-        {showProfileForm && (
-          <Card>
-            <CardContent className="pt-4 space-y-4">
-              <JsonConfigSection
+          {showProfileForm && (
+            <div className="border-b px-[18px] py-4">
+              <div className="space-y-4">
+                <JsonConfigSection
                   hideApply={!!editingProfileId}
                   placeholder='{ "name": "team-alpha", "tags": { "loom:application": "app", "loom:group": "alpha", "loom:owner": "user1" } }'
                   onApply={(json) => {
@@ -541,235 +517,200 @@ export function TaggingPage({ readOnly, userGroups = [] }: TaggingPageProps) {
                       if (!p) return "{}";
                       return JSON.stringify({ name: p.name, tags: p.tags }, null, 2);
                     }
-                    const visibleProfiles = !isAdminUser && userGroup
-                      ? profiles.filter((p) => p.tags?.["loom:group"] === userGroup)
-                      : profiles;
                     return JSON.stringify(visibleProfiles.map((p) => ({ name: p.name, tags: p.tags })), null, 2);
                   }}
                 />
 
-              <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">Profile Name *</label>
-                <Input
-                  value={profileFormName}
-                  onChange={(e) => setProfileFormName(e.target.value)}
-                  placeholder="e.g. Team Alpha - Production"
-                  maxLength={128}
-                  className="w-1/3"
-                />
-              </div>
-
-              {platformPolicies.length > 0 && (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs font-medium text-muted-foreground">Platform (Required)</label>
-                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal">platform:required</Badge>
-                  </div>
-                  <div className="flex gap-3">
-                    {platformPolicies.map((tp) => (
-                      <div key={tp.key} className="flex-1 min-w-0 space-y-1">
-                        <label className="text-xs text-muted-foreground">
-                          {tp.key}
-                          <span className="text-destructive"> *</span>
-                        </label>
-                        <Input
-                          placeholder={
-                            tp.key === "loom:application"
-                              ? "Identifier for the application"
-                              : tp.key === "loom:group"
-                                ? "Identifier for the group or team"
-                                : tp.key === "loom:owner"
-                                  ? "Identifier or email alias for the owner"
-                                  : tp.default_value || `Enter ${tp.key}`
-                          }
-                          value={profileFormTags[tp.key] || ""}
-                          onChange={(e) =>
-                            setProfileFormTags((prev) => ({ ...prev, [tp.key]: e.target.value }))
-                          }
-                          maxLength={128}
-                          className="text-sm"
-                        />
-                      </div>
-                    ))}
-                  </div>
+                <div className="space-y-1">
+                  <label className="text-xs text-muted-foreground">Profile Name *</label>
+                  <Input
+                    value={profileFormName}
+                    onChange={(e) => setProfileFormName(e.target.value)}
+                    placeholder="e.g. Team Alpha - Production"
+                    maxLength={128}
+                    className="w-1/3"
+                  />
                 </div>
-              )}
 
-              {customPolicies.length > 0 && (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs font-medium text-muted-foreground">Custom (Optional)</label>
-                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal">custom:optional</Badge>
-                  </div>
+                {platformPolicies.length > 0 && (
                   <div className="space-y-2">
-                    {customPolicies.map((tp) => {
-                      const enabled = profileEnabledCustomKeys.has(tp.key);
-                      return (
-                        <div key={tp.key} className="flex items-center gap-3">
-                          <label className="flex items-center gap-2 cursor-pointer select-none min-w-[160px]">
-                            <input
-                              type="checkbox"
-                              checked={enabled}
-                              onChange={() => toggleCustomKey(tp.key)}
-                              className="h-3.5 w-3.5"
-                            />
-                            <span className="text-xs text-muted-foreground">{tp.key}</span>
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs font-medium text-muted-foreground">Platform (Required)</label>
+                      <span className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">platform:required</span>
+                    </div>
+                    <div className="flex gap-3">
+                      {platformPolicies.map((tp) => (
+                        <div key={tp.key} className="flex-1 min-w-0 space-y-1">
+                          <label className="text-xs text-muted-foreground">
+                            {tp.key}
+                            <span className="text-destructive"> *</span>
                           </label>
-                          {enabled && (
-                            <Input
-                              placeholder={tp.default_value || `Enter ${tp.key}`}
-                              value={profileFormTags[tp.key] || ""}
-                              onChange={(e) =>
-                                setProfileFormTags((prev) => ({ ...prev, [tp.key]: e.target.value }))
-                              }
-                              maxLength={128}
-                              className="text-sm flex-1"
-                            />
-                          )}
+                          <Input
+                            placeholder={
+                              tp.key === "loom:application"
+                                ? "Identifier for the application"
+                                : tp.key === "loom:group"
+                                  ? "Identifier for the group or team"
+                                  : tp.key === "loom:owner"
+                                    ? "Identifier or email alias for the owner"
+                                    : tp.default_value || `Enter ${tp.key}`
+                            }
+                            value={profileFormTags[tp.key] || ""}
+                            onChange={(e) =>
+                              setProfileFormTags((prev) => ({ ...prev, [tp.key]: e.target.value }))
+                            }
+                            maxLength={128}
+                            className="text-sm"
+                          />
                         </div>
-                      );
-                    })}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              <div className="flex items-center gap-2 pt-1">
-                <Button
-                  size="sm"
-                  className="min-w-[100px]"
-                  onClick={handleProfileSubmit}
-                  disabled={submitting || !profileFormName.trim()}
-                >
-                  {submitting ? "Saving..." : editingProfileId ? "Update" : "Create"}
-                </Button>
-                <Button size="sm" variant="ghost" onClick={resetProfileForm}>
-                  Cancel
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {(() => {
-          const visibleProfiles = !isAdminUser && userGroup
-            ? profiles.filter((p) => p.tags?.["loom:group"] === userGroup)
-            : profiles;
-          if (visibleProfiles.length === 0 && !showProfileForm) {
-            return (
-              <p className="text-sm text-muted-foreground py-8">
-                No tag profiles yet. Create one to apply consistent tags across agents and memory resources.
-              </p>
-            );
-          }
-          const grouped = new Map<string, TagProfile[]>();
-          for (const p of visibleProfiles) {
-            const group = p.tags?.["loom:group"] || "ungrouped";
-            const list = grouped.get(group);
-            if (list) list.push(p);
-            else grouped.set(group, [p]);
-          }
-          const sortedGroups = [...grouped.entries()].sort((a, b) =>
-            a[0] === "ungrouped" ? 1 : b[0] === "ungrouped" ? -1 : a[0].localeCompare(b[0])
-          );
-          const toggleGroup = (group: string) => {
-            setCollapsedGroups((prev) => {
-              const next = new Set(prev);
-              if (next.has(group)) next.delete(group);
-              else next.add(group);
-              return next;
-            });
-          };
-          return sortedGroups.map(([group, groupProfiles]) => (
-            <div key={group} className="space-y-2">
-              <button
-                type="button"
-                onClick={() => toggleGroup(group)}
-                className="flex items-center gap-1 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground"
-              >
-                {collapsedGroups.has(group) ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-                {group} ({groupProfiles.length})
-              </button>
-              {collapsedGroups.has(group) ? null : <SortableCardGrid
-                items={groupProfiles}
-                getId={(p) => p.id.toString()}
-                getName={(p) => p.name}
-                storageKey={`tag-profiles-${group}`}
-                sortDirection={profileSortDir}
-                onSortDirectionChange={(d) => { if (d) { setProfileSortDir(d); saveSortDirection("tag-profiles", d); } }}
-                className="grid gap-2 md:grid-cols-2 lg:grid-cols-3"
-                renderItem={(profile) => {
-                  const profileGroup = profile.tags?.["loom:group"] || "";
-                  const isDemoAdmin = userGroups.includes("g-admins-demo") && !isSuperAdmin;
-                  const canEditProfile = !readOnly && (isSuperAdmin || (isDemoAdmin && profileGroup === "demo"));
-
-                  return (
-                    <Card className="relative py-3 gap-1 transition-colors hover:bg-accent/50">
-                      <CardHeader className="gap-1 pb-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-sm font-medium truncate min-w-0">{profile.name}</span>
-                          {canEditProfile && (
-                            <div className="flex items-center gap-1 shrink-0">
-                              <button
-                                type="button"
-                                onClick={() => startEditProfile(profile)}
-                                className="text-muted-foreground/50 hover:text-foreground transition-colors"
-                                title="Edit"
-                              >
-                                <Pencil className="h-3.5 w-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setConfirmDeleteProfileId(profile.id)}
-                                className="text-muted-foreground/50 hover:text-destructive transition-colors"
-                                title="Delete"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      </CardHeader>
-                      <CardContent className="space-y-1.5">
-                        <div className="flex flex-wrap gap-1">
-                          {Object.entries(profile.tags).map(([key, value]) => (
-                            <Badge
-                              key={key}
-                              variant="outline"
-                              className="text-[10px] px-1.5 py-0 font-normal"
-                            >
-                              {key.replace(/^loom:/, "")}: {value}
-                            </Badge>
-                          ))}
-                        </div>
-                        {confirmDeleteProfileId === profile.id && (
-                          <div className="flex items-center justify-end gap-2 pt-1">
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-6 text-xs"
-                              onClick={() => setConfirmDeleteProfileId(null)}
-                            >
-                              Cancel
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="destructive"
-                              className="h-6 text-xs"
-                              onClick={() => handleProfileDelete(profile.id)}
-                              disabled={submitting}
-                            >
-                              Confirm
-                            </Button>
+                {customPolicies.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs font-medium text-muted-foreground">Custom (Optional)</label>
+                      <span className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">custom:optional</span>
+                    </div>
+                    <div className="space-y-2">
+                      {customPolicies.map((tp) => {
+                        const enabled = profileEnabledCustomKeys.has(tp.key);
+                        return (
+                          <div key={tp.key} className="flex items-center gap-3">
+                            <label className="flex items-center gap-2 cursor-pointer select-none min-w-[160px]">
+                              <input
+                                type="checkbox"
+                                checked={enabled}
+                                onChange={() => toggleCustomKey(tp.key)}
+                                className="h-3.5 w-3.5 accent-primary"
+                              />
+                              <span className="text-xs text-muted-foreground">{tp.key}</span>
+                            </label>
+                            {enabled && (
+                              <Input
+                                placeholder={tp.default_value || `Enter ${tp.key}`}
+                                value={profileFormTags[tp.key] || ""}
+                                onChange={(e) =>
+                                  setProfileFormTags((prev) => ({ ...prev, [tp.key]: e.target.value }))
+                                }
+                                maxLength={128}
+                                className="text-sm flex-1"
+                              />
+                            )}
                           </div>
-                        )}
-                      </CardContent>
-                    </Card>
-                  );
-                }}
-              />}
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 pt-1">
+                  <Button
+                    size="sm"
+                    className="min-w-[100px]"
+                    onClick={handleProfileSubmit}
+                    disabled={submitting || !profileFormName.trim()}
+                  >
+                    {submitting ? "Saving..." : editingProfileId ? "Update" : "Create"}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={resetProfileForm}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
             </div>
-          ));
-        })()}
+          )}
+
+          {visibleProfiles.length === 0 && !showProfileForm ? (
+            <p className="px-[18px] py-8 text-sm text-muted-foreground">
+              No tag profiles yet. Create one to apply consistent tags across agents and memory resources.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-muted hover:bg-muted">
+                  <TableCell className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Profile</TableCell>
+                  <TableCell className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Application</TableCell>
+                  <TableCell className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Owner</TableCell>
+                  <TableCell className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Additional</TableCell>
+                  <TableCell className="text-right font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Used by</TableCell>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sortedGroups.map(([group, groupProfiles]) => {
+                  const collapsed = collapsedGroups.has(group);
+                  const sameApp = new Set(groupProfiles.map((p) => p.tags?.["loom:application"] ?? "")).size === 1 ? groupProfiles[0]?.tags?.["loom:application"] : null;
+                  return (
+                    <Fragment key={group}>
+                      <TableRow className="cursor-pointer bg-muted hover:bg-muted" onClick={() => toggleGroup(group)}>
+                        <TableCell colSpan={4}>
+                          <span className="flex items-center gap-2 font-mono text-[10px] tracking-wide text-muted-foreground uppercase">
+                            {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                            Group · {group}
+                            <span className="rounded border bg-card px-1.5 py-0.5 text-[10.5px] normal-case tracking-normal">{groupProfiles.length}</span>
+                            {sameApp && group !== "ungrouped" && (
+                              <span className="ml-2 font-normal normal-case tracking-normal text-muted-foreground">
+                                All {groupProfiles.length} share application {sameApp} · group {group}
+                              </span>
+                            )}
+                          </span>
+                        </TableCell>
+                        <TableCell />
+                      </TableRow>
+                      {!collapsed && groupProfiles.map((profile) => {
+                        const profileGroup = profile.tags?.["loom:group"] || "";
+                        const isDemoAdmin = userGroups.includes("g-admins-demo") && !isSuperAdmin;
+                        const canEditProfile = !readOnly && (isSuperAdmin || (isDemoAdmin && profileGroup === "demo"));
+                        const additional = Object.entries(profile.tags).filter(([k]) => !RESERVED_PROFILE_KEYS.includes(k));
+                        const used = usedByCount(profile);
+                        return (
+                          <TableRow key={profile.id} className="group">
+                            <TableCell className="font-mono text-[12px]">{profile.name}</TableCell>
+                            <TableCell className="font-mono text-[11.5px] text-muted-foreground">{profile.tags?.["loom:application"] || "—"}</TableCell>
+                            <TableCell className="font-mono text-[11.5px] text-muted-foreground">{profile.tags?.["loom:owner"] || "—"}</TableCell>
+                            <TableCell>
+                              {additional.length > 0 ? (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {additional.map(([k, v]) => (
+                                    <span key={k} className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground">{k.replace(/^loom:/, "")} {v}</span>
+                                  ))}
+                                </div>
+                              ) : <span className="font-mono text-[11.5px] text-muted-foreground">—</span>}
+                            </TableCell>
+                            <TableCell className="text-right">
+                              {confirmDeleteProfileId === profile.id ? (
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setConfirmDeleteProfileId(null)}>Cancel</Button>
+                                  <Button size="sm" variant="destructive" className="h-6 text-xs" onClick={() => handleProfileDelete(profile.id)} disabled={submitting}>Confirm</Button>
+                                </div>
+                              ) : (
+                                <div className="flex items-center justify-end gap-2">
+                                  {canEditProfile && (
+                                    <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                                      <button type="button" onClick={() => startEditProfile(profile)} className="text-muted-foreground/60 hover:text-foreground transition-colors" title="Edit">
+                                        <Pencil className="h-3.5 w-3.5" />
+                                      </button>
+                                      <button type="button" onClick={() => setConfirmDeleteProfileId(profile.id)} className="text-muted-foreground/60 hover:text-destructive transition-colors" title="Delete">
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
+                                  )}
+                                  <span className="font-mono text-[11.5px] tabular-nums text-muted-foreground">{used}</span>
+                                </div>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </Fragment>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </Card>
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef, Fragment } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";
 import { SortableTableHead, sortRows } from "@/components/SortableTableHead";
 import { fetchCostDashboard, fetchCostActuals } from "@/api/costs";
@@ -14,13 +15,14 @@ import { ScrollText, Loader2, ChevronRight, ChevronDown } from "lucide-react";
 interface CostDashboardPageProps {
   readOnly?: boolean;
   groupRestriction?: string;
+  days: number;
 }
 
 function formatCost(cost: number): string {
-  if (cost === 0) return "~$0.00";
-  if (cost < 0.01) return `~$${cost.toFixed(6)}`;
-  if (cost < 1) return `~$${cost.toFixed(4)}`;
-  return `~$${cost.toFixed(2)}`;
+  if (cost === 0) return "$0.00";
+  if (cost < 0.01) return `$${cost.toFixed(6)}`;
+  if (cost < 1) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(2)}`;
 }
 
 function formatTokens(count: number): string {
@@ -80,10 +82,9 @@ const SORT_GETTERS: Record<string, (a: AgentCostSummary) => string | number> = {
 // Module-level cache so actuals survive component unmount/remount on navigation
 let _actualsCache: CostActualsResponse | null = null;
 
-export function CostDashboardPage({ readOnly: _readOnly, groupRestriction }: CostDashboardPageProps) {
+export function CostDashboardPage({ groupRestriction, days }: CostDashboardPageProps) {
   const { user, browserSessionId } = useAuth();
   const [data, setData] = useState<CostDashboardResponse | null>(null);
-  const [days, setDays] = useState(30);
   const [loading, setLoading] = useState(false);
   const [sortCol, setSortCol] = useState<string | null>("total");
   const [sortDir, setSortDir] = useState<SortDirection>("desc");
@@ -101,6 +102,8 @@ export function CostDashboardPage({ readOnly: _readOnly, groupRestriction }: Cos
   const [actualsLoading, setActualsLoading] = useState(false);
   const [actualsElapsed, setActualsElapsed] = useState(0);
   const actualsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [showFormulas, setShowFormulas] = useState(false);
+  const [showZeroRows, setShowZeroRows] = useState(false);
 
   const handleSort = (col: string) => {
     if (sortCol === col) {
@@ -154,10 +157,10 @@ export function CostDashboardPage({ readOnly: _readOnly, groupRestriction }: Cos
   useEffect(() => { void loadCosts(); }, [loadCosts]);
   useEffect(() => { void loadSettings(); }, [loadSettings]);
 
-  // Clear actuals cache when groupRestriction changes
+  // Clear actuals cache when the range or group changes
   useEffect(() => {
     setActuals(null);
-  }, [groupRestriction]);
+  }, [groupRestriction, days]);
 
   const pullActuals = async () => {
     if (user && browserSessionId) trackAction(user.username ?? user.sub, browserSessionId, "costs", "pull_actuals");
@@ -178,8 +181,9 @@ export function CostDashboardPage({ readOnly: _readOnly, groupRestriction }: Cos
     }
   };
 
-  // Backend filters by group, so use data directly
-  const sortedAgents = data ? sortRows(data.agents, sortCol, sortDir, SORT_GETTERS) : [];
+  const allAgents = data ? sortRows(data.agents, sortCol, sortDir, SORT_GETTERS) : [];
+  const nonZeroAgents = allAgents.filter((a) => grandTotal(a) > 0 || a.total_invocations > 0);
+  const zeroAgents = allAgents.filter((a) => !(grandTotal(a) > 0 || a.total_invocations > 0));
 
   // Derived totals - compute from all agents returned by backend
   const tModel = data?.agents.reduce((sum, a) => sum + a.total_estimated_cost, 0) || 0;
@@ -191,331 +195,337 @@ export function CostDashboardPage({ readOnly: _readOnly, groupRestriction }: Cos
   const tMemTotal = tStm + tLtm;
   const tGrand = tModel + tRtTotal + tMemTotal;
   const tInvocations = data?.agents.reduce((sum, a) => sum + a.total_invocations, 0) || 0;
+  const activeAgents = data?.agents.filter((a) => a.total_invocations > 0).length ?? 0;
+
+  const modelShare = tGrand > 0 ? (tModel / tGrand) * 100 : 0;
+  const rtShare = tGrand > 0 ? (tRtTotal / tGrand) * 100 : 0;
+  const memShare = tGrand > 0 ? (tMemTotal / tGrand) * 100 : 0;
+
+  // Actual totals (runtime + memory come from usage logs; model cost isn't separately tracked in actuals, so estimated model cost carries through)
+  const actRtTotal = actuals ? actuals.agents.reduce((s, a) => s + a.total_cpu_cost + a.total_memory_cost, 0) : 0;
+  const actMemTotal = actuals ? actuals.memory.reduce((s, m) => s + m.total_cost, 0) : 0;
+  const actGrand = actuals ? actRtTotal + actMemTotal + tModel : 0;
+  const variancePct = actuals && tGrand > 0 ? ((actGrand - tGrand) / tGrand) * 100 : null;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">Cost Dashboard</h2>
-          <p className="text-sm text-muted-foreground">
-            <span className="font-semibold text-amber-600 dark:text-amber-400">Estimated</span>{" "}
-            total cost = model tokens + runtime + memory.
-          </p>
-          <p className="text-sm text-muted-foreground">Runtime CPU assumes {cpuIdlePercent}% I/O wait discount, configurable in Settings.</p>
-          <p className="text-sm text-muted-foreground">Estimates use 1 vCPU and 0.5 GB memory allocation. Idle cost is memory only.</p>
-        </div>
-        <div className="flex items-center gap-2">
-          {[7, 30, 90, 0].map((d) => (
-            <button
-              key={d}
-              onClick={() => { setDays(d); setActuals(null); }}
-              className={`px-3 py-1 text-xs rounded-md border transition-colors ${
-                days === d
-                  ? "bg-primary text-primary-foreground"
-                  : "hover:bg-accent"
-              }`}
-            >
-              {d === 0 ? "All" : `${d}d`}
-            </button>
-          ))}
-        </div>
+    <div className="flex flex-col gap-4">
+      {/* status bar */}
+      <div className="flex flex-wrap items-center gap-3 rounded-md border bg-muted px-3.5 py-2">
+        <span className="flex items-center gap-1.5 rounded-full border border-warning/30 bg-warning-bg px-2 py-0.5 font-mono text-[10px] tracking-wide text-warning">ESTIMATED</span>
+        <span className="text-[12.5px] text-muted-foreground">Modeled from 1 vCPU / 0.5 GB with a {cpuIdlePercent}% I/O-wait discount. Compare with Actuals to validate.</span>
+        <button type="button" onClick={() => setShowFormulas((v) => !v)} className="font-mono text-[11.5px] text-primary hover:underline">How this is calculated</button>
+        <span className="ml-auto shrink-0 font-mono text-[11px] text-muted-foreground">
+          {data ? `last ${data.days === 0 ? "all time" : `${data.days} days`} · ${tInvocations} invocation${tInvocations === 1 ? "" : "s"}` : "—"}
+        </span>
       </div>
 
+      {data && data.group && (
+        <div className="text-xs text-muted-foreground">
+          Showing costs for group: <Badge variant="secondary" className="text-[10px]">{data.group}</Badge>
+        </div>
+      )}
+
+      {loading && !data && <div className="text-sm text-muted-foreground">Loading cost data...</div>}
+
       {data && (
-        <>
-          {/* Summary cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <Card>
-              <CardContent className="pt-2 pb-2">
-                <div className="text-xs text-muted-foreground">Total Cost</div>
-                <div className="bg-white dark:bg-background rounded-md px-2 py-1 mt-1">
-                  <div className="text-xl font-mono font-semibold">{formatCost(tGrand)}</div>
-                  <div className="text-[10px] text-muted-foreground">Model + Runtime + Memory</div>
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+          <div className="flex min-w-0 flex-col gap-4">
+            {/* total + composition */}
+            <Card className="gap-3.5 py-[18px]">
+              <CardContent className="flex flex-col gap-3.5 px-[18px]">
+                <div className="flex flex-wrap items-end gap-5">
+                  <div className="flex flex-col gap-1">
+                    <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">
+                      Total estimated spend · {data.days === 0 ? "all" : `${data.days}d`}
+                    </span>
+                    <div className="flex items-baseline gap-2">
+                      <span className="font-mono text-[30px] font-semibold tracking-tight tabular-nums">{formatCost(tGrand)}</span>
+                      <span className="font-mono text-[11.5px] text-muted-foreground">{formatCost(tInvocations > 0 ? tGrand / tInvocations : 0)} / invocation</span>
+                    </div>
+                  </div>
+                  <div className="ml-auto flex items-center gap-5">
+                    <div className="flex flex-col items-end gap-0.5">
+                      <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Invocations</span>
+                      <span className="font-mono text-sm tabular-nums">{tInvocations}</span>
+                    </div>
+                    <div className="flex flex-col items-end gap-0.5">
+                      <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Active agents</span>
+                      <span className="font-mono text-sm tabular-nums">{activeAgents} <span className="text-muted-foreground">/ {data.agents.length}</span></span>
+                    </div>
+                  </div>
                 </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="pt-2 pb-2">
-                <div className="text-xs text-muted-foreground">Model Tokens</div>
-                <div className="bg-white dark:bg-background rounded-md px-2 py-1 mt-1">
-                  <div className="text-xl font-mono font-semibold">{formatCost(tModel)}</div>
-                  <div className="text-[10px] text-muted-foreground">{tInvocations.toLocaleString()} invocations</div>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="pt-2 pb-2">
-                <div className="text-xs text-muted-foreground">Runtime</div>
-                <div className="bg-white dark:bg-background rounded-md px-2 py-1 mt-1">
-                  <div className="text-xl font-mono font-semibold">{formatCost(tRtTotal)}</div>
-                  <div className="text-[10px] text-muted-foreground">CPU {formatCost(tRtCpu)} + Mem {formatCost(tRtMem)}</div>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="pt-2 pb-2">
-                <div className="text-xs text-muted-foreground">Memory</div>
-                <div className="bg-white dark:bg-background rounded-md px-2 py-1 mt-1">
-                  <div className="text-xl font-mono font-semibold">{formatCost(tMemTotal)}</div>
-                  <div className="text-[10px] text-muted-foreground">STM {formatCost(tStm)} + LTM {formatCost(tLtm)}</div>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
 
-          {data.group && (
-            <div className="text-xs text-muted-foreground">
-              Showing costs for group: <Badge variant="secondary" className="text-[10px]">{data.group}</Badge>
-              {" "}over {data.days === 0 ? "all time" : `${data.days} days`}
-            </div>
-          )}
+                {tGrand > 0 && (
+                  <div className="flex h-2 overflow-hidden rounded-full bg-input-bg">
+                    <div className="bg-chart-1" style={{ width: `${modelShare}%` }} />
+                    <div className="bg-chart-2" style={{ width: `${rtShare}%` }} />
+                    <div className="bg-chart-3" style={{ width: `${memShare}%` }} />
+                  </div>
+                )}
+                <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-3">
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-[2px] bg-chart-1" />
+                      <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Model tokens</span>
+                    </div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="font-mono text-[15px] font-semibold tabular-nums">{formatCost(tModel)}</span>
+                      <span className="font-mono text-[10.5px] text-muted-foreground">{Math.round(modelShare)}%</span>
+                    </div>
+                    <span className="text-[11.5px] text-muted-foreground">{formatTokens(data.total_input_tokens)} in · {formatTokens(data.total_output_tokens)} out</span>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-[2px] bg-chart-2" />
+                      <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Runtime</span>
+                    </div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="font-mono text-[15px] font-semibold tabular-nums">{formatCost(tRtTotal)}</span>
+                      <span className="font-mono text-[10.5px] text-muted-foreground">{Math.round(rtShare)}%</span>
+                    </div>
+                    <span className="text-[11.5px] text-muted-foreground">CPU {formatCost(tRtCpu)} · Mem {formatCost(tRtMem)}</span>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-[2px] bg-chart-3" />
+                      <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Memory store</span>
+                    </div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="font-mono text-[15px] font-semibold tabular-nums">{formatCost(tMemTotal)}</span>
+                      <span className="font-mono text-[10.5px] text-muted-foreground">{Math.round(memShare)}%</span>
+                    </div>
+                    <span className="text-[11.5px] text-muted-foreground">STM {formatCost(tStm)}{tLtm > 0 ? ` · LTM ${formatCost(tLtm)}` : " · LTM unused"}</span>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
 
-          <Card className="bg-muted/30">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium">Estimated Costs</CardTitle>
-              <p className="text-xs text-muted-foreground">Estimated cost breakdown per agent. 1 vCPU and 0.5 GB used as <em>estimated</em> factors. Compare to Actual Costs below to validate estimates.</p>
-              <div className="text-[10px] text-muted-foreground mt-1 font-mono space-y-0.5">
-                <div>Runtime CPU = invocation_duration_hours × 1 vCPU × $0.0895/vCPU·h × (1 − {cpuIdlePercent}% I/O wait)</div>
-                <div>Runtime Mem = invocation_duration_hours × 0.5 GB × $0.00945/GB·h</div>
-                <div>Idle Mem = idle_timeout_seconds × 0.5 GB × $0.00945/GB·h ÷ 3600</div>
+            {/* per-agent */}
+            <Card className="gap-0 overflow-hidden py-0">
+              <div className="flex items-center gap-2.5 border-b px-4 py-3">
+                <span className="text-[13.5px] font-semibold">Spend by agent</span>
+                <span className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{activeAgents} active</span>
               </div>
-            </CardHeader>
-            <CardContent>
               {data.agents.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No invocations in this period.</p>
+                <p className="px-4 py-6 text-sm text-muted-foreground">No invocations in this period.</p>
               ) : (
-                <div className="border rounded-md overflow-hidden">
                 <Table>
                   <TableHeader>
-                    <TableRow>
+                    <TableRow className="bg-muted hover:bg-muted">
                       <SortableTableHead column="agent" activeColumn={sortCol} direction={sortDir} onSort={handleSort}>Agent</SortableTableHead>
                       <SortableTableHead column="model" activeColumn={sortCol} direction={sortDir} onSort={handleSort}>Model</SortableTableHead>
-                      <SortableTableHead column="invocations" activeColumn={sortCol} direction={sortDir} onSort={handleSort} className="text-right">Invocations</SortableTableHead>
-                      <SortableTableHead column="model_tokens" activeColumn={sortCol} direction={sortDir} onSort={handleSort} className="text-right">Model Tokens</SortableTableHead>
-                      <SortableTableHead column="rt_total" activeColumn={sortCol} direction={sortDir} onSort={handleSort} className="text-right">AgentCore Runtime</SortableTableHead>
-                      <SortableTableHead column="mem_total" activeColumn={sortCol} direction={sortDir} onSort={handleSort} className="text-right">AgentCore Memory</SortableTableHead>
-                      <SortableTableHead column="avg" activeColumn={sortCol} direction={sortDir} onSort={handleSort} className="text-right">Per Invoke</SortableTableHead>
+                      <SortableTableHead column="invocations" activeColumn={sortCol} direction={sortDir} onSort={handleSort} className="text-right">Invokes</SortableTableHead>
+                      <SortableTableHead column="total" activeColumn={sortCol} direction={sortDir} onSort={handleSort}>Composition</SortableTableHead>
+                      <SortableTableHead column="avg" activeColumn={sortCol} direction={sortDir} onSort={handleSort} className="text-right">Per invoke</SortableTableHead>
                       <SortableTableHead column="total" activeColumn={sortCol} direction={sortDir} onSort={handleSort} className="text-right">Total</SortableTableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {sortedAgents.map((a) => {
-                      const rtCpu = runtimeCpu(a);
-                      const rtMem = runtimeMem(a);
-                      const rtTot = runtimeTotal(a);
-                      const memTot = memoryTotal(a);
+                    {nonZeroAgents.map((a) => {
                       const total = grandTotal(a);
+                      const mPct = total > 0 ? (a.total_estimated_cost / total) * 100 : 0;
+                      const rPct = total > 0 ? (runtimeTotal(a) / total) * 100 : 0;
+                      const memPct = total > 0 ? (memoryTotal(a) / total) * 100 : 0;
                       return (
-                        <TableRow key={a.agent_id} className="bg-white dark:bg-transparent">
-                          <TableCell className="text-xs font-medium">{a.agent_name ?? `Agent #${a.agent_id}`}</TableCell>
-                          <TableCell className="text-xs text-muted-foreground">{a.model_id?.split(".").pop() ?? "—"}</TableCell>
-                          <TableCell className="text-xs text-right font-mono">{a.total_invocations}</TableCell>
-                          <TableCell className="text-xs text-right font-mono">
-                            {formatCost(a.total_estimated_cost)}
-                            <div className="text-[10px] text-muted-foreground">{formatTokens(a.total_input_tokens)} in / {formatTokens(a.total_output_tokens)} out</div>
+                        <TableRow key={a.agent_id}>
+                          <TableCell className="font-mono text-[12.5px]">{a.agent_name ?? `Agent #${a.agent_id}`}</TableCell>
+                          <TableCell className="font-mono text-[11.5px] text-muted-foreground">{a.model_id?.split(".").pop() ?? "—"}</TableCell>
+                          <TableCell className="text-right font-mono text-xs tabular-nums">{a.total_invocations}</TableCell>
+                          <TableCell>
+                            <div className="flex h-1.5 min-w-[64px] overflow-hidden rounded-full bg-input-bg" title={`Model ${formatCost(a.total_estimated_cost)} · Runtime ${formatCost(runtimeTotal(a))} · Memory ${formatCost(memoryTotal(a))}`}>
+                              <div className="bg-chart-1" style={{ width: `${mPct}%` }} />
+                              <div className="bg-chart-2" style={{ width: `${rPct}%` }} />
+                              <div className="bg-chart-3" style={{ width: `${memPct}%` }} />
+                            </div>
                           </TableCell>
-                          <TableCell className="text-xs text-right font-mono">
-                            {formatCost(rtTot)}
-                            <div className="text-[10px] text-muted-foreground">CPU {formatCost(rtCpu)} + Mem {formatCost(rtMem)}</div>
-                          </TableCell>
-                          <TableCell className="text-xs text-right font-mono">
-                            {formatCost(memTot)}
-                            <div className="text-[10px] text-muted-foreground">STM {formatCost(a.total_stm_cost)} + LTM {formatCost(a.total_ltm_cost)}</div>
-                          </TableCell>
-                          <TableCell className="text-xs text-right font-mono">{formatCost(a.avg_cost_per_invocation)}</TableCell>
-                          <TableCell className="text-xs text-right font-mono font-semibold">{formatCost(total)}</TableCell>
+                          <TableCell className="text-right font-mono text-[11.5px] text-muted-foreground tabular-nums">{formatCost(a.avg_cost_per_invocation)}</TableCell>
+                          <TableCell className="text-right font-mono text-[12.5px] font-semibold tabular-nums">{formatCost(total)}</TableCell>
                         </TableRow>
                       );
                     })}
+                    {zeroAgents.length > 0 && (
+                      <TableRow className="cursor-pointer bg-muted hover:bg-muted" onClick={() => setShowZeroRows((v) => !v)}>
+                        <TableCell colSpan={5} className="font-mono text-xs text-muted-foreground">
+                          <span className="mr-1.5">{showZeroRows ? "⌄" : "›"}</span>
+                          {zeroAgents.length} agent{zeroAgents.length === 1 ? "" : "s"} with no invocations in this period
+                          <span className="ml-2 text-primary">{showZeroRows ? "hide" : "show"}</span>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-[11.5px] text-muted-foreground tabular-nums">$0.00</TableCell>
+                      </TableRow>
+                    )}
+                    {showZeroRows && zeroAgents.map((a) => (
+                      <TableRow key={a.agent_id} className="text-muted-foreground">
+                        <TableCell className="font-mono text-[12.5px]">{a.agent_name ?? `Agent #${a.agent_id}`}</TableCell>
+                        <TableCell className="font-mono text-[11.5px]">{a.model_id?.split(".").pop() ?? "—"}</TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums">0</TableCell>
+                        <TableCell />
+                        <TableCell className="text-right font-mono text-[11.5px] tabular-nums">—</TableCell>
+                        <TableCell className="text-right font-mono text-[12.5px] tabular-nums">$0.00</TableCell>
+                      </TableRow>
+                    ))}
+                    <TableRow className="bg-muted font-medium hover:bg-muted">
+                      <TableCell className="text-[12.5px] font-semibold">Total</TableCell>
+                      <TableCell />
+                      <TableCell className="text-right font-mono text-xs tabular-nums">{tInvocations}</TableCell>
+                      <TableCell />
+                      <TableCell className="text-right font-mono text-[11.5px] text-muted-foreground tabular-nums">{formatCost(tInvocations > 0 ? tGrand / tInvocations : 0)}</TableCell>
+                      <TableCell className="text-right font-mono text-sm font-semibold tabular-nums">{formatCost(tGrand)}</TableCell>
+                    </TableRow>
                   </TableBody>
                 </Table>
-                </div>
               )}
-            </CardContent>
-          </Card>
+            </Card>
 
-          {/* Cost Actuals from USAGE_LOGS */}
-          <Card className="bg-muted/30">
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle className="text-sm font-medium">Actual Costs</CardTitle>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Actual costs from CloudWatch usage logs for runtime and memory resources. Only invocations tracked in Loom are included.
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    NOTE: Delivery of usage logs for calculating actual costs can be delayed. If costs are not showing up, try again in 15 minutes.
-                  </p>
+            {/* Memory actuals detail (secondary, appears once actuals are pulled) */}
+            {actuals && actuals.memory.length > 0 && (
+              <Card className="gap-0 overflow-hidden py-0">
+                <div className="flex items-center gap-2.5 border-b px-4 py-3">
+                  <span className="text-[13.5px] font-semibold">Memory actuals</span>
+                  <span className="text-[11.5px] text-muted-foreground">From APPLICATION_LOGS, filtered to Loom-tracked sessions.</span>
                 </div>
-                <button
-                  onClick={() => void pullActuals()}
-                  disabled={actualsLoading}
-                  className="w-[190px] px-3 py-1 text-xs rounded-md border bg-background transition-colors hover:bg-accent disabled:opacity-50 flex items-center justify-center gap-2 shrink-0"
-                >
-                  <ScrollText className="h-3 w-3" />
-                  <span>Pull Actuals</span>
-                  {actualsLoading && (
-                    <>
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      <span className="font-mono">{actualsElapsed}s</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {actuals ? (
-                <div className="space-y-4">
-                  {/* Runtime Actuals */}
-                  <Card className="border shadow-sm bg-background">
-                    <CardHeader className="pb-2">
-                      <CardTitle className="text-sm font-medium">Runtime</CardTitle>
-                      <p className="text-xs text-muted-foreground">
-                        Costs from runtime USAGE_LOGS, filtered to Loom-tracked sessions. CPU I/O wait discount: {actuals.io_wait_discount_percent}%, configurable in Settings.
-                      </p>
-                    </CardHeader>
-                    <CardContent>
-                      {actuals?.agents.length === 0 ? (
-                        <p className="text-sm text-muted-foreground">No usage log data found for this period.</p>
-                      ) : (
-                        <div className="border rounded-md overflow-hidden">
-                          <Table>
-                            <TableHeader>
-                              <TableRow>
-                                <SortableTableHead column="act_agent" activeColumn={actSortCol} direction={actSortDir} onSort={handleActSort}>Agent</SortableTableHead>
-                                <SortableTableHead column="act_sessions" activeColumn={actSortCol} direction={actSortDir} onSort={handleActSort} className="text-right">Sessions</SortableTableHead>
-                                <SortableTableHead column="act_cpu" activeColumn={actSortCol} direction={actSortDir} onSort={handleActSort} className="text-right">Runtime CPU</SortableTableHead>
-                                <SortableTableHead column="act_mem" activeColumn={actSortCol} direction={actSortDir} onSort={handleActSort} className="text-right">Runtime Memory</SortableTableHead>
-                                <SortableTableHead column="act_total" activeColumn={actSortCol} direction={actSortDir} onSort={handleActSort} className="text-right">Total</SortableTableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {sortRows(actuals.agents, actSortCol, actSortDir, ACTUALS_SORT_GETTERS).map((agent) => (
-                                <Fragment key={agent.agent_id}>
-                                  <TableRow
-                                    className="bg-white dark:bg-transparent cursor-pointer hover:bg-muted/20"
-                                    onClick={() => setExpandedAgents((prev) => {
-                                      const next = new Set(prev);
-                                      if (next.has(agent.agent_id)) next.delete(agent.agent_id);
-                                      else next.add(agent.agent_id);
-                                      return next;
-                                    })}
-                                  >
-                                    <TableCell className="text-xs font-medium">
-                                      <span className="inline-flex items-center gap-1">
-                                        {expandedAgents.has(agent.agent_id)
-                                          ? <ChevronDown className="h-3 w-3" />
-                                          : <ChevronRight className="h-3 w-3" />}
-                                        {agent.agent_name}
-                                      </span>
-                                    </TableCell>
-                                    <TableCell className="text-xs text-right font-mono">{agent.sessions.length}</TableCell>
-                                    <TableCell className="text-xs text-right font-mono">{formatCost(agent.total_cpu_cost)}</TableCell>
-                                    <TableCell className="text-xs text-right font-mono">{formatCost(agent.total_memory_cost)}</TableCell>
-                                    <TableCell className="text-xs text-right font-mono font-semibold">{formatCost(agent.total_cost)}</TableCell>
-                                  </TableRow>
-                                  {expandedAgents.has(agent.agent_id) && agent.sessions.map((sess, idx) => (
-                                    <TableRow key={`${agent.agent_id}-${idx}`} className="bg-white dark:bg-transparent">
-                                      <TableCell className="text-[10px] text-muted-foreground pl-8">{sess.session_id ?? "—"}</TableCell>
-                                      <TableCell className="text-[10px] text-muted-foreground text-right font-mono">{sess.event_count} events</TableCell>
-                                      <TableCell className="text-[10px] text-muted-foreground text-right font-mono">
-                                        {formatCost(sess.cpu_cost)}
-                                        <span className="ml-1">({sess.vcpu_hours.toFixed(6)} vCPU·h)</span>
-                                      </TableCell>
-                                      <TableCell className="text-[10px] text-muted-foreground text-right font-mono">
-                                        {formatCost(sess.memory_cost)}
-                                        <span className="ml-1">({sess.memory_gb_hours.toFixed(6)} GB·h)</span>
-                                      </TableCell>
-                                      <TableCell className="text-[10px] text-muted-foreground text-right font-mono">{formatCost(sess.total_cost)}</TableCell>
-                                    </TableRow>
-                                  ))}
-                                </Fragment>
-                              ))}
-                              {actuals.agents.length > 1 && (
-                                <TableRow className="border-t-2 font-medium bg-white dark:bg-transparent">
-                                  <TableCell className="text-xs">Total ({actuals.agents.length} agents)</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">{actuals.agents.reduce((n, a) => n + a.sessions.length, 0)}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">{formatCost(actuals.agents.reduce((s, a) => s + a.total_cpu_cost, 0))}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">{formatCost(actuals.agents.reduce((s, a) => s + a.total_memory_cost, 0))}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono font-semibold">{formatCost(actuals.agents.reduce((s, a) => s + a.total_cost, 0))}</TableCell>
-                                </TableRow>
-                              )}
-                            </TableBody>
-                          </Table>
-                        </div>
-                      )}
-                    </CardContent>
-                  </Card>
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted hover:bg-muted">
+                      <SortableTableHead column="mem_name" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort}>Memory</SortableTableHead>
+                      <SortableTableHead column="mem_events" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">Log events</SortableTableHead>
+                      <SortableTableHead column="mem_extractions" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">Extractions</SortableTableHead>
+                      <SortableTableHead column="mem_consolidations" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">Consolidations</SortableTableHead>
+                      <SortableTableHead column="mem_retrievals" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">LTM retrievals</SortableTableHead>
+                      <SortableTableHead column="mem_stored" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">Records stored</SortableTableHead>
+                      <SortableTableHead column="mem_total" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">Total</SortableTableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sortRows(actuals.memory, memSortCol, memSortDir, MEM_SORT_GETTERS).map((mem) => (
+                      <TableRow key={mem.memory_id}>
+                        <TableCell className="font-mono text-[12.5px]">{mem.memory_name}</TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums">{mem.total_log_events.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums">{mem.extractions.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums">{mem.consolidations.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums">{mem.retrieve_records.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums">{mem.records_stored.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono text-[12.5px] font-semibold tabular-nums">{formatCost(mem.total_cost)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </Card>
+            )}
+          </div>
 
-                  {/* Memory Actuals */}
-                  <Card className="border shadow-sm bg-background">
-                    <CardHeader className="pb-2">
-                      <CardTitle className="text-sm font-medium">Memory</CardTitle>
-                      <p className="text-xs text-muted-foreground">
-                        Costs from memory APPLICATION_LOGS, filtered to Loom-tracked sessions.
-                      </p>
-                    </CardHeader>
-                    <CardContent>
-                      {!actuals?.memory || actuals.memory.length === 0 ? (
-                        <p className="text-sm text-muted-foreground">No memory log data found for this period.</p>
-                      ) : (
-                        <div className="border rounded-md overflow-hidden">
-                          <Table>
-                            <TableHeader>
-                              <TableRow>
-                                <SortableTableHead column="mem_name" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort}>Memory</SortableTableHead>
-                                <SortableTableHead column="mem_events" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">Log Events</SortableTableHead>
-                                <SortableTableHead column="mem_extractions" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">Extractions</SortableTableHead>
-                                <SortableTableHead column="mem_consolidations" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">Consolidations</SortableTableHead>
-                                <SortableTableHead column="mem_retrievals" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">LTM Retrievals</SortableTableHead>
-                                <SortableTableHead column="mem_stored" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">Records Stored</SortableTableHead>
-                                <SortableTableHead column="mem_total" activeColumn={memSortCol} direction={memSortDir} onSort={handleMemSort} className="text-right">Total</SortableTableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {sortRows(actuals.memory, memSortCol, memSortDir, MEM_SORT_GETTERS).map((mem) => (
-                                <TableRow key={mem.memory_id} className="bg-white dark:bg-transparent">
-                                  <TableCell className="text-xs font-medium">{mem.memory_name}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">{mem.total_log_events.toLocaleString()}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">{mem.extractions.toLocaleString()}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">{mem.consolidations.toLocaleString()}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">
-                                    {mem.retrieve_records.toLocaleString()}
-                                    <div className="text-[10px] text-muted-foreground">{formatCost(mem.ltm_retrieval_cost)}</div>
-                                  </TableCell>
-                                  <TableCell className="text-xs text-right font-mono">
-                                    {mem.records_stored.toLocaleString()}
-                                    <div className="text-[10px] text-muted-foreground">{formatCost(mem.ltm_storage_cost)}</div>
-                                  </TableCell>
-                                  <TableCell className="text-xs text-right font-mono font-semibold">{formatCost(mem.total_cost)}</TableCell>
-                                </TableRow>
-                              ))}
-                              {actuals.memory.length > 1 && (
-                                <TableRow className="border-t-2 font-medium bg-white dark:bg-transparent">
-                                  <TableCell className="text-xs">Total ({actuals.memory.length} resources)</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">{actuals.memory.reduce((s, m) => s + m.total_log_events, 0).toLocaleString()}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">{actuals.memory.reduce((s, m) => s + m.extractions, 0).toLocaleString()}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">{actuals.memory.reduce((s, m) => s + m.consolidations, 0).toLocaleString()}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">{actuals.memory.reduce((s, m) => s + m.retrieve_records, 0).toLocaleString()}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono">{actuals.memory.reduce((s, m) => s + m.records_stored, 0).toLocaleString()}</TableCell>
-                                  <TableCell className="text-xs text-right font-mono font-semibold">{formatCost(actuals.memory.reduce((s, m) => s + m.total_cost, 0))}</TableCell>
-                                </TableRow>
-                              )}
-                            </TableBody>
-                          </Table>
-                        </div>
-                      )}
-                    </CardContent>
-                  </Card>
+          {/* rail */}
+          <div className="flex flex-col gap-3.5">
+            <Card className="gap-3 py-4">
+              <CardContent className="flex flex-col gap-3 px-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-[13px] font-semibold">Actual costs</span>
+                  <Button size="sm" variant="outline" className="ml-auto h-[27px] gap-1.5 text-xs" onClick={() => void pullActuals()} disabled={actualsLoading}>
+                    <ScrollText className="h-3 w-3" />
+                    {actualsLoading ? (
+                      <span className="flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" />{actualsElapsed}s</span>
+                    ) : "Pull actuals"}
+                  </Button>
                 </div>
-              ) : null}
-            </CardContent>
-          </Card>
-        </>
-      )}
+                {actuals ? (
+                  <>
+                    <div className="flex items-baseline gap-2">
+                      <span className="font-mono text-xl font-semibold tabular-nums">{formatCost(actGrand)}</span>
+                      {variancePct !== null && (
+                        <span className={`rounded-md border px-1.5 py-0.5 font-mono text-[11px] ${variancePct >= 0 ? "border-warning/30 bg-warning-bg text-warning" : "border-success/30 bg-success-bg text-success"}`}>
+                          {variancePct >= 0 ? "+" : ""}{variancePct.toFixed(1)}% vs est.
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Runtime</span>
+                        <span className="ml-auto font-mono text-[11.5px] tabular-nums">{formatCost(actRtTotal)}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Memory</span>
+                        <span className="ml-auto font-mono text-[11.5px] tabular-nums">{formatCost(actMemTotal)}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Model</span>
+                        <span className="ml-auto font-mono text-[11.5px] tabular-nums">{formatCost(tModel)}</span>
+                      </div>
+                    </div>
+                    {actuals.agents.length > 0 && (
+                      <div className="flex flex-col overflow-hidden rounded-md border">
+                        <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 border-b bg-muted px-2.5 py-1.5 font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">
+                          <button type="button" onClick={() => handleActSort("act_agent")} className="text-left hover:text-foreground">Agent</button>
+                          <button type="button" onClick={() => handleActSort("act_total")} className="text-right hover:text-foreground">Total</button>
+                        </div>
+                        {sortRows(actuals.agents, actSortCol, actSortDir, ACTUALS_SORT_GETTERS).map((agent) => (
+                          <Fragment key={agent.agent_id}>
+                            <button
+                              type="button"
+                              onClick={() => setExpandedAgents((prev) => { const next = new Set(prev); next.has(agent.agent_id) ? next.delete(agent.agent_id) : next.add(agent.agent_id); return next; })}
+                              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b px-2.5 py-1.5 text-left last:border-b-0 hover:bg-accent/50"
+                            >
+                              <span className="flex items-center gap-1 truncate font-mono text-[11.5px]">
+                                {expandedAgents.has(agent.agent_id) ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+                                {agent.agent_name}
+                              </span>
+                              <span className="font-mono text-[11.5px] tabular-nums">{formatCost(agent.total_cost)}</span>
+                            </button>
+                            {expandedAgents.has(agent.agent_id) && agent.sessions.map((sess, idx) => (
+                              <div key={idx} className="border-b px-2.5 py-1 pl-6 last:border-b-0">
+                                <div className="flex items-center justify-between gap-2 font-mono text-[10px] text-muted-foreground">
+                                  <span className="truncate">{sess.session_id ?? "—"}</span>
+                                  <span className="tabular-nums">{formatCost(sess.total_cost)}</span>
+                                </div>
+                              </div>
+                            ))}
+                          </Fragment>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex items-center gap-1.5 rounded-md border bg-muted px-2.5 py-2 text-[11px] leading-[1.5] text-muted-foreground">
+                      CloudWatch usage logs can lag ~15 minutes.
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-[11.5px] leading-[1.5] text-muted-foreground">Pull actuals from CloudWatch usage logs to compare against estimates.</p>
+                )}
+              </CardContent>
+            </Card>
 
-      {loading && !data && (
-        <div className="text-sm text-muted-foreground">Loading cost data...</div>
+            <Card className="gap-2.5 py-4">
+              <CardContent className="flex flex-col gap-2.5 px-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-[13px] font-semibold">Assumptions</span>
+                </div>
+                <div className="flex items-center justify-between gap-2.5">
+                  <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">vCPU</span>
+                  <span className="font-mono text-[11.5px]">1 @ $0.0895/h</span>
+                </div>
+                <div className="flex items-center justify-between gap-2.5">
+                  <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Memory</span>
+                  <span className="font-mono text-[11.5px]">0.5 GB @ $0.00945/h</span>
+                </div>
+                <div className="flex items-center justify-between gap-2.5">
+                  <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">I/O wait</span>
+                  <span className="font-mono text-[11.5px]">{cpuIdlePercent}% discount</span>
+                </div>
+                <div className="h-px bg-border" />
+                <div className="flex items-center gap-2">
+                  <span className="text-[12.5px] text-muted-foreground">Formulas</span>
+                  <button type="button" onClick={() => setShowFormulas((v) => !v)} className="ml-auto font-mono text-[11px] text-primary hover:underline">
+                    {showFormulas ? "hide" : "show"}
+                  </button>
+                </div>
+                {showFormulas && (
+                  <div className="flex flex-col gap-1 rounded-md border bg-muted p-2.5 font-mono text-[10px] leading-[1.6] text-muted-foreground">
+                    <span>Runtime CPU = duration_hours × 1 vCPU × $0.0895/vCPU·h × (1 − {cpuIdlePercent}%)</span>
+                    <span>Runtime Mem = duration_hours × 0.5 GB × $0.00945/GB·h</span>
+                    <span>Idle Mem = idle_timeout_s × 0.5 GB × $0.00945/GB·h ÷ 3600</span>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </div>
       )}
     </div>
   );

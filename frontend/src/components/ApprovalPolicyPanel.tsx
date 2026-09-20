@@ -3,6 +3,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { StatusPill } from "@/components/StatusPill";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import {
   Select,
   SelectContent,
@@ -40,7 +49,13 @@ const EMPTY_FORM: PolicyFormData = {
   enabled: true,
 };
 
-export function ApprovalPolicyPanel({ readOnly }: { readOnly?: boolean }) {
+const POLICY_TYPE_LABELS: Record<string, string> = {
+  loop_hook: "Loop hook",
+  tool_context: "Tool context",
+  mcp_elicitation: "MCP elicitation",
+};
+
+export function ApprovalPolicyPanel({ readOnly, onCountChange }: { readOnly?: boolean; onCountChange?: (count: number) => void }) {
   const [policies, setPolicies] = useState<ApprovalPolicy[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -48,6 +63,7 @@ export function ApprovalPolicyPanel({ readOnly }: { readOnly?: boolean }) {
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState<PolicyFormData>(EMPTY_FORM);
   const [submitting, setSubmitting] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
 
   const loadPolicies = useCallback(async () => {
     try {
@@ -64,6 +80,8 @@ export function ApprovalPolicyPanel({ readOnly }: { readOnly?: boolean }) {
   useEffect(() => {
     void loadPolicies();
   }, [loadPolicies]);
+
+  useEffect(() => { onCountChange?.(policies.length); }, [policies.length, onCountChange]);
 
   const handleCreate = async () => {
     if (!form.name.trim()) return;
@@ -124,6 +142,7 @@ export function ApprovalPolicyPanel({ readOnly }: { readOnly?: boolean }) {
   const handleDelete = async (id: number) => {
     try {
       await deleteApprovalPolicy(id);
+      setConfirmDeleteId(null);
       toast.success("Approval policy deleted");
       await loadPolicies();
     } catch (e) {
@@ -170,11 +189,10 @@ export function ApprovalPolicyPanel({ readOnly }: { readOnly?: boolean }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium">Approval Policies</h3>
+        <h3 className="text-sm font-medium">Approval policies</h3>
         {!readOnly && !isFormOpen && (
           <Button
             size="sm"
-            variant="outline"
             onClick={() => {
               setShowCreate(true);
               setEditingId(null);
@@ -182,7 +200,7 @@ export function ApprovalPolicyPanel({ readOnly }: { readOnly?: boolean }) {
             }}
           >
             <Plus className="h-3.5 w-3.5 mr-1" />
-            Add Policy
+            Add policy
           </Button>
         )}
       </div>
@@ -299,73 +317,64 @@ export function ApprovalPolicyPanel({ readOnly }: { readOnly?: boolean }) {
           No approval policies configured.
         </p>
       ) : (
-        <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
-          {policies.map((policy) => (
-            <div key={policy.id} className="rounded-lg border p-3 space-y-2">
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex-1 min-w-0 space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium">{policy.name}</span>
-                    <span
-                      className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                        policy.enabled
-                          ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"
-                          : "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
-                      }`}
-                    >
-                      {policy.enabled ? "enabled" : "disabled"}
-                    </span>
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    <span className="font-medium">Type: </span>
-                    {policy.policy_type.replace("_", " ")}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    <span className="font-medium">Mode: </span>
-                    {policy.approval_mode.replace("_", " ")}
-                  </div>
-                  {policy.tool_match_rules.length > 0 && (
-                    <div className="text-xs text-muted-foreground">
-                      <span className="font-medium">Rules: </span>
-                      <span className="font-mono">
-                        {policy.tool_match_rules.join(", ")}
-                      </span>
-                    </div>
-                  )}
-                  <div className="text-xs text-muted-foreground">
-                    <span className="font-medium">Timeout: </span>
-                    {policy.timeout_seconds}s
-                    {policy.approval_cache_ttl > 0 && (
-                      <span className="ml-2">
-                        <span className="font-medium">Cache: </span>
-                        {policy.approval_cache_ttl}s
-                      </span>
+        <div className="rounded-md border overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow className="bg-card hover:bg-card">
+                <TableHead>Policy</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Matches</TableHead>
+                <TableHead>Timeout</TableHead>
+                <TableHead className="text-right">State</TableHead>
+                {!readOnly && <TableHead className="w-[1%]" />}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {policies.map((policy) => (
+                <TableRow key={policy.id} className="group">
+                  <TableCell className="font-mono text-[12.5px]">{policy.name}</TableCell>
+                  <TableCell className="text-[12.5px] text-muted-foreground">{POLICY_TYPE_LABELS[policy.policy_type] ?? policy.policy_type}</TableCell>
+                  <TableCell>
+                    {policy.tool_match_rules.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {policy.tool_match_rules.map((rule) => (
+                          <span key={rule} className="rounded border bg-muted px-1.5 py-0.5 font-mono text-[11px]">{rule}</span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-[12px] text-muted-foreground">all tools</span>
                     )}
-                  </div>
-                </div>
-                {!readOnly && (
-                  <div className="flex gap-1 shrink-0">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => startEdit(policy)}
-                      title="Edit"
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => void handleDelete(policy.id)}
-                      title="Delete"
-                    >
-                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                    </Button>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
+                  </TableCell>
+                  <TableCell className="font-mono text-[11.5px] tabular-nums">
+                    {policy.timeout_seconds}s
+                    {policy.approval_cache_ttl > 0 && <span className="text-muted-foreground"> · cache {policy.approval_cache_ttl}s</span>}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <StatusPill label={policy.enabled ? "enabled" : "disabled"} variant={policy.enabled ? "success" : "neutral"} className="ml-auto" />
+                  </TableCell>
+                  {!readOnly && (
+                    <TableCell className="text-right">
+                      {confirmDeleteId === policy.id ? (
+                        <div className="flex items-center justify-end gap-1.5">
+                          <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setConfirmDeleteId(null)}>Cancel</Button>
+                          <Button size="sm" variant="destructive" className="h-6 text-xs" onClick={() => void handleDelete(policy.id)}>Confirm</Button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                          <button type="button" onClick={() => startEdit(policy)} className="text-muted-foreground/60 hover:text-foreground transition-colors" title="Edit">
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button type="button" onClick={() => setConfirmDeleteId(policy.id)} className="text-muted-foreground/60 hover:text-destructive transition-colors" title="Delete">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      )}
+                    </TableCell>
+                  )}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </div>
       )}
     </div>

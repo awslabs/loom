@@ -6,6 +6,7 @@ import { Loader2, Trash2, Pencil } from "lucide-react";
 import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatTimestamp } from "@/lib/format";
 import { statusVariant } from "@/lib/status";
+import { StatusPill } from "@/components/StatusPill";
 import type { MemoryResponse } from "@/api/types";
 
 interface MemoryCardProps {
@@ -18,6 +19,8 @@ interface MemoryCardProps {
   showOnCardKeys?: string[];
   deleteStartTime?: number;
   userGroups?: string[];
+  /** Highest cost among sibling cards in the same group, for the share-of-max bar. */
+  maxCost?: number;
 }
 
 function isTransitional(status: string): boolean {
@@ -34,6 +37,7 @@ export function MemoryCard({
   showOnCardKeys,
   deleteStartTime,
   userGroups = [],
+  maxCost,
 }: MemoryCardProps) {
   const { timezone } = useTimezone();
   const [confirmingRemove, setConfirmingRemove] = useState(false);
@@ -65,33 +69,29 @@ export function MemoryCard({
     return 0;
   })();
 
+  const cost = memory.cost_summary?.total_memory_estimated_cost ?? 0;
+  const costLabel = cost > 0 ? (cost < 0.01 ? `$${cost.toFixed(6)}` : `$${cost.toFixed(4)}`) : null;
+  const sharePct = maxCost && maxCost > 0 ? Math.min(100, Math.round((cost / maxCost) * 100)) : null;
+  const labelCount = memory.tags ? Object.keys(memory.tags).length : 0;
+
   return (
-    <Card className="relative py-3 gap-1 transition-colors hover:bg-accent/50">
-      <CardHeader className="gap-1 pb-3">
+    <Card className="group relative flex h-full flex-col gap-3.5 py-4 transition-colors hover:bg-accent/50">
+      <CardHeader className="gap-1.5">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <CardTitle className="text-sm font-medium truncate" title={memory.name}>
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <CardTitle className="truncate font-mono text-sm font-medium tracking-tight" title={memory.name}>
               {memory.name}
             </CardTitle>
-            {memory.status !== "ACTIVE" && (
-              <Badge variant={statusVariant(memory.status)} className="text-[10px] px-1.5 py-0 shrink-0">
-                {memory.status}
-              </Badge>
-            )}
-            {memory.cost_summary && memory.cost_summary.total_memory_estimated_cost > 0 && (
-              <Badge variant="outline" className="text-[10px] px-1.5 py-0 shrink-0 font-mono">
-                ~${memory.cost_summary.total_memory_estimated_cost < 0.01
-                  ? memory.cost_summary.total_memory_estimated_cost.toFixed(6)
-                  : memory.cost_summary.total_memory_estimated_cost.toFixed(4)}
-              </Badge>
-            )}
           </div>
-          <div className="flex items-center gap-1 shrink-0">
+          <div className="flex shrink-0 items-center gap-1.5">
+            {memory.status !== "ACTIVE" && (
+              <StatusPill label={memory.status} variant={statusVariant(memory.status)} className="shrink-0" />
+            )}
             {onEdit && (
               <button
                 type="button"
                 onClick={() => onEdit(memory.id)}
-                className="text-muted-foreground/50 hover:text-foreground transition-colors"
+                className="text-muted-foreground/50 opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                 title="Edit"
               >
                 <Pencil className="h-3.5 w-3.5" />
@@ -101,7 +101,7 @@ export function MemoryCard({
               <button
                 type="button"
                 onClick={() => setConfirmingRemove(true)}
-                className="text-muted-foreground/50 hover:text-destructive transition-colors"
+                className="text-muted-foreground/50 opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100"
                 title="Delete memory"
               >
                 <Trash2 className="h-3.5 w-3.5" />
@@ -117,18 +117,44 @@ export function MemoryCard({
           </div>
         )}
       </CardHeader>
-      <CardContent className="space-y-3 text-xs text-muted-foreground">
-        <div className="rounded border bg-input-bg p-3 space-y-0.5">
-          <div>Region: {memory.region}</div>
-          <div>Account: {memory.account_id}</div>
-          <div>Event Expiry: {memory.event_expiry_duration}d</div>
-          <div>Strategies: {strategiesCount}</div>
-          {memory.created_at && (
-            <div>Registered: {formatTimestamp(memory.created_at, timezone)}</div>
-          )}
+      <CardContent className="flex flex-1 flex-col gap-3.5">
+        {costLabel && (
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-baseline gap-1.5">
+              <span className="font-mono text-lg font-semibold tracking-tight tabular-nums">{costLabel}</span>
+              <span className="text-[11px] text-muted-foreground">est. / run</span>
+              {sharePct !== null && (
+                <span
+                  className="ml-auto font-mono text-[10px] text-muted-foreground"
+                  title={`${sharePct}% of the highest est. cost among memories currently shown (${maxCost && maxCost < 0.01 ? maxCost.toFixed(6) : maxCost?.toFixed(4)})`}
+                >
+                  {sharePct}% of highest shown
+                </span>
+              )}
+            </div>
+            {sharePct !== null && (
+              <div className="h-[3px] overflow-hidden rounded-full bg-muted" title="Relative to the highest estimated cost among memories currently shown">
+                <div className="h-full rounded-full bg-primary" style={{ width: `${sharePct}%` }} />
+              </div>
+            )}
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2.5 text-xs">
+          <div className="flex flex-col gap-0.5">
+            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Region</span>
+            <span className="truncate" title={memory.account_id ? `Account: ${memory.account_id}` : undefined}>{memory.region}</span>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Event expiry</span>
+            <span className="truncate">{memory.event_expiry_duration}d</span>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Strategies</span>
+            <span className="truncate">{strategiesCount}</span>
+          </div>
         </div>
         {showOnCardKeys && showOnCardKeys.length > 0 && memory.tags && Object.keys(memory.tags).length > 0 && (
-          <div className="flex flex-wrap gap-1 pt-1">
+          <div className="flex flex-wrap gap-1">
             {showOnCardKeys
               .filter(key => memory.tags[key])
               .map(key => (
@@ -138,6 +164,15 @@ export function MemoryCard({
               ))}
           </div>
         )}
+        <div className="mt-auto flex items-center gap-2 border-t pt-3 text-[11px] text-muted-foreground">
+          {memory.created_at && <span className="font-mono text-[10.5px]">{formatTimestamp(memory.created_at, timezone)}</span>}
+          {labelCount > 0 && (
+            <>
+              <span className="h-2.5 w-px bg-border" />
+              <span>{labelCount} label{labelCount === 1 ? "" : "s"}</span>
+            </>
+          )}
+        </div>
         {confirmingRemove && (
           <div
             className="absolute inset-x-0 bottom-0 rounded-b-lg border-t bg-card px-4 py-2 space-y-1.5"

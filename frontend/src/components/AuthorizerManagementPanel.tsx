@@ -1,9 +1,11 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { ExpandableRow } from "@/components/ExpandableRow";
+import { CopyField } from "@/components/CopyField";
 import {
   Select,
   SelectContent,
@@ -11,16 +13,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { SortableCardGrid, SortButton, loadSortDirection, toggleSortDirection, saveSortDirection, type SortDirection } from "@/components/SortableCardGrid";
+import { SortButton, loadSortDirection, toggleSortDirection, type SortDirection } from "@/components/SortableCardGrid";
+import { sortRows } from "@/components/SortableTableHead";
 import { JsonConfigSection } from "@/components/JsonConfigSection";
 import { useAuthorizerConfigs } from "@/hooks/useSecurity";
 import { listCognitoPools, listAuthorizerCredentials, createAuthorizerCredential, deleteAuthorizerCredential } from "@/api/security";
 import { Badge } from "@/components/ui/badge";
-import { Pencil, Trash2, Plus, ChevronDown, ChevronRight, Key, Link2 } from "lucide-react";
+import { Pencil, Trash2, Plus, Key } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { trackAction } from "@/api/audit";
 import type { CognitoPool, AuthorizerCredential } from "@/api/types";
+
+const AUTHORIZER_TYPE_LABELS: Record<string, string> = {
+  cognito: "AMAZON COGNITO",
+  entra_id: "MICROSOFT ENTRA ID",
+  okta: "OKTA",
+  other: "OTHER",
+};
 
 function TagInput({
   values,
@@ -81,7 +91,7 @@ function TagInput({
   );
 }
 
-export function AuthorizerManagementPanel({ readOnly }: { readOnly?: boolean }) {
+export function AuthorizerManagementPanel({ readOnly, onCountChange }: { readOnly?: boolean; onCountChange?: (count: number) => void }) {
   const { user, browserSessionId } = useAuth();
   const { configs, loading, error, createConfig, updateConfig, deleteConfig } = useAuthorizerConfigs();
   const [showAddForm, setShowAddForm] = useState(false);
@@ -103,6 +113,8 @@ export function AuthorizerManagementPanel({ readOnly }: { readOnly?: boolean }) 
   const [credClientSecret, setCredClientSecret] = useState("");
   const [credSubmitting, setCredSubmitting] = useState(false);
   const [confirmDeleteCredId, setConfirmDeleteCredId] = useState<{ authId: number; credId: number } | null>(null);
+
+  useEffect(() => { onCountChange?.(configs.length); }, [configs.length, onCountChange]);
 
   const fetchCredentials = async (authId: number) => {
     try {
@@ -427,22 +439,20 @@ export function AuthorizerManagementPanel({ readOnly }: { readOnly?: boolean }) 
     return <p className="text-sm text-destructive">{error}</p>;
   }
 
+  const sorted = sortRows(configs, "name", sortDir, { name: (c) => c.name });
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-medium">Authorizer Configurations</h3>
-          <p className="text-xs text-muted-foreground mt-1">
-            These are the authorizers approved for use in Loom.<br />
-            Builders can only select from these authorizers when deploying agents.<br />
-            Authorizer management is the responsibility of the security team.
-          </p>
+          <h3 className="text-sm font-medium">Authorizers</h3>
+          <p className="text-xs text-muted-foreground mt-1">Builders select from these authorizers when deploying agents.</p>
         </div>
         <div className="flex items-center gap-2 shrink-0 ml-4">
           <SortButton direction={sortDir} onClick={() => setSortDir(toggleSortDirection("security-authorizers", sortDir))} />
-          <Button size="sm" variant="outline" onClick={() => { setShowAddForm(!showAddForm); resetForm(); }} disabled={readOnly}>
+          <Button size="sm" onClick={() => { setShowAddForm(!showAddForm); resetForm(); }} disabled={readOnly}>
             <Plus className="h-3.5 w-3.5 mr-1" />
-            Add Authorizer
+            Add authorizer
           </Button>
         </div>
       </div>
@@ -458,260 +468,250 @@ export function AuthorizerManagementPanel({ readOnly }: { readOnly?: boolean }) 
       {configs.length === 0 ? (
         <p className="text-sm text-muted-foreground py-8">No authorizer configs yet. Add one above.</p>
       ) : (
-        <SortableCardGrid
-          items={configs}
-          getId={(c) => c.id.toString()}
-          getName={(c) => c.name}
-          storageKey="security-authorizers"
-          sortDirection={sortDir}
-          onSortDirectionChange={(d) => { if (d) { setSortDir(d); saveSortDirection("security-authorizers", d); } }}
-          className="grid gap-2"
-          renderItem={(config) => (
-            <Card className="relative py-3 gap-1 transition-colors hover:bg-accent/50">
-              <CardHeader className="gap-1 pb-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const next = expandedId === config.id ? null : config.id;
-                        setExpandedId(next);
-                        if (next !== null && !credentials[config.id]) {
-                          fetchCredentials(config.id);
-                        }
-                      }}
-                      className="text-muted-foreground hover:text-foreground"
-                    >
-                      {expandedId === config.id ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+        <div className="flex flex-col gap-3">
+          {sorted.map((config) => (
+            <ExpandableRow
+              key={config.id}
+              expanded={expandedId === config.id}
+              onToggle={() => {
+                const next = expandedId === config.id ? null : config.id;
+                setExpandedId(next);
+                if (next !== null && !credentials[config.id]) {
+                  fetchCredentials(config.id);
+                }
+              }}
+              title={config.name}
+              typeBadge={AUTHORIZER_TYPE_LABELS[config.authorizer_type] ?? config.authorizer_type.toUpperCase()}
+              statusLabel={config.user_client_id ? "linkable" : undefined}
+              statusVariant="success"
+              subtitle={config.discovery_url ?? undefined}
+              actions={
+                !readOnly ? (
+                  <>
+                    <button type="button" onClick={() => startEdit(config.id)} className="text-muted-foreground/60 hover:text-foreground transition-colors" title="Edit">
+                      <Pencil className="h-3.5 w-3.5" />
                     </button>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">{config.name}</span>
-                        <Badge variant="outline" className="text-[10px]">
-                          {config.authorizer_type === "cognito" ? "Amazon Cognito" : config.authorizer_type === "entra_id" ? "Microsoft Entra ID" : config.authorizer_type === "okta" ? "Okta" : config.authorizer_type}
+                    <button type="button" onClick={() => setConfirmDeleteId(config.id)} className="text-muted-foreground/60 hover:text-destructive transition-colors" title="Delete">
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </>
+                ) : undefined
+              }
+            >
+              {editingId === config.id ? (
+                renderForm(true, config.id)
+              ) : (
+                <>
+                  {config.tags && Object.keys(config.tags).length > 0 && (
+                    <div className="mb-3 flex flex-wrap gap-1.5">
+                      {Object.entries(config.tags).map(([key, value]) => (
+                        <Badge key={key} variant="outline" className="text-[10px] px-1.5 py-0 font-normal">
+                          {key.replace(/^loom:/, "")}: {value}
                         </Badge>
-                        {config.user_client_id && (
-                          <Badge variant="outline" className="text-[10px] border-green-500/50 text-green-600 dark:text-green-400">Linkable</Badge>
-                        )}
-                      </div>
-                      {config.discovery_url && <div className="text-xs text-muted-foreground">{config.discovery_url}</div>}
-                    </div>
-                  </div>
-                  {!readOnly && (
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => startEdit(config.id)}
-                        className="text-muted-foreground/50 hover:text-foreground transition-colors"
-                        title="Edit"
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setConfirmDeleteId(config.id)}
-                        className="text-muted-foreground/50 hover:text-destructive transition-colors"
-                        title="Delete"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                      ))}
                     </div>
                   )}
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {config.tags && Object.keys(config.tags).length > 0 && (
-                  <div className="flex flex-wrap gap-1 ml-6">
-                    {Object.entries(config.tags).map(([key, value]) => (
-                      <Badge key={key} variant="outline" className="text-[10px] px-1.5 py-0 font-normal">
-                        {key.replace(/^loom:/, "")}: {value}
-                      </Badge>
-                    ))}
-                  </div>
-                )}
 
-                {confirmDeleteId === config.id && (
-                  <div className="flex items-center justify-end gap-2 pt-1">
-                    <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setConfirmDeleteId(null)}>
-                      Cancel
-                    </Button>
-                    <Button size="sm" variant="destructive" className="h-6 text-xs" onClick={() => handleDelete(config.id)} disabled={submitting}>
-                      Confirm
-                    </Button>
-                  </div>
-                )}
+                  {confirmDeleteId === config.id && (
+                    <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
+                      <span>Delete <span className="font-mono">{config.name}</span>?</span>
+                      <div className="flex items-center gap-2">
+                        <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setConfirmDeleteId(null)}>Cancel</Button>
+                        <Button size="sm" variant="destructive" className="h-6 text-xs" onClick={() => handleDelete(config.id)} disabled={submitting}>Confirm</Button>
+                      </div>
+                    </div>
+                  )}
 
-                {editingId === config.id && (
-                  <div className="rounded border border-dashed p-3">
-                    {renderForm(true, config.id)}
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                    {config.pool_id && (
+                      <div className="flex flex-col gap-0.5 min-w-0">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Pool</span>
+                        <span className="truncate font-mono text-xs">{config.pool_id}</span>
+                      </div>
+                    )}
+                    {config.allowed_audience.length > 0 && (
+                      <div className="flex flex-col gap-0.5 min-w-0">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Allowed audience</span>
+                        <span className="truncate font-mono text-xs">{config.allowed_audience.join(", ")}</span>
+                      </div>
+                    )}
+                    {config.allowed_clients.length > 0 && (
+                      <div className="flex flex-col gap-0.5 min-w-0">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Allowed clients</span>
+                        <span className="truncate font-mono text-xs">{config.allowed_clients.join(", ")}</span>
+                      </div>
+                    )}
+                    {config.allowed_scopes.length > 0 && (
+                      <div className="flex flex-col gap-0.5 min-w-0">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Allowed scopes</span>
+                        <span className="truncate font-mono text-xs">{config.allowed_scopes.join(", ")}</span>
+                      </div>
+                    )}
+                    {config.discovery_url && (
+                      <div className="col-span-2">
+                        <CopyField label="Discovery URL" value={config.discovery_url} />
+                      </div>
+                    )}
                   </div>
-                )}
 
-                {expandedId === config.id && editingId !== config.id && (
-                  <div className="pl-6 space-y-3">
-                    <div className="rounded border bg-input-bg p-3 space-y-1 text-xs">
-                      {config.pool_id && <div><span className="text-muted-foreground">Pool: </span>{config.pool_id}</div>}
-                      {config.discovery_url && <div><span className="text-muted-foreground">Discovery URL: </span><span className="break-all">{config.discovery_url}</span></div>}
-                      {config.allowed_audience.length > 0 && <div><span className="text-muted-foreground">Allowed Audience: </span>{config.allowed_audience.join(", ")}</div>}
-                      {config.allowed_clients.length > 0 && <div><span className="text-muted-foreground">Allowed Clients: </span>{config.allowed_clients.join(", ")}</div>}
-                      {config.allowed_scopes.length > 0 && <div><span className="text-muted-foreground">Allowed Scopes: </span>{config.allowed_scopes.join(", ")}</div>}
+                  {(config.user_client_id || config.has_user_client_secret || config.user_redirect_uri) && (
+                    <div className="mt-3.5 flex flex-col gap-2 rounded-md border p-3">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">User linking</span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3 rounded-md border bg-muted px-3 py-2 text-[11.5px]">
+                        {config.user_client_id && (
+                          <span className="flex items-center gap-1.5"><span className="text-muted-foreground">client</span> <span className="font-mono">{config.user_client_id}</span></span>
+                        )}
+                        {config.user_redirect_uri && (
+                          <span className="flex min-w-0 items-center gap-1.5"><span className="text-muted-foreground">redirect</span> <span className="truncate font-mono">{config.user_redirect_uri}</span></span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Credentials section */}
+                  <div className="mt-3.5">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-1.5 font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">
+                        <Key className="h-3.5 w-3.5" />
+                        Credentials
+                      </div>
+                      {!readOnly && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 text-xs"
+                          onClick={() => {
+                            setShowAddCred(showAddCred === config.id ? null : config.id);
+                            setCredLabel("");
+                            setCredClientId("");
+                            setCredClientSecret("");
+                          }}
+                        >
+                          <Plus className="h-3 w-3 mr-1" />
+                          Add
+                        </Button>
+                      )}
                     </div>
 
-                    {(config.user_client_id || config.has_user_client_secret || config.user_redirect_uri) && (
-                      <div>
-                        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground mb-2">
-                          <Link2 className="h-3.5 w-3.5" />
-                          User Linking
+                    {showAddCred === config.id && (
+                      <div className="rounded border border-dashed p-3 mb-2 space-y-2">
+                        <div className="flex gap-2">
+                          <div className="w-1/4 min-w-0">
+                            <label className="text-xs text-muted-foreground">Label</label>
+                            <Input
+                              value={credLabel}
+                              onChange={(e) => setCredLabel(e.target.value)}
+                              placeholder="e.g. Production M2M"
+                              className="text-sm h-8"
+                            />
+                          </div>
+                          <div className="w-1/4 min-w-0">
+                            <label className="text-xs text-muted-foreground">Client ID</label>
+                            <Input
+                              value={credClientId}
+                              onChange={(e) => setCredClientId(e.target.value)}
+                              placeholder="Client ID"
+                              className="text-sm h-8"
+                            />
+                          </div>
+                          <div className="w-1/2 min-w-0">
+                            <label className="text-xs text-muted-foreground">Client Secret</label>
+                            <Input
+                              type="password"
+                              value={credClientSecret}
+                              onChange={(e) => setCredClientSecret(e.target.value)}
+                              placeholder="Client Secret (optional)"
+                              className="text-sm h-8"
+                            />
+                          </div>
                         </div>
-                        <div className="rounded border bg-input-bg p-3 space-y-1 text-xs">
-                          {config.user_client_id && <div><span className="text-muted-foreground">Client ID: </span>{config.user_client_id}</div>}
-                          {config.has_user_client_secret && <div><span className="text-muted-foreground">Client Secret: </span>(stored in Secrets Manager)</div>}
-                          {config.user_redirect_uri && <div><span className="text-muted-foreground">Redirect URI: </span>{config.user_redirect_uri}</div>}
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={() => handleCreateCredential(config.id)}
+                            disabled={credSubmitting || !credLabel.trim() || !credClientId.trim()}
+                          >
+                            {credSubmitting ? "Saving..." : "Save"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 text-xs"
+                            onClick={() => setShowAddCred(null)}
+                          >
+                            Cancel
+                          </Button>
                         </div>
                       </div>
                     )}
 
-                    {/* Credentials section */}
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                          <Key className="h-3.5 w-3.5" />
-                          Credentials
-                        </div>
-                        {!readOnly && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-6 text-xs"
-                            onClick={() => {
-                              setShowAddCred(showAddCred === config.id ? null : config.id);
-                              setCredLabel("");
-                              setCredClientId("");
-                              setCredClientSecret("");
-                            }}
+                    {credentials[config.id]?.length ? (
+                      <div className="space-y-1">
+                        {credentials[config.id]!.map((cred) => (
+                          <div
+                            key={cred.id}
+                            className="flex items-center justify-between rounded border bg-muted px-3 py-1.5 text-xs"
                           >
-                            <Plus className="h-3 w-3 mr-1" />
-                            Add
-                          </Button>
-                        )}
-                      </div>
-
-                      {showAddCred === config.id && (
-                        <div className="rounded border border-dashed p-3 mb-2 space-y-2">
-                          <div className="flex gap-2">
-                            <div className="w-1/4 min-w-0">
-                              <label className="text-xs text-muted-foreground">Label</label>
-                              <Input
-                                value={credLabel}
-                                onChange={(e) => setCredLabel(e.target.value)}
-                                placeholder="e.g. Production M2M"
-                                className="text-sm h-8"
-                              />
+                            <div className="flex items-center gap-3">
+                              <span className="font-medium">{cred.label}</span>
+                              <span className="text-muted-foreground font-mono">{cred.client_id}</span>
+                              {cred.has_secret && (
+                                <span className="rounded-full border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                                  secret stored
+                                </span>
+                              )}
                             </div>
-                            <div className="w-1/4 min-w-0">
-                              <label className="text-xs text-muted-foreground">Client ID</label>
-                              <Input
-                                value={credClientId}
-                                onChange={(e) => setCredClientId(e.target.value)}
-                                placeholder="Client ID"
-                                className="text-sm h-8"
-                              />
-                            </div>
-                            <div className="w-1/2 min-w-0">
-                              <label className="text-xs text-muted-foreground">Client Secret</label>
-                              <Input
-                                type="password"
-                                value={credClientSecret}
-                                onChange={(e) => setCredClientSecret(e.target.value)}
-                                placeholder="Client Secret (optional)"
-                                className="text-sm h-8"
-                              />
-                            </div>
-                          </div>
-                          <div className="flex gap-2">
-                            <Button
-                              size="sm"
-                              className="h-7 text-xs"
-                              onClick={() => handleCreateCredential(config.id)}
-                              disabled={credSubmitting || !credLabel.trim() || !credClientId.trim()}
-                            >
-                              {credSubmitting ? "Saving..." : "Save"}
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 text-xs"
-                              onClick={() => setShowAddCred(null)}
-                            >
-                              Cancel
-                            </Button>
-                          </div>
-                        </div>
-                      )}
-
-                      {credentials[config.id]?.length ? (
-                        <div className="space-y-1">
-                          {credentials[config.id]!.map((cred) => (
-                            <div
-                              key={cred.id}
-                              className="flex items-center justify-between rounded border bg-input-bg px-3 py-1.5 text-xs"
-                            >
-                              <div className="flex items-center gap-3">
-                                <span className="font-medium">{cred.label}</span>
-                                <span className="text-muted-foreground font-mono">{cred.client_id}</span>
-                                {cred.has_secret && (
-                                  <span className="rounded-full border border-border bg-accent px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                                    secret stored
-                                  </span>
-                                )}
-                              </div>
-                              {!readOnly && (
-                                <div>
-                                  {confirmDeleteCredId?.authId === config.id && confirmDeleteCredId?.credId === cred.id ? (
-                                    <div className="flex items-center gap-1">
-                                      <Button
-                                        size="sm"
-                                        variant="destructive"
-                                        className="h-6 text-xs"
-                                        onClick={() => handleDeleteCredential(config.id, cred.id)}
-                                        disabled={credSubmitting}
-                                      >
-                                        Confirm
-                                      </Button>
-                                      <Button
-                                        size="sm"
-                                        variant="ghost"
-                                        className="h-6 text-xs"
-                                        onClick={() => setConfirmDeleteCredId(null)}
-                                      >
-                                        Cancel
-                                      </Button>
-                                    </div>
-                                  ) : (
+                            {!readOnly && (
+                              <div>
+                                {confirmDeleteCredId?.authId === config.id && confirmDeleteCredId?.credId === cred.id ? (
+                                  <div className="flex items-center gap-1">
+                                    <Button
+                                      size="sm"
+                                      variant="destructive"
+                                      className="h-6 text-xs"
+                                      onClick={() => handleDeleteCredential(config.id, cred.id)}
+                                      disabled={credSubmitting}
+                                    >
+                                      Confirm
+                                    </Button>
                                     <Button
                                       size="sm"
                                       variant="ghost"
-                                      className="h-6 w-6 p-0"
-                                      onClick={() => setConfirmDeleteCredId({ authId: config.id, credId: cred.id })}
+                                      className="h-6 text-xs"
+                                      onClick={() => setConfirmDeleteCredId(null)}
                                     >
-                                      <Trash2 className="h-3 w-3" />
+                                      Cancel
                                     </Button>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      ) : credentials[config.id] ? (
-                        <p className="text-xs text-muted-foreground">No credentials configured.</p>
-                      ) : null}
-                    </div>
+                                  </div>
+                                ) : (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-6 w-6 p-0"
+                                    onClick={() => setConfirmDeleteCredId({ authId: config.id, credId: cred.id })}
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </Button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : credentials[config.id] ? (
+                      <div className="flex items-center gap-2 rounded-md border border-dashed px-3 py-2 text-[12px] text-muted-foreground">
+                        None configured — OBO delegation is unavailable until one is added.
+                      </div>
+                    ) : null}
                   </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
-        />
+                </>
+              )}
+            </ExpandableRow>
+          ))}
+        </div>
       )}
     </div>
   );

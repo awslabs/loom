@@ -3,10 +3,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Trash2, Plus, FlaskConical, ChevronDown, ChevronRight, Pencil, ArrowRightLeft } from "lucide-react";
+import { Trash2, Plus, FlaskConical, Pencil } from "lucide-react";
 import { JsonConfigSection } from "@/components/JsonConfigSection";
+import { ExpandableRow } from "@/components/ExpandableRow";
+import { CopyField } from "@/components/CopyField";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   listIdentityProviders,
@@ -54,11 +55,14 @@ const LOOM_GROUPS = [
   "g-users-strategics",
 ];
 
+const MAPPINGS_CLAMP = 7;
+
 interface IdentityProviderPanelProps {
   readOnly?: boolean;
+  onCountChange?: (count: number) => void;
 }
 
-export function IdentityProviderPanel({ readOnly }: IdentityProviderPanelProps) {
+export function IdentityProviderPanel({ readOnly, onCountChange }: IdentityProviderPanelProps) {
   const { logout } = useAuth();
   const [providers, setProviders] = useState<IdentityProviderResponse[]>([]);
   const [loading, setLoading] = useState(true);
@@ -68,6 +72,7 @@ export function IdentityProviderPanel({ readOnly }: IdentityProviderPanelProps) 
   const [discoveryStatus, setDiscoveryStatus] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [showAllMappings, setShowAllMappings] = useState<Set<number>>(new Set());
 
   // Form state
   const [formName, setFormName] = useState("");
@@ -95,6 +100,7 @@ export function IdentityProviderPanel({ readOnly }: IdentityProviderPanelProps) 
   };
 
   useEffect(() => { void fetchProviders(); }, []);
+  useEffect(() => { onCountChange?.(providers.length); }, [providers.length, onCountChange]);
 
   const resetForm = () => {
     setFormName("");
@@ -276,9 +282,9 @@ export function IdentityProviderPanel({ readOnly }: IdentityProviderPanelProps) 
   };
 
   const handleDelete = async (idp: IdentityProviderResponse) => {
-    if (!confirm(`Delete identity provider "${idp.name}"?`)) return;
     try {
       await deleteIdentityProvider(idp.id);
+      setConfirmDeleteId(null);
       await fetchProviders();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
@@ -309,6 +315,7 @@ export function IdentityProviderPanel({ readOnly }: IdentityProviderPanelProps) 
   };
 
   const editingProvider = editingId ? providers.find((p) => p.id === editingId) : null;
+  const activeProvider = providers.find((p) => p.status === "active");
 
   const renderForm = (isEdit: boolean) => (
     <div className="space-y-4">
@@ -449,20 +456,30 @@ export function IdentityProviderPanel({ readOnly }: IdentityProviderPanelProps) 
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-medium">Identity Providers</h3>
-          <p className="text-xs text-muted-foreground mt-1">
-            Configure external identity providers for federated authentication.<br />
-            Users can sign in via these providers instead of (or in addition to) Cognito.<br />
-            Only one identity provider can be active at a time.
-          </p>
+          <h3 className="text-sm font-medium">Identity providers</h3>
         </div>
-        <div className="shrink-0 ml-4">
-          <Button size="sm" variant="outline" onClick={() => { resetForm(); setEditingId(null); setConfirmDeleteId(null); setShowForm(true); }} disabled={readOnly || showForm}>
+        <div className="shrink-0">
+          <Button size="sm" onClick={() => { resetForm(); setEditingId(null); setConfirmDeleteId(null); setShowForm(true); }} disabled={readOnly || showForm}>
             <Plus className="h-3.5 w-3.5 mr-1" />
-            Add Identity Provider
+            Add identity provider
           </Button>
         </div>
       </div>
+
+      {providers.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border bg-muted px-3.5 py-2">
+          {activeProvider ? (
+            <span className="flex items-center gap-1.5 rounded-full border border-success/30 bg-success-bg px-2 py-0.5 font-mono text-[11px] text-success">
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" />
+              {activeProvider.name} is the active provider
+            </span>
+          ) : (
+            <span className="font-mono text-[11px] text-muted-foreground">No external provider is active — Loom uses Cognito.</span>
+          )}
+          <span className="text-[12.5px] text-muted-foreground">Only one provider can be active at a time. Activating another signs out federated sessions.</span>
+          <span className="ml-auto shrink-0 font-mono text-[11.5px] text-muted-foreground">{providers.length} provider{providers.length === 1 ? "" : "s"}</span>
+        </div>
+      )}
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
@@ -481,128 +498,135 @@ export function IdentityProviderPanel({ readOnly }: IdentityProviderPanelProps) 
         <p className="text-sm text-muted-foreground py-8">No identity providers configured. Loom uses Cognito for authentication.</p>
       )}
 
-      {providers.map((idp) => (
-        <Card key={idp.id} className="relative py-3 gap-1 transition-colors hover:bg-accent/50">
-          <CardHeader className="gap-1 pb-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <button
-                  type="button"
-                  onClick={() => setExpandedId(expandedId === idp.id ? null : idp.id)}
-                  className="text-muted-foreground hover:text-foreground"
-                >
-                  {expandedId === idp.id ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                </button>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`inline-block h-2 w-2 rounded-full shrink-0 ${idp.status === "active" ? "bg-green-500" : "bg-muted-foreground/30"}`}
-                      title={idp.status === "active" ? "Active — login enabled" : "Inactive"}
-                    />
-                    <span className="text-sm font-medium">{idp.name}</span>
-                    <Badge variant="outline" className="text-[10px]">
-                      {PROVIDER_TYPES.find((p) => p.value === idp.provider_type)?.label ?? idp.provider_type}
-                    </Badge>
-                    {idp.status === "active" && (
-                      <Badge variant="outline" className="text-[10px] border-green-500/50 text-green-600 dark:text-green-400">Active</Badge>
-                    )}
-                  </div>
-                  <div className="text-xs text-muted-foreground">{idp.issuer_url}</div>
-                </div>
-              </div>
-              {!readOnly && (
-                <div className="flex items-center gap-2 shrink-0">
-                  <Button
-                    size="sm"
-                    variant={idp.status === "active" ? "outline" : "default"}
-                    className="h-6 text-xs"
-                    onClick={() => void handleToggleStatus(idp)}
-                  >
-                    {idp.status === "active" ? "Deactivate" : "Activate"}
-                  </Button>
-                  <button
-                    type="button"
-                    onClick={() => openEdit(idp)}
-                    className="text-muted-foreground/50 hover:text-foreground transition-colors"
-                    title="Edit"
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmDeleteId(idp.id)}
-                    className="text-muted-foreground/50 hover:text-destructive transition-colors"
-                    title="Delete"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              )}
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {confirmDeleteId === idp.id && (
-              <div className="flex items-center justify-end gap-2 pt-1">
-                <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setConfirmDeleteId(null)}>
-                  Cancel
-                </Button>
-                <Button size="sm" variant="destructive" className="h-6 text-xs" onClick={() => void handleDelete(idp)}>
-                  Confirm
-                </Button>
-              </div>
-            )}
+      <div className="flex flex-col gap-3">
+        {providers.map((idp) => {
+          const mappingRows = Object.entries(idp.group_mappings).flatMap(([ext, loom]) => loom.map((g) => ({ group: g, ext })));
+          const expandedAll = showAllMappings.has(idp.id);
+          const visibleMappingRows = expandedAll ? mappingRows : mappingRows.slice(0, MAPPINGS_CLAMP);
 
-            {editingId === idp.id && (
-              <div className="rounded border border-dashed p-3">
-                {renderForm(true)}
-              </div>
-            )}
-
-            {expandedId === idp.id && editingId !== idp.id && (
-              <div className="pl-6 space-y-3">
-                <div className="rounded border bg-input-bg p-3 space-y-1 text-xs">
-                  <div><span className="text-muted-foreground">Client ID: </span><span className="font-mono">{idp.client_id}</span></div>
-                  <div><span className="text-muted-foreground">Client Type: </span><span>{idp.client_type === "confidential" ? "Confidential" : "Public (PKCE)"}</span></div>
-                  {idp.has_client_secret && <div><span className="text-muted-foreground">Client Secret: </span><span className="text-muted-foreground italic">(redacted)</span></div>}
-                  {idp.scopes && <div><span className="text-muted-foreground">Scopes: </span><span className="break-all">{idp.scopes}</span></div>}
-                  {idp.audience && <div><span className="text-muted-foreground">Audience: </span><span className="font-mono break-all">{idp.audience}</span></div>}
-                  {idp.group_claim_path && <div><span className="text-muted-foreground">Group Claim Path: </span><span className="font-mono">{idp.group_claim_path}</span></div>}
-                  {idp.jwks_uri && <div><span className="text-muted-foreground">JWKS URI: </span><span className="break-all">{idp.jwks_uri}</span></div>}
-                  {idp.authorization_endpoint && <div><span className="text-muted-foreground">Authorization: </span><span className="break-all">{idp.authorization_endpoint}</span></div>}
-                  {idp.token_endpoint && <div><span className="text-muted-foreground">Token: </span><span className="break-all">{idp.token_endpoint}</span></div>}
-                </div>
-
-                {idp.provider_type === "entra_id" && Object.keys(idp.group_mappings).length > 0 && (
-                  <div>
-                    <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground mb-2">
-                      <ArrowRightLeft className="h-3.5 w-3.5" />
-                      Mappings
+          return (
+            <ExpandableRow
+              key={idp.id}
+              expanded={expandedId === idp.id || editingId === idp.id}
+              onToggle={() => setExpandedId(expandedId === idp.id ? null : idp.id)}
+              title={idp.name}
+              typeBadge={PROVIDER_TYPES.find((p) => p.value === idp.provider_type)?.label.toUpperCase() ?? idp.provider_type.toUpperCase()}
+              statusLabel={idp.status === "active" ? "active" : "inactive"}
+              statusVariant={idp.status === "active" ? "success" : "neutral"}
+              subtitle={idp.issuer_url}
+              meta={<span className="font-mono text-[11px] text-muted-foreground">{Object.values(idp.group_mappings).flat().length} mappings</span>}
+              actions={
+                !readOnly ? (
+                  <>
+                    <Button size="sm" variant="outline" className="h-[29px]" onClick={() => void handleToggleStatus(idp)}>
+                      {idp.status === "active" ? "Deactivate" : "Activate"}
+                    </Button>
+                    <button type="button" onClick={() => openEdit(idp)} className="text-muted-foreground/60 hover:text-foreground transition-colors" title="Edit">
+                      <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                    <button type="button" onClick={() => setConfirmDeleteId(idp.id)} className="text-muted-foreground/60 hover:text-destructive transition-colors" title="Delete">
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </>
+                ) : undefined
+              }
+            >
+              {editingId === idp.id ? (
+                renderForm(true)
+              ) : (
+                <>
+                  {confirmDeleteId === idp.id && (
+                    <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
+                      <span>Delete <span className="font-mono">{idp.name}</span>?</span>
+                      <div className="flex items-center gap-2">
+                        <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setConfirmDeleteId(null)}>Cancel</Button>
+                        <Button size="sm" variant="destructive" className="h-6 text-xs" onClick={() => void handleDelete(idp)}>Confirm</Button>
+                      </div>
                     </div>
-                    <table className="text-xs w-full border-collapse border border-border rounded">
-                      <thead>
-                        <tr className="text-muted-foreground bg-accent">
-                          <th className="text-left font-medium px-2 py-1 border border-border">Loom Group</th>
-                          <th className="text-left font-medium px-2 py-1 border border-border">External ID</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {Object.entries(idp.group_mappings).flatMap(([ext, loom]) =>
-                          loom.map((g) => (
-                            <tr key={`${ext}-${g}`} className="bg-background">
-                              <td className="px-2 py-0.5 font-mono border border-border">{g}</td>
-                              <td className="px-2 py-0.5 font-mono text-muted-foreground border border-border">{ext}</td>
-                            </tr>
-                          ))
+                  )}
+                  <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
+                    <div className="flex flex-col gap-3.5 min-w-0">
+                      <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">OIDC configuration</span>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                        <div className="flex flex-col gap-0.5 min-w-0">
+                          <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Client ID</span>
+                          <span className="truncate font-mono text-xs">{idp.client_id}</span>
+                        </div>
+                        <div className="flex flex-col gap-0.5">
+                          <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Client type</span>
+                          <span className="text-xs">{idp.client_type === "confidential" ? "Confidential" : "Public (PKCE)"}</span>
+                        </div>
+                        <div className="flex flex-col gap-0.5">
+                          <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Client secret</span>
+                          <span className="font-mono text-xs text-muted-foreground">{idp.has_client_secret ? "stored" : "not required"}</span>
+                        </div>
+                        <div className="flex flex-col gap-0.5">
+                          <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Group claim path</span>
+                          <span className="font-mono text-xs">{idp.group_claim_path || "—"}</span>
+                        </div>
+                        {idp.scopes && (
+                          <div className="col-span-2 flex flex-col gap-1">
+                            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Scopes</span>
+                            <div className="flex flex-wrap gap-1.5">
+                              {idp.scopes.split(/\s+/).filter(Boolean).map((s) => (
+                                <span key={s} className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{s}</span>
+                              ))}
+                            </div>
+                          </div>
                         )}
-                      </tbody>
-                    </table>
+                      </div>
+
+                      {(idp.jwks_uri || idp.authorization_endpoint || idp.token_endpoint) && (
+                        <>
+                          <div className="h-px bg-border" />
+                          <div className="flex flex-col gap-2.5">
+                            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Endpoints</span>
+                            {idp.jwks_uri && <CopyField label="JWKS" value={idp.jwks_uri} />}
+                            {idp.authorization_endpoint && <CopyField label="Authorize" value={idp.authorization_endpoint} />}
+                            {idp.token_endpoint && <CopyField label="Token" value={idp.token_endpoint} />}
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    <div className="flex flex-col overflow-hidden rounded-lg border min-w-0">
+                      <div className="flex items-center gap-2 border-b bg-muted px-3 py-2">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Group mappings</span>
+                        <span className="rounded border bg-card px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground">{mappingRows.length}</span>
+                        {!readOnly && (
+                          <button type="button" onClick={() => openEdit(idp)} className="ml-auto font-mono text-[10.5px] text-primary hover:underline">edit</button>
+                        )}
+                      </div>
+                      {mappingRows.length === 0 ? (
+                        <p className="px-3 py-4 text-[11.5px] text-muted-foreground">No group mappings configured.</p>
+                      ) : (
+                        <div className="flex flex-col">
+                          {visibleMappingRows.map(({ group, ext }) => (
+                            <div key={`${ext}-${group}`} className="grid grid-cols-[118px_minmax(0,1fr)] gap-2.5 border-b px-3 py-1.5 last:border-b-0">
+                              <span className="truncate font-mono text-[11.5px]">{group}</span>
+                              <span className="truncate font-mono text-[11px] text-muted-foreground">{ext}</span>
+                            </div>
+                          ))}
+                          {mappingRows.length > MAPPINGS_CLAMP && (
+                            <button
+                              type="button"
+                              onClick={() => setShowAllMappings((prev) => { const next = new Set(prev); expandedAll ? next.delete(idp.id) : next.add(idp.id); return next; })}
+                              className="flex items-center gap-2 bg-muted px-3 py-1.5 text-left"
+                            >
+                              {!expandedAll && <span className="font-mono text-[10.5px] text-muted-foreground">{mappingRows.length - MAPPINGS_CLAMP} more</span>}
+                              <span className="ml-auto font-mono text-[10.5px] text-primary">{expandedAll ? "show less" : "show all"}</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                )}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      ))}
+                </>
+              )}
+            </ExpandableRow>
+          );
+        })}
+      </div>
     </div>
   );
 }

@@ -3,8 +3,9 @@ import { AgentCard } from "@/components/AgentCard";
 import { MemoryCard } from "@/components/MemoryCard";
 import { SortableCardGrid, SortButton, loadSortDirection, toggleSortDirection, saveSortDirection, type SortDirection } from "@/components/SortableCardGrid";
 import { SortableTableHead, sortRows } from "@/components/SortableTableHead";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { StatusPill } from "@/components/StatusPill";
+import { CopyField } from "@/components/CopyField";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { MultiSelect } from "@/components/ui/multi-select";
@@ -16,20 +17,46 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { LayoutGrid, TableIcon, X, Eye, EyeOff, ChevronRight, ChevronDown } from "lucide-react";
+import { LayoutGrid, TableIcon, X, Eye, EyeOff, ChevronRight, ChevronDown, Search } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatTimestamp } from "@/lib/format";
-import { statusVariant } from "@/lib/status";
+import { statusVariant, statusDotClass, type BadgeVariant } from "@/lib/status";
 import { listMemories, refreshMemory, deleteMemory, purgeMemory } from "@/api/memories";
 import { listMcpServers } from "@/api/mcp";
 import { listA2aAgents } from "@/api/a2a";
 import { listTagPolicies, getRegistryConfig } from "@/api/settings";
 import { ApiError } from "@/api/client";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
-import { RegistryPage } from "@/pages/RegistryPage";
-import * as registryApi from "@/api/registry";
-import type { AgentResponse, MemoryResponse, McpServer, A2aAgent, TagPolicy, RegistryRecord } from "@/api/types";
+import type { AgentResponse, MemoryResponse, McpServer, A2aAgent, TagPolicy } from "@/api/types";
+
+function mcpHealth(status: McpServer["status"]): { label: string; variant: BadgeVariant } {
+  switch (status) {
+    case "active": return { label: "reachable", variant: "success" };
+    case "error": return { label: "unreachable", variant: "destructive" };
+    default: return { label: "inactive", variant: "neutral" };
+  }
+}
+
+function transportLabel(t: McpServer["transport_type"]): string {
+  return t === "streamable_http" ? "Streamable HTTP" : "SSE";
+}
+
+function mcpAuthLabel(t: McpServer["auth_type"]): string {
+  return t === "oauth2" ? "OAuth2" : t === "api_key" ? "API Key" : "None";
+}
+
+function a2aSkillsCount(agent: A2aAgent): number | null {
+  const raw = agent.agent_card_raw?.skills;
+  return Array.isArray(raw) ? raw.length : null;
+}
+
+function a2aHealth(agent: A2aAgent, timezone: Parameters<typeof formatTimestamp>[1]): { label: string; variant: BadgeVariant } {
+  if (agent.status === "error") return { label: "fetch failed", variant: "destructive" };
+  if (agent.last_fetched_at) return { label: `fetched ${formatTimestamp(agent.last_fetched_at, timezone).split(",")[0]}`, variant: "success" };
+  return { label: "not fetched", variant: "neutral" };
+}
 
 interface CatalogPageProps {
   agents: AgentResponse[];
@@ -45,9 +72,6 @@ interface CatalogPageProps {
   canViewMemories?: boolean;
   canViewMcp?: boolean;
   canViewA2a?: boolean;
-  canViewRegistry?: boolean;
-  registryReadOnly?: boolean;
-  isEndUserRole?: boolean;
   groupRestriction?: string;
   userGroups?: string[];
   onNavigateToMcp?: (serverId: number) => void;
@@ -68,9 +92,6 @@ export function CatalogPage({
   canViewMemories = true,
   canViewMcp = true,
   canViewA2a = true,
-  canViewRegistry = false,
-  registryReadOnly,
-  isEndUserRole,
   groupRestriction,
   userGroups = [],
   onNavigateToMcp,
@@ -83,8 +104,6 @@ export function CatalogPage({
   const [tagFilters, setTagFilters] = useState<Record<string, string[]>>(() => {
     try { return JSON.parse(localStorage.getItem("loom:tagFilters:catalog") || "{}") as Record<string, string[]>; } catch { return {}; }
   });
-  const [selectedRegistryRecordId, setSelectedRegistryRecordId] = useState<string | null>(null);
-
   useEffect(() => {
     // Only fetch tag policies if user can view any section
     if (canViewAgents || canViewMemories || canViewMcp || canViewA2a) {
@@ -137,6 +156,10 @@ export function CatalogPage({
     });
   };
 
+  const [nameSearch, setNameSearch] = useState("");
+  const matchesSearch = (name: string) =>
+    nameSearch.trim() === "" || name.toLowerCase().includes(nameSearch.trim().toLowerCase());
+
   const [agentSortDir, setAgentSortDir] = useState<SortDirection>(() => loadSortDirection("catalog-agents"));
   const [memorySortDir, setMemorySortDir] = useState<SortDirection>(() => loadSortDirection("catalog-memories"));
   const [mcpSortDir, setMcpSortDir] = useState<SortDirection>(() => loadSortDirection("catalog-mcp"));
@@ -149,9 +172,6 @@ export function CatalogPage({
   const [a2aSortDir, setA2aSortDir] = useState<SortDirection>(() => loadSortDirection("catalog-a2a"));
   const [a2aTableCol, setA2aTableCol] = useState<string | null>("name");
   const [a2aTableDir, setA2aTableDir] = useState<SortDirection>("asc");
-  const [registrySortDir, setRegistrySortDir] = useState<SortDirection>(() => loadSortDirection("catalog-registry"));
-  const [registryTableCol, setRegistryTableCol] = useState<string | null>("name");
-  const [registryTableDir, setRegistryTableDir] = useState<SortDirection>("asc");
 
   const handleAgentTableSort = (col: string) => {
     if (agentTableCol === col) {
@@ -185,18 +205,11 @@ export function CatalogPage({
       setA2aTableDir("asc");
     }
   };
-  const handleRegistryTableSort = (col: string) => {
-    if (registryTableCol === col) {
-      setRegistryTableDir(registryTableDir === "asc" ? "desc" : "asc");
-    } else {
-      setRegistryTableCol(col);
-      setRegistryTableDir("asc");
-    }
-  };
-
   const filteredAgents = agents
     .filter(agent => matchesFilters(agent.tags))
-    .filter(agent => !groupRestriction || agent.tags?.["loom:group"] === groupRestriction);
+    .filter(agent => !groupRestriction || agent.tags?.["loom:group"] === groupRestriction)
+    .filter(agent => matchesSearch(agent.name ?? agent.runtime_id ?? ""));
+  const maxAgentCost = Math.max(0, ...filteredAgents.map(a => a.cost_summary?.total_cost ?? 0));
 
   // MCP server data
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
@@ -244,30 +257,6 @@ export function CatalogPage({
     void fetchA2aData();
   }, [fetchA2aData]);
 
-  // Registry data
-  const [registryRecords, setRegistryRecords] = useState<RegistryRecord[]>([]);
-  const [registryLoading, setRegistryLoading] = useState(true);
-
-  const fetchRegistryData = useCallback(async () => {
-    if (!canViewRegistry) {
-      setRegistryLoading(false);
-      return;
-    }
-    try {
-      const params = isEndUserRole ? { status: "APPROVED" } : undefined;
-      const data = await registryApi.listRegistryRecords(params);
-      setRegistryRecords(data);
-    } catch {
-      // silently ignore
-    } finally {
-      setRegistryLoading(false);
-    }
-  }, [canViewRegistry, isEndUserRole]);
-
-  useEffect(() => {
-    void fetchRegistryData();
-  }, [fetchRegistryData]);
-
   // Memory data
   const [memories, setMemories] = useState<MemoryResponse[]>([]);
   const [memoriesLoading, setMemoriesLoading] = useState(true);
@@ -275,7 +264,9 @@ export function CatalogPage({
   const [deleteStartTimes, setDeleteStartTimes] = useState<Record<number, number>>({});
   const filteredMemories = memories
     .filter(mem => matchesFilters(mem.tags))
-    .filter(mem => !groupRestriction || mem.tags?.["loom:group"] === groupRestriction);
+    .filter(mem => !groupRestriction || mem.tags?.["loom:group"] === groupRestriction)
+    .filter(mem => matchesSearch(mem.name ?? ""));
+  const maxMemoryCost = Math.max(0, ...filteredMemories.map(m => m.cost_summary?.total_memory_estimated_cost ?? 0));
 
   // Elapsed timer for transitional states
   const [now, setNow] = useState(Date.now());
@@ -375,25 +366,6 @@ export function CatalogPage({
 
 
 
-  // Registry drill-down: render the full RegistryPage (list+detail) in place
-  // of Catalog's aggregate view, preserving Registry's existing detail
-  // drill-down (LifecycleTimeline/DescriptorView) as a sub-view rather than
-  // duplicating that logic here.
-  if (selectedRegistryRecordId) {
-    return (
-      <div className="space-y-4">
-        <Button variant="ghost" size="sm" onClick={() => setSelectedRegistryRecordId(null)}>
-          &larr; Back to Catalog
-        </Button>
-        <RegistryPage
-          readOnly={registryReadOnly}
-          isEndUserRole={isEndUserRole}
-          initialSelectedRecordId={selectedRegistryRecordId}
-        />
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between">
@@ -426,10 +398,19 @@ export function CatalogPage({
         </div>
       </div>
 
-      {/* Tag Filters */}
-      {showOnCardPolicies.length > 0 && (agents.length > 0 || memories.length > 0) && (
+      {/* Toolbar: search + tag filters */}
+      {(agents.length > 0 || memories.length > 0) && (
         <div className="flex flex-wrap items-end gap-3">
-          {requiredPolicies.map(tp => {
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={nameSearch}
+              onChange={(e) => setNameSearch(e.target.value)}
+              placeholder="Search by name"
+              className="h-8 w-48 pl-8 text-xs"
+            />
+          </div>
+          {showOnCardPolicies.length > 0 && requiredPolicies.map(tp => {
             const distinctValues = [...new Set([
               ...agents.map(a => a.tags?.[tp.key]).filter(Boolean),
               ...memories.map(m => m.tags?.[tp.key]).filter(Boolean),
@@ -448,78 +429,82 @@ export function CatalogPage({
               </div>
             );
           })}
-          <div className="space-y-1">
-            <div className="h-4 flex items-center">
-              <label className="text-[10px] text-muted-foreground">custom</label>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 w-[2.25rem] p-0 bg-input-bg"
-              onClick={() => {
-                const next = !showCustomTags;
-                setShowCustomTags(next);
-                localStorage.setItem("loom:showCustomTags", String(next));
-              }}
-              title={showCustomTags ? "Hide custom tags" : "Show custom tags"}
-            >
-              {showCustomTags ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-            </Button>
-          </div>
-          {customFilterPolicies.filter(p => activeCustomFilterKeys.includes(p.key)).map(tp => {
-            const distinctValues = [...new Set([
-              ...agents.map(a => a.tags?.[tp.key]).filter(Boolean),
-              ...memories.map(m => m.tags?.[tp.key]).filter(Boolean),
-            ])] as string[];
-            return (
-              <div key={tp.key} className="space-y-1">
-                <div className="h-4 flex items-center gap-1">
-                  <label className="text-[10px] text-muted-foreground">{tp.key}</label>
-                  <button
-                    type="button"
-                    className="text-muted-foreground hover:text-foreground"
-                    onClick={() => {
-                      setActiveCustomFilterKeys(prev => prev.filter(k => k !== tp.key));
-                      setTagFilters(prev => {
-                        const next = { ...prev };
-                        delete next[tp.key];
-                        return next;
-                      });
-                    }}
-                    title="Remove filter"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
+          {showOnCardPolicies.length > 0 && (
+            <>
+              <div className="space-y-1">
+                <div className="h-4 flex items-center">
+                  <label className="text-[10px] text-muted-foreground">custom</label>
                 </div>
-                <MultiSelect
-                  values={tagFilters[tp.key] ?? []}
-                  options={distinctValues.sort()}
-                  onChange={(v) => setTagFilters(prev => ({ ...prev, [tp.key]: v }))}
-                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 w-[2.25rem] p-0 bg-input-bg"
+                  onClick={() => {
+                    const next = !showCustomTags;
+                    setShowCustomTags(next);
+                    localStorage.setItem("loom:showCustomTags", String(next));
+                  }}
+                  title={showCustomTags ? "Hide custom tags" : "Show custom tags"}
+                >
+                  {showCustomTags ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                </Button>
               </div>
-            );
-          })}
-          {customFilterPolicies.filter(p => !activeCustomFilterKeys.includes(p.key)).length > 0 && (
-            <div className="space-y-1">
-              <div className="h-4 flex items-center">
-                <label className="text-[10px] text-muted-foreground">custom filters</label>
-              </div>
-              <AddFilterDropdown
-                options={customFilterPolicies
-                  .filter(p => !activeCustomFilterKeys.includes(p.key))
-                  .map(p => ({ key: p.key, label: p.key }))}
-                onSelect={(v) => setActiveCustomFilterKeys(prev => [...prev, v])}
-              />
-            </div>
+              {customFilterPolicies.filter(p => activeCustomFilterKeys.includes(p.key)).map(tp => {
+                const distinctValues = [...new Set([
+                  ...agents.map(a => a.tags?.[tp.key]).filter(Boolean),
+                  ...memories.map(m => m.tags?.[tp.key]).filter(Boolean),
+                ])] as string[];
+                return (
+                  <div key={tp.key} className="space-y-1">
+                    <div className="h-4 flex items-center gap-1">
+                      <label className="text-[10px] text-muted-foreground">{tp.key}</label>
+                      <button
+                        type="button"
+                        className="text-muted-foreground hover:text-foreground"
+                        onClick={() => {
+                          setActiveCustomFilterKeys(prev => prev.filter(k => k !== tp.key));
+                          setTagFilters(prev => {
+                            const next = { ...prev };
+                            delete next[tp.key];
+                            return next;
+                          });
+                        }}
+                        title="Remove filter"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                    <MultiSelect
+                      values={tagFilters[tp.key] ?? []}
+                      options={distinctValues.sort()}
+                      onChange={(v) => setTagFilters(prev => ({ ...prev, [tp.key]: v }))}
+                    />
+                  </div>
+                );
+              })}
+              {customFilterPolicies.filter(p => !activeCustomFilterKeys.includes(p.key)).length > 0 && (
+                <div className="space-y-1">
+                  <div className="h-4 flex items-center">
+                    <label className="text-[10px] text-muted-foreground">custom filters</label>
+                  </div>
+                  <AddFilterDropdown
+                    options={customFilterPolicies
+                      .filter(p => !activeCustomFilterKeys.includes(p.key))
+                      .map(p => ({ key: p.key, label: p.key }))}
+                    onSelect={(v) => setActiveCustomFilterKeys(prev => [...prev, v])}
+                  />
+                </div>
+              )}
+            </>
           )}
-          {(Object.values(tagFilters).some(v => v.length > 0) || activeCustomFilterKeys.length > 0) && (
+          {(nameSearch.trim() !== "" || Object.values(tagFilters).some(v => v.length > 0) || activeCustomFilterKeys.length > 0) && (
             <Button
               variant="ghost"
               size="sm"
               className="h-7 text-xs self-end"
-              onClick={() => { setTagFilters({}); setActiveCustomFilterKeys([]); }}
+              onClick={() => { setNameSearch(""); setTagFilters({}); setActiveCustomFilterKeys([]); }}
             >
-              Clear filters
+              Reset
             </Button>
           )}
           <span className="text-xs text-muted-foreground ml-auto self-end">
@@ -567,10 +552,10 @@ export function CatalogPage({
                     onSelect={onSelectAgent}
                     onDelete={onDelete}
                     readOnly={readOnly}
-                    showOnCardKeys={effectiveShowOnCardKeys}
                     deleteStartTime={agentDeleteStartTimes?.[agent.id]}
                     userGroups={userGroups}
                     registryEnabled={registryEnabled}
+                    maxCost={maxAgentCost}
                   />
                 )}
               />
@@ -612,9 +597,7 @@ export function CatalogPage({
                           </div>
                         </TableCell>
                         <TableCell>
-                          <Badge variant={statusVariant(agent.status)} className="text-[10px] px-1.5 py-0">
-                            {agent.status ?? "unknown"}
-                          </Badge>
+                          <StatusPill label={agent.status ?? "unknown"} variant={statusVariant(agent.status)} />
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {agent.cost_summary && agent.cost_summary.total_cost > 0
@@ -688,6 +671,7 @@ export function CatalogPage({
                 showOnCardKeys={effectiveShowOnCardKeys}
                 deleteStartTime={deleteStartTimes[mem.id]}
                 userGroups={userGroups}
+                maxCost={maxMemoryCost}
               />
             )}
           />
@@ -718,9 +702,7 @@ export function CatalogPage({
                   <TableRow key={mem.id} className="bg-input-bg hover:bg-input-bg/80">
                     <TableCell className="font-medium text-sm">{mem.name}</TableCell>
                     <TableCell>
-                      <Badge variant={statusVariant(mem.status)} className="text-[10px] px-1.5 py-0">
-                        {mem.status}
-                      </Badge>
+                      <StatusPill label={mem.status} variant={statusVariant(mem.status)} />
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {mem.cost_summary && mem.cost_summary.total_memory_estimated_cost > 0
@@ -777,31 +759,52 @@ export function CatalogPage({
             storageKey="catalog-mcp"
             sortDirection={mcpSortDir}
             onSortDirectionChange={(d) => { if (d) { setMcpSortDir(d); saveSortDirection("catalog-mcp", d); } }}
-            renderItem={(server) => (
-              <Card
-                className={`py-3 gap-1 transition-colors hover:bg-accent/50${onNavigateToMcp ? " cursor-pointer" : ""}`}
-                onClick={onNavigateToMcp ? () => onNavigateToMcp(server.id) : undefined}
-              >
-                <CardHeader className="gap-0 pb-2">
-                  <div className="flex items-center gap-2">
-                    <div className="text-sm font-medium truncate" title={server.name}>
-                      {server.name}
+            renderItem={(server) => {
+              const health = mcpHealth(server.status);
+              const dependentCount = agents.filter((a) => a.mcp_names?.includes(server.name)).length;
+              return (
+                <Card
+                  className={`group relative flex h-full flex-col gap-3.5 py-4 transition-colors hover:bg-accent/50${onNavigateToMcp ? " cursor-pointer" : ""}`}
+                  onClick={onNavigateToMcp ? () => onNavigateToMcp(server.id) : undefined}
+                >
+                  <CardHeader className="gap-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <CardTitle className="min-w-0 flex-1 truncate font-mono text-sm font-medium tracking-tight" title={server.name}>
+                        {server.name}
+                      </CardTitle>
+                      <RegistryStatusBadge status={server.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
                     </div>
-                    <RegistryStatusBadge status={server.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
-                  </div>
-                </CardHeader>
-                <CardContent className="text-xs text-muted-foreground">
-                  <div className="rounded border bg-input-bg p-3 space-y-0.5">
-                    <div className="truncate" title={server.endpoint_url}><span className="text-muted-foreground/70">Endpoint:</span> {server.endpoint_url}</div>
-                    <div><span className="text-muted-foreground/70">Transport:</span> {server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</div>
-                    <div><span className="text-muted-foreground/70">Authentication:</span> {server.auth_type === "oauth2" ? "OAuth2" : "None"}</div>
-                    {server.created_at && (
-                      <div><span className="text-muted-foreground/70">Created:</span> {formatTimestamp(server.created_at, timezone)}</div>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            )}
+                  </CardHeader>
+                  <CardContent className="flex flex-1 flex-col gap-3.5">
+                    <div onClick={(e) => e.stopPropagation()}>
+                      <CopyField value={server.endpoint_url} />
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-2.5 text-xs">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Transport</span>
+                        <span className="truncate">{transportLabel(server.transport_type)}</span>
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Auth</span>
+                        <span className="truncate">{mcpAuthLabel(server.auth_type)}</span>
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Elicitation</span>
+                        <span className="truncate">{server.supports_elicitation ? "Supported" : "Not supported"}</span>
+                      </div>
+                    </div>
+                    <div className="mt-auto flex items-center gap-2 border-t pt-3 text-[11px] text-muted-foreground">
+                      <span className="flex items-center gap-1.5">
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(health.variant)}`} />
+                        {health.label}
+                      </span>
+                      <span className="h-2.5 w-px bg-border" />
+                      <span>{dependentCount} agent{dependentCount === 1 ? "" : "s"}</span>
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            }}
           />
         ) : (
           <div className="rounded-md border overflow-hidden">
@@ -835,8 +838,8 @@ export function CatalogPage({
                       </div>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground truncate">{server.endpoint_url}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{server.auth_type === "oauth2" ? "OAuth2" : "None"}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{transportLabel(server.transport_type)}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{mcpAuthLabel(server.auth_type)}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {formatTimestamp(server.created_at, timezone)}
                     </TableCell>
@@ -878,37 +881,57 @@ export function CatalogPage({
             storageKey="catalog-a2a"
             sortDirection={a2aSortDir}
             onSortDirectionChange={(d) => { if (d) { setA2aSortDir(d); saveSortDirection("catalog-a2a", d); } }}
-            renderItem={(agent) => (
-              <Card
-                className={`py-3 gap-1 transition-colors hover:bg-accent/50${onNavigateToA2a ? " cursor-pointer" : ""}`}
-                onClick={onNavigateToA2a ? () => onNavigateToA2a(agent.id) : undefined}
-              >
-                <CardHeader className="gap-0 pb-2">
-                  <div className="flex items-center gap-2">
-                    <div className="text-sm font-medium truncate" title={agent.name}>
-                      {agent.name}
+            renderItem={(agent) => {
+              const health = a2aHealth(agent, timezone);
+              const dependentCount = agents.filter((a) => a.a2a_names?.includes(agent.name)).length;
+              const skillsCount = a2aSkillsCount(agent);
+              return (
+                <Card
+                  className={`group relative flex h-full flex-col gap-3.5 py-4 transition-colors hover:bg-accent/50${onNavigateToA2a ? " cursor-pointer" : ""}`}
+                  onClick={onNavigateToA2a ? () => onNavigateToA2a(agent.id) : undefined}
+                >
+                  <CardHeader className="gap-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <CardTitle className="min-w-0 flex-1 truncate font-mono text-sm font-medium tracking-tight" title={agent.name}>
+                        {agent.name}
+                      </CardTitle>
+                      <RegistryStatusBadge status={agent.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
                     </div>
-                    <RegistryStatusBadge status={agent.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
-                  </div>
-                </CardHeader>
-                <CardContent className="text-xs text-muted-foreground">
-                  <div className="rounded border bg-input-bg p-3 space-y-0.5">
-                    {agent.description && (
-                      <div className="truncate" title={agent.description}>{agent.description}</div>
-                    )}
-                    <div className="truncate" title={agent.base_url}><span className="text-muted-foreground/70">URL:</span> {agent.base_url}</div>
-                    <div><span className="text-muted-foreground/70">Version:</span> {agent.agent_version}</div>
-                    <div><span className="text-muted-foreground/70">Auth:</span> {agent.auth_type === "oauth2" ? "OAuth2" : "None"}</div>
-                    {agent.provider_organization && (
-                      <div><span className="text-muted-foreground/70">Provider:</span> {agent.provider_organization}</div>
-                    )}
-                    {agent.created_at && (
-                      <div><span className="text-muted-foreground/70">Created:</span> {formatTimestamp(agent.created_at, timezone)}</div>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            )}
+                  </CardHeader>
+                  <CardContent className="flex flex-1 flex-col gap-3.5">
+                    <div onClick={(e) => e.stopPropagation()}>
+                      <CopyField value={agent.base_url} />
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-2.5 text-xs">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Auth</span>
+                        <span className="truncate">{agent.auth_type === "oauth2" ? "OAuth2" : "None"}</span>
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Skills</span>
+                        <span className="truncate">{skillsCount ?? "—"}</span>
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Version</span>
+                        <span className="truncate">v{agent.agent_version}</span>
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Streaming</span>
+                        <span className="truncate">{agent.capabilities.streaming ? "Yes" : "No"}</span>
+                      </div>
+                    </div>
+                    <div className="mt-auto flex items-center gap-2 border-t pt-3 text-[11px] text-muted-foreground">
+                      <span className="flex items-center gap-1.5">
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(health.variant)}`} />
+                        {health.label}
+                      </span>
+                      <span className="h-2.5 w-px bg-border" />
+                      <span>{dependentCount} agent{dependentCount === 1 ? "" : "s"}</span>
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            }}
           />
         ) : (
           <div className="rounded-md border overflow-hidden">
@@ -956,107 +979,6 @@ export function CatalogPage({
       </section>
       )}
 
-      {/* Registry Section */}
-      {canViewRegistry && (
-      <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <button type="button" className="flex items-center gap-1 text-sm font-medium hover:text-foreground/80" onClick={() => toggleSection("registry")}>
-            {collapsedSections.has("registry") ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-            Registry
-          </button>
-          {!collapsedSections.has("registry") && <SortButton direction={registrySortDir} onClick={() => setRegistrySortDir(toggleSortDirection("catalog-registry", registrySortDir))} />}
-        </div>
-
-        {!collapsedSections.has("registry") && (registryLoading ? (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {Array.from({ length: 2 }).map((_, i) => (
-              <Skeleton key={i} className="h-32" />
-            ))}
-          </div>
-        ) : registryRecords.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-8 text-center">
-            No registry records found.
-          </p>
-        ) : viewMode === "cards" ? (
-          <SortableCardGrid
-            items={registryRecords}
-            getId={(r) => r.record_id}
-            getName={(r) => r.name}
-            storageKey="catalog-registry"
-            sortDirection={registrySortDir}
-            onSortDirectionChange={(d) => { if (d) { setRegistrySortDir(d); saveSortDirection("catalog-registry", d); } }}
-            renderItem={(record) => (
-              <Card
-                className="py-3 gap-1 transition-colors hover:bg-accent/50 cursor-pointer"
-                onClick={() => setSelectedRegistryRecordId(record.record_id)}
-              >
-                <CardHeader className="gap-0 pb-2">
-                  <div className="flex items-center gap-2">
-                    <div className="text-sm font-medium truncate" title={record.name}>
-                      {record.name}
-                    </div>
-                    <RegistryStatusBadge status={record.status} showUnregistered registryEnabled={registryEnabled} />
-                  </div>
-                </CardHeader>
-                <CardContent className="text-xs text-muted-foreground">
-                  <div className="rounded border bg-input-bg p-3 space-y-0.5">
-                    {record.description && (
-                      <div className="truncate" title={record.description}>{record.description}</div>
-                    )}
-                    <div><span className="text-muted-foreground/70">Type:</span> {record.descriptor_type}</div>
-                    {record.created_at && (
-                      <div><span className="text-muted-foreground/70">Created:</span> {formatTimestamp(record.created_at, timezone)}</div>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-          />
-        ) : (
-          <div className="rounded-md border overflow-hidden">
-            <Table className="table-fixed">
-              <TableHeader>
-                <TableRow className="bg-card hover:bg-card">
-                  <SortableTableHead column="name" activeColumn={registryTableCol} direction={registryTableDir} onSort={handleRegistryTableSort} className="w-[28%]">Name</SortableTableHead>
-                  <SortableTableHead column="type" activeColumn={registryTableCol} direction={registryTableDir} onSort={handleRegistryTableSort} className="w-[16%]">Type</SortableTableHead>
-                  <SortableTableHead column="status" activeColumn={registryTableCol} direction={registryTableDir} onSort={handleRegistryTableSort} className="w-[16%]">Status</SortableTableHead>
-                  <SortableTableHead column="description" activeColumn={registryTableCol} direction={registryTableDir} onSort={handleRegistryTableSort} className="w-[24%]">Description</SortableTableHead>
-                  <SortableTableHead column="created" activeColumn={registryTableCol} direction={registryTableDir} onSort={handleRegistryTableSort} className="w-[16%]">Created</SortableTableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sortRows(registryRecords, registryTableCol, registryTableDir, {
-                  name: (r) => r.name,
-                  type: (r) => r.descriptor_type,
-                  status: (r) => r.status,
-                  description: (r) => r.description ?? "",
-                  created: (r) => r.created_at ?? "",
-                }).map((record) => (
-                  <TableRow
-                    key={record.record_id}
-                    className="bg-input-bg hover:bg-input-bg/80 cursor-pointer"
-                    onClick={() => setSelectedRegistryRecordId(record.record_id)}
-                  >
-                    <TableCell className="font-medium text-sm">
-                      <div className="flex items-center gap-2">
-                        {record.name}
-                        <RegistryStatusBadge status={record.status} showUnregistered registryEnabled={registryEnabled} />
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{record.descriptor_type}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{record.status}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground truncate">{record.description}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {formatTimestamp(record.created_at, timezone)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        ))}
-      </section>
-      )}
     </div>
   );
 }

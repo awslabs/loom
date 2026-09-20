@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Loader2, Trash2, Pencil } from "lucide-react";
 import { useTimezone } from "@/contexts/TimezoneContext";
-import { formatTimestamp } from "@/lib/format";
+import { formatTimestamp, capitalize } from "@/lib/format";
 import { statusVariant } from "@/lib/status";
+import { StatusPill } from "@/components/StatusPill";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
 import type { AgentResponse } from "@/api/types";
 
@@ -15,11 +15,12 @@ interface AgentCardProps {
   onDelete: (id: number, cleanupAws: boolean) => void;
   onEdit?: (id: number) => void;
   readOnly?: boolean;
-  showOnCardKeys?: string[];
   deleteStartTime?: number;
   updateStartTime?: number;
   userGroups?: string[];
   registryEnabled?: boolean;
+  /** Highest cost among sibling cards in the same group, for the share-of-max bar. */
+  maxCost?: number;
 }
 
 const DEPLOY_IN_PROGRESS = new Set([
@@ -60,22 +61,16 @@ function phaseLabel(agent: AgentResponse): string | null {
   return null;
 }
 
-function deploymentTypeLabel(agent: AgentResponse): string | null {
-  if (agent.source === "harness") return "MANAGED";
-  if (agent.source === "deploy") return "CUSTOM";
-  return null;
-}
-
 function frameworkLabel(agent: AgentResponse): string | null {
-  if (agent.source !== "deploy" || !agent.agent_framework || agent.agent_framework === "strands") return null;
-  return agent.agent_framework.toUpperCase();
+  if (agent.source !== "deploy" || !agent.agent_framework) return null;
+  return capitalize(agent.agent_framework);
 }
 
 function existsInAgentCore(agent: AgentResponse): boolean {
   return !!agent.runtime_id;
 }
 
-export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, showOnCardKeys, deleteStartTime, updateStartTime, userGroups = [], registryEnabled = true }: AgentCardProps) {
+export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, deleteStartTime, updateStartTime, userGroups = [], registryEnabled = true, maxCost }: AgentCardProps) {
   const { timezone } = useTimezone();
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const [cleanupAws, setCleanupAws] = useState(false);
@@ -119,37 +114,51 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, showOnC
 
   const showCleanupOption = existsInAgentCore(agent);
 
+  const cost = agent.cost_summary?.total_cost ?? 0;
+  const costLabel = cost > 0 ? (cost < 0.01 ? `$${cost.toFixed(6)}` : `$${cost.toFixed(4)}`) : null;
+  const sharePct = maxCost && maxCost > 0 ? Math.min(100, Math.round((cost / maxCost) * 100)) : null;
+
+  const runtimeLabel = agent.source === "harness" ? "Managed" : agent.source === "deploy" ? "Custom" : (agent.source ?? "—");
+  const networkLabel = [agent.network_mode, agent.region].filter(Boolean).join(" · ") || "—";
+  const memoryLabel = agent.memory_names && agent.memory_names.length > 0
+    ? agent.memory_names.length > 1 ? `${agent.memory_names[0]} +${agent.memory_names.length - 1}` : agent.memory_names[0]
+    : "—";
+  const fourthLabel = agent.mcp_names && agent.mcp_names.length > 0
+    ? { key: "MCP", value: agent.mcp_names.length > 1 ? `${agent.mcp_names[0]} +${agent.mcp_names.length - 1}` : agent.mcp_names[0] }
+    : agent.authorizer_config
+      ? { key: "Authorizer", value: agent.authorizer_config.name ?? agent.authorizer_config.type ?? "external" }
+      : agent.a2a_names && agent.a2a_names.length > 0
+        ? { key: "A2A", value: agent.a2a_names.length > 1 ? `${agent.a2a_names[0]} +${agent.a2a_names.length - 1}` : agent.a2a_names[0] }
+        : { key: "Authorizer", value: "None" };
+
+  const labelCount = agent.tags ? Object.keys(agent.tags).length : 0;
+
   return (
     <Card
-      className="relative cursor-pointer transition-colors hover:bg-accent/50 py-3 gap-1"
+      className="group relative flex h-full cursor-pointer flex-col gap-3.5 py-4 transition-colors hover:bg-accent/50"
       onClick={() => onSelect(agent.id)}
     >
-      <CardHeader className="gap-1 pb-3">
+      <CardHeader className="gap-1.5">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0 overflow-hidden">
-            <CardTitle className="text-sm font-medium truncate">
+          <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+            <CardTitle className="truncate font-mono text-sm font-medium tracking-tight">
               {agent.name ?? agent.runtime_id}
             </CardTitle>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
             {!creating && (
               <RegistryStatusBadge status={agent.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
-            )}
-            {agent.status && agent.status !== "READY" && (
-              <Badge variant={statusVariant(agent.status)} className="text-[10px] px-1.5 py-0 shrink-0">
-                {agent.status}
-              </Badge>
             )}
             {!creating && agent.active_session_count > 0 && (
               <span className="inline-flex items-center justify-center h-5 min-w-5 px-1.5 rounded-full bg-primary text-primary-foreground text-[10px] font-medium shrink-0">
                 {agent.active_session_count}
               </span>
             )}
-          </div>
-          <div className="flex items-center gap-1 shrink-0">
             {onEdit && (
               <button
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onEdit(agent.id); }}
-                className="text-muted-foreground/50 hover:text-foreground transition-colors"
+                className="text-muted-foreground/50 opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                 title="Edit"
               >
                 <Pencil className="h-3.5 w-3.5" />
@@ -162,7 +171,7 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, showOnC
                   e.stopPropagation();
                   setConfirmingRemove(true);
                 }}
-                className="text-muted-foreground/50 hover:text-destructive transition-colors"
+                className="text-muted-foreground/50 opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100"
                 title="Remove agent"
               >
                 <Trash2 className="h-3.5 w-3.5" />
@@ -170,15 +179,16 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, showOnC
             )}
           </div>
         </div>
+        {agent.status && agent.status !== "READY" && (
+          <StatusPill label={agent.status} variant={statusVariant(agent.status)} className="w-fit" />
+        )}
         {creating && (
           <div className="flex items-center gap-1.5 text-muted-foreground">
             <Loader2 className="h-3 w-3 animate-spin" />
             <span className="text-[10px] tabular-nums">({elapsedSeconds}s)</span>
             <span className="text-[10px]">{label ?? "Creating"}</span>
             {agent.status !== "DELETING" && agent.endpoint_status && agent.endpoint_status !== agent.status && (
-              <Badge variant={statusVariant(agent.endpoint_status)} className="text-[10px] px-1.5 py-0">
-                Endpoint: {agent.endpoint_status}
-              </Badge>
+              <StatusPill label={`Endpoint: ${agent.endpoint_status}`} variant={statusVariant(agent.endpoint_status)} />
             )}
           </div>
         )}
@@ -188,94 +198,62 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, showOnC
           </div>
         )}
       </CardHeader>
-      <CardContent className="space-y-3 text-xs text-muted-foreground">
-        <div className="rounded border bg-input-bg p-3 space-y-0.5">
-          {agent.region && <div>Region: {agent.region}</div>}
-          {agent.account_id && <div>Account: {agent.account_id}</div>}
-          {agent.network_mode && (
-            <div>Network: {agent.network_mode}</div>
-          )}
-          {agent.available_qualifiers.length > 0 && (
-            <div>Endpoint: {agent.available_qualifiers.join(", ")}</div>
-          )}
-          <div className="flex flex-wrap items-center gap-1">
-            <span>Authorizer:</span>
-            {(() => {
-              const ac = agent.authorizer_config;
-              if (!ac) return <span className="text-muted-foreground/50">None</span>;
-              return (
-                <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-                  {ac.name ?? ac.type ?? "external"}
-                </Badge>
-              );
-            })()}
+      <CardContent className="flex flex-1 flex-col gap-3.5">
+        {costLabel && (
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-baseline gap-1.5">
+              <span className="font-mono text-lg font-semibold tracking-tight tabular-nums">{costLabel}</span>
+              <span className="text-[11px] text-muted-foreground">est. / run</span>
+              {sharePct !== null && (
+                <span
+                  className="ml-auto font-mono text-[10px] text-muted-foreground"
+                  title={`${sharePct}% of the highest est. cost among agents currently shown (${maxCost && maxCost < 0.01 ? maxCost.toFixed(6) : maxCost?.toFixed(4)})`}
+                >
+                  {sharePct}% of highest shown
+                </span>
+              )}
+            </div>
+            {sharePct !== null && (
+              <div className="h-[3px] overflow-hidden rounded-full bg-muted" title="Relative to the highest estimated cost among agents currently shown">
+                <div className="h-full rounded-full bg-primary" style={{ width: `${sharePct}%` }} />
+              </div>
+            )}
           </div>
-          {agent.memory_names && agent.memory_names.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1">
-              <span>Memory:</span>
-              {agent.memory_names.map((name, idx) => (
-                <Badge key={idx} variant="outline" className="text-[10px] px-1.5 py-0">
-                  {name}
-                </Badge>
-              ))}
-            </div>
-          )}
-          {agent.mcp_names && agent.mcp_names.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1">
-              <span>MCP:</span>
-              {agent.mcp_names.map((name, idx) => (
-                <Badge key={idx} variant="outline" className="text-[10px] px-1.5 py-0">
-                  {name}
-                </Badge>
-              ))}
-            </div>
-          )}
-          {agent.a2a_names && agent.a2a_names.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1">
-              <span>A2A:</span>
-              {agent.a2a_names.map((name, idx) => (
-                <Badge key={idx} variant="outline" className="text-[10px] px-1.5 py-0">
-                  {name}
-                </Badge>
-              ))}
-            </div>
-          )}
-          {agent.registered_at && (
-            <div>Registered: {formatTimestamp(agent.registered_at, timezone)}</div>
-          )}
+        )}
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2.5 text-xs">
+          <div className="flex flex-col gap-0.5">
+            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Runtime</span>
+            <span className="truncate">{runtimeLabel}{frameworkLabel(agent) ? ` · ${frameworkLabel(agent)}` : ""}</span>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Network</span>
+            <span className="truncate" title={agent.account_id ? `Account: ${agent.account_id}` : undefined}>{networkLabel}</span>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Memory</span>
+            <span className="truncate font-mono text-[12px]">{memoryLabel}</span>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">{fourthLabel.key}</span>
+            <span className="truncate font-mono text-[12px]">{fourthLabel.value}</span>
+          </div>
         </div>
-        {!creating && (deploymentTypeLabel(agent) || frameworkLabel(agent) || (agent.cost_summary && agent.cost_summary.total_cost > 0)) && (
-          <div className="flex flex-wrap gap-1">
-            {deploymentTypeLabel(agent) && (
-              <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-                {deploymentTypeLabel(agent)}
-              </Badge>
-            )}
-            {frameworkLabel(agent) && (
-              <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-                {frameworkLabel(agent)}
-              </Badge>
-            )}
-            {agent.cost_summary && agent.cost_summary.total_cost > 0 && (
-              <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-mono">
-                {agent.cost_summary.total_cost < 0.01
-                  ? `~$${agent.cost_summary.total_cost.toFixed(6)}`
-                  : `~$${agent.cost_summary.total_cost.toFixed(4)}`}
-              </Badge>
-            )}
-          </div>
-        )}
-        {showOnCardKeys && showOnCardKeys.length > 0 && agent.tags && Object.keys(agent.tags).length > 0 && (
-          <div className="flex flex-wrap gap-1 pt-1">
-            {showOnCardKeys
-              .filter(key => agent.tags[key])
-              .map(key => (
-                <Badge key={key} variant="outline" className="text-[10px] px-1.5 py-0 font-normal">
-                  {key.replace(/^loom:/, "")}: {agent.tags[key]}
-                </Badge>
-              ))}
-          </div>
-        )}
+        <div className="mt-auto flex items-center gap-2 border-t pt-3 text-[11px] text-muted-foreground">
+          {agent.registered_at && <span className="font-mono text-[10.5px]">{formatTimestamp(agent.registered_at, timezone)}</span>}
+          {labelCount > 0 && (
+            <>
+              <span className="h-2.5 w-px bg-border" />
+              <span>{labelCount} label{labelCount === 1 ? "" : "s"}</span>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onSelect(agent.id); }}
+            className="ml-auto text-primary hover:underline"
+          >
+            Details
+          </button>
+        </div>
         {confirmingRemove && (
           <div
             className="absolute inset-x-0 bottom-0 rounded-b-lg border-t bg-card px-4 py-2 space-y-1.5"

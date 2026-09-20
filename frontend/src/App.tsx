@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef, Children } from "react";
 import { useTranslation } from "react-i18next";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -140,6 +139,7 @@ function SidebarItem({
   onClick,
   disabled,
   badge,
+  count,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
@@ -147,23 +147,28 @@ function SidebarItem({
   onClick: () => void;
   disabled?: boolean;
   badge?: string;
+  count?: number;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm whitespace-nowrap transition-colors ${
+      className={`relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm whitespace-nowrap transition-colors ${
         disabled
           ? "text-muted-foreground/50 cursor-not-allowed"
           : active
-            ? "bg-primary text-primary-foreground"
-            : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+            ? "bg-accent text-foreground"
+            : "text-muted-foreground hover:bg-accent/50 hover:text-accent-foreground"
       }`}
     >
+      {active && <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full bg-primary" />}
       <Icon className="h-4 w-4 shrink-0" />
       <span className="truncate">{label}</span>
       {badge && <span className="text-[10px] italic shrink-0">{badge}</span>}
+      {typeof count === "number" && (
+        <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">{count}</span>
+      )}
     </button>
   );
 }
@@ -317,6 +322,7 @@ function AppContent() {
   const [sessionDetail, setSessionDetail] = useState<SessionResponse | null>(null);
   const [selectedInvocationId, setSelectedInvocationId] = useState<string | null>(null);
   const [invocationDetail, setInvocationDetail] = useState<InvocationResponse | null>(null);
+  const [pendingScopedInvocationId, setPendingScopedInvocationId] = useState<string | null>(null);
 
   const selectedAgent = agents.find((a) => a.id === selectedAgentId) ?? null;
   const { sessions, loading: sessionsLoading, refetch: refetchSessions } =
@@ -361,19 +367,6 @@ function AppContent() {
   if (!isAuthenticated) {
     return <LoginPage />;
   }
-
-  const handleBack = () => {
-    if (selectedInvocationId) {
-      setSelectedInvocationId(null);
-      setInvocationDetail(null);
-    } else if (selectedSessionId) {
-      setSelectedSessionId(null);
-      setSessionDetail(null);
-    } else {
-      setSelectedAgentId(null);
-      void fetchAgents();
-    }
-  };
 
 
 
@@ -520,6 +513,7 @@ function AppContent() {
                 label={t("nav.agents")}
                 active={activePersona === "builder"}
                 onClick={() => setActivePersona("builder")}
+                count={agents.length}
               />
             )}
             {(effectiveHasScope("memory:read") || effectiveHasScope("memory:write")) && (
@@ -673,9 +667,6 @@ function AppContent() {
               canViewMemories={effectiveHasScope("memory:read")}
               canViewMcp={effectiveHasScope("mcp:read")}
               canViewA2a={effectiveHasScope("a2a:read")}
-              canViewRegistry={effectiveHasScope("registry:read")}
-              registryReadOnly={!effectiveHasScope("registry:write")}
-              isEndUserRole={effectiveUserGroups.includes("t-user") && !effectiveUserGroups.includes("t-admin")}
               groupRestriction={groupRestriction}
               userGroups={viewAsUser ? (USER_GROUPS[viewAsUser] ?? []) : (user?.groups ?? [])}
               onNavigateToMcp={(serverId) => { setPendingMcpId(serverId); setIntegrationsTab("mcp"); setActivePersona("integrations"); }}
@@ -685,12 +676,6 @@ function AppContent() {
 
           {activePersona === "builder" && (
             <>
-              {selectedAgentId !== null && (
-                <Button variant="ghost" size="sm" onClick={handleBack} className="mb-4">
-                  &larr; Back
-                </Button>
-              )}
-
               {selectedAgentId === null && (
                 <AgentListPage
                   agents={agents}
@@ -739,6 +724,12 @@ function AppContent() {
                   agent={selectedAgent}
                   session={sessionDetail}
                   onSelectInvocation={handleSelectInvocation}
+                  onRerunInInvoke={() => {
+                    setSelectedSessionId(null);
+                    setSessionDetail(null);
+                    setAgentInitialTab("invoke");
+                  }}
+                  initialScopedInvocationId={pendingScopedInvocationId}
                 />
               )}
 
@@ -747,12 +738,27 @@ function AppContent() {
                   agent={selectedAgent}
                   session={sessionDetail}
                   invocation={invocationDetail}
+                  onOpenLogs={() => {
+                    setPendingScopedInvocationId(invocationDetail.invocation_id);
+                    setSelectedInvocationId(null);
+                    setInvocationDetail(null);
+                  }}
+                  onRerunPrompt={() => {
+                    if (invocationDetail.prompt_text) {
+                      sessionStorage.setItem(`loom:invokePrompt:${selectedAgent.id}`, invocationDetail.prompt_text);
+                    }
+                    setSelectedSessionId(null);
+                    setSessionDetail(null);
+                    setSelectedInvocationId(null);
+                    setInvocationDetail(null);
+                    setAgentInitialTab("invoke");
+                  }}
                 />
               )}
             </>
           )}
 
-          {activePersona === "security" && <SecurityAdminPage readOnly={!effectiveHasScope("security:write")} />}
+          {activePersona === "security" && <SecurityAdminPage readOnly={!effectiveHasScope("security:write")} agents={agents} />}
           {activePersona === "memory" && <MemoryManagementPage viewMode={memoryViewMode} onViewModeChange={setMemoryViewMode} readOnly={!effectiveHasScope("memory:write")} groupRestriction={groupRestriction} ownerRestriction={ownerRestriction} userGroups={viewAsUser ? (USER_GROUPS[viewAsUser] ?? []) : (user?.groups ?? [])} />}
           {activePersona === "integrations" && (
             <IntegrationsPage
@@ -768,6 +774,7 @@ function AppContent() {
               onA2aViewModeChange={setA2aViewMode}
               pendingMcpId={pendingMcpId}
               pendingA2aId={pendingA2aId}
+              agents={agents}
             />
           )}
           {activePersona === "settings" && (
@@ -775,6 +782,7 @@ function AppContent() {
               canViewTagging={effectiveHasScope("tagging:read")}
               canEditTagging={effectiveHasScope("tagging:write")}
               userGroups={user?.groups || []}
+              agents={agents}
             />
           )}
           {activePersona === "admin" && (
@@ -798,7 +806,9 @@ export default function App() {
     <AuthProvider>
       <ThemeProvider>
         <TimezoneProvider>
-          <AppContent />
+          <TooltipProvider>
+            <AppContent />
+          </TooltipProvider>
         </TimezoneProvider>
       </ThemeProvider>
     </AuthProvider>

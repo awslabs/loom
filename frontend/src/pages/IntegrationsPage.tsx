@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { McpServersPage } from "@/pages/McpServersPage";
 import { A2aAgentsPage } from "@/pages/A2aAgentsPage";
+import type { AgentResponse } from "@/api/types";
 
 export type IntegrationsTab = "mcp" | "a2a";
 
@@ -18,6 +20,7 @@ interface IntegrationsPageProps {
   onA2aViewModeChange: (mode: "cards" | "table") => void;
   pendingMcpId?: number | null;
   pendingA2aId?: number | null;
+  agents?: AgentResponse[];
 }
 
 /**
@@ -40,8 +43,11 @@ export function IntegrationsPage({
   onA2aViewModeChange,
   pendingMcpId,
   pendingA2aId,
+  agents = [],
 }: IntegrationsPageProps) {
   const { t } = useTranslation();
+  const [mcpCount, setMcpCount] = useState(0);
+  const [a2aCount, setA2aCount] = useState(0);
 
   // If the caller only has access to one of the two tabs, render it directly
   // without the Tabs shell so a single-scope user isn't shown an empty tab list.
@@ -52,6 +58,7 @@ export function IntegrationsPage({
         onViewModeChange={onMcpViewModeChange}
         readOnly={!canEditMcp}
         initialSelectedId={pendingMcpId}
+        agents={agents}
         key={`mcp-${pendingMcpId}`}
       />
     );
@@ -63,6 +70,7 @@ export function IntegrationsPage({
         onViewModeChange={onA2aViewModeChange}
         readOnly={!canEditA2a}
         initialSelectedId={pendingA2aId}
+        agents={agents}
         key={`a2a-${pendingA2aId}`}
       />
     );
@@ -72,29 +80,45 @@ export function IntegrationsPage({
   }
 
   return (
-    <Tabs value={activeTab} onValueChange={(v) => onActiveTabChange(v as IntegrationsTab)}>
-      <TabsList>
-        <TabsTrigger value="mcp">{t("nav.mcpServers")}</TabsTrigger>
-        <TabsTrigger value="a2a">{t("nav.a2aAgents")}</TabsTrigger>
-      </TabsList>
-      <TabsContent value="mcp">
-        <McpServersPage
-          viewMode={mcpViewMode}
-          onViewModeChange={onMcpViewModeChange}
-          readOnly={!canEditMcp}
-          initialSelectedId={pendingMcpId}
-          key={`mcp-${pendingMcpId}`}
-        />
-      </TabsContent>
-      <TabsContent value="a2a">
-        <A2aAgentsPage
-          viewMode={a2aViewMode}
-          onViewModeChange={onA2aViewModeChange}
-          readOnly={!canEditA2a}
-          initialSelectedId={pendingA2aId}
-          key={`a2a-${pendingA2aId}`}
-        />
-      </TabsContent>
-    </Tabs>
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="text-lg font-semibold">Integrations</h2>
+        <p className="text-sm text-muted-foreground">Tool servers and peer agents available to this platform.</p>
+      </div>
+      <Tabs value={activeTab} onValueChange={(v) => onActiveTabChange(v as IntegrationsTab)}>
+        <TabsList>
+          <TabsTrigger value="mcp" className="gap-1.5">
+            {t("nav.mcpServers")}
+            <span className="rounded-md bg-muted px-1.5 py-0 font-mono text-[10px] text-muted-foreground">{mcpCount}</span>
+          </TabsTrigger>
+          <TabsTrigger value="a2a" className="gap-1.5">
+            {t("nav.a2aAgents")}
+            <span className="rounded-md bg-muted px-1.5 py-0 font-mono text-[10px] text-muted-foreground">{a2aCount}</span>
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="mcp">
+          <McpServersPage
+            viewMode={mcpViewMode}
+            onViewModeChange={onMcpViewModeChange}
+            readOnly={!canEditMcp}
+            initialSelectedId={pendingMcpId}
+            agents={agents}
+            onCountChange={setMcpCount}
+            key={`mcp-${pendingMcpId}`}
+          />
+        </TabsContent>
+        <TabsContent value="a2a">
+          <A2aAgentsPage
+            viewMode={a2aViewMode}
+            onViewModeChange={onA2aViewModeChange}
+            readOnly={!canEditA2a}
+            initialSelectedId={pendingA2aId}
+            agents={agents}
+            onCountChange={setA2aCount}
+            key={`a2a-${pendingA2aId}`}
+          />
+        </TabsContent>
+      </Tabs>
+    </div>
   );
 }

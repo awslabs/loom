@@ -10,8 +10,10 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
+import { StatusPill } from "@/components/StatusPill";
 import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatTimestamp } from "@/lib/format";
+import type { BadgeVariant } from "@/lib/status";
 import type { SessionResponse } from "@/api/types";
 
 interface SessionTableProps {
@@ -25,19 +27,19 @@ type SortDir = "asc" | "desc";
 
 const PAGE_SIZE = 5;
 
-function statusVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
+function statusVariant(status: string): BadgeVariant {
   switch (status) {
     case "active":
-      return "default";
+      return "success";
     case "streaming":
     case "pending":
-      return "secondary";
+      return "warning";
     case "expired":
-      return "outline";
+      return "neutral";
     case "error":
       return "destructive";
     default:
-      return "outline";
+      return "neutral";
   }
 }
 
@@ -121,7 +123,7 @@ export function SessionTable({ sessions, onSelectSession, loading, currentUserId
                 <Badge variant="outline">{session.qualifier}</Badge>
               </TableCell>
               <TableCell>
-                <Badge variant={statusVariant(session.live_status)}>{session.live_status}</Badge>
+                <StatusPill label={session.live_status} variant={statusVariant(session.live_status)} />
               </TableCell>
               <TableCell>{session.invocations.length}</TableCell>
               <TableCell className="text-xs text-muted-foreground">

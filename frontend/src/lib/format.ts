@@ -1,5 +1,9 @@
 import type { TimezonePreference } from "@/contexts/TimezoneContext";
 
+export function capitalize(value: string): string {
+  return value.length === 0 ? value : value.charAt(0).toUpperCase() + value.slice(1);
+}
+
 export function formatTimestamp(
   value: string | null,
   timezone: TimezonePreference,

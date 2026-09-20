@@ -1,36 +1,48 @@
 import { useState, useEffect, useRef } from "react";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plug, Unplug, KeyRound, ChevronDown, Send, X, Link2, UserCheck, AlertTriangle } from "lucide-react";
+import { Plug, Unplug, KeyRound, Send, Square, Link2, UserCheck, AlertTriangle, Copy } from "lucide-react";
+import { toast } from "sonner";
+import { MarkdownBlock } from "@/components/MarkdownRenderer";
+import { ApprovalRequestBubble } from "@/components/ApprovalDialog";
+import { ElicitationRequestBubble } from "@/components/ElicitationDialog";
+import { statusVariant, statusDotClass } from "@/lib/status";
+import { useTimezone } from "@/contexts/TimezoneContext";
+import { formatTimestamp } from "@/lib/format";
 import { listAuthorizerConfigs, listAuthorizerCredentials, checkAuthorizerLinkStatus, getAuthorizerLinkAuthorizeUrl, submitAuthorizerLinkCallback, deleteAuthorizerLink } from "@/api/security";
 import { fetchModels, fetchLitellmModels } from "@/api/agents";
 import { listConnectors, setUserApiKey, deleteUserApiKey } from "@/api/mcp";
+import { sendElicitationResponse, type StreamSegment } from "@/hooks/useInvoke";
 import { groupModels } from "@/lib/models";
-import type { SessionResponse, AuthorizerCredential, ModelOption, ConnectorInfo } from "@/api/types";
+import type { SessionResponse, AuthorizerCredential, ModelOption, ConnectorInfo, SSESessionStart, SSESessionEnd } from "@/api/types";
 
 const NEW_SESSION = "__new__";
 const USER_TOKEN = "__user__";
 const LINKED_TOKEN = "__linked__";
 const NO_CREDENTIAL = "__none__";
 const MANUAL_TOKEN = "__manual__";
+const RAIL_SESSION_COUNT = 4;
 
 interface InvokePanelProps {
   agentId: number;
+  agentName: string;
   qualifiers: string[];
   sessions: SessionResponse[];
   isStreaming: boolean;
   modelId?: string | null;
   allowedModelIds?: string[];
+  memoryNames?: string[];
   mcpNames?: string[];
   authorizerName?: string;
   authorizerId?: number;
@@ -39,8 +51,15 @@ interface InvokePanelProps {
   isExternalIdp?: boolean;
   loginIssuerUrl?: string;
   currentUserId?: string;
+  streamedText: string;
+  segments: StreamSegment[];
+  sessionStart: SSESessionStart | null;
+  sessionEnd: SSESessionEnd | null;
+  error: string | null;
+  rawError: string | null;
   onInvoke: (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean) => void;
   onCancel: () => void;
+  onOpenSessionDetail?: (sessionId: string) => void;
 }
 
 function issuerMatchesDiscovery(issuerUrl?: string, discoveryUrl?: string): boolean {
@@ -53,9 +72,180 @@ function issuerMatchesDiscovery(issuerUrl?: string, discoveryUrl?: string): bool
   return base.toLowerCase() === issuerUrl.replace(/\/+$/, "").toLowerCase();
 }
 
-export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelId, allowedModelIds = [], mcpNames = [], authorizerName, authorizerId, authorizerPoolId, authorizerDiscoveryUrl, isExternalIdp, loginIssuerUrl, currentUserId, onInvoke, onCancel }: InvokePanelProps) {
+function formatToolName(raw: string): string {
+  const parts = raw.split("___");
+  return parts.length > 1 ? parts.slice(1).join(" / ") : raw;
+}
+
+function formatLatencyMs(ms: number | null | undefined): string {
+  if (ms == null) return "—";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
+function formatCost(cost: number | null | undefined): string {
+  if (cost == null || cost === 0) return "—";
+  if (cost < 0.01) return `$${cost.toFixed(6)}`;
+  return `$${cost.toFixed(4)}`;
+}
+
+
+function ElapsedTimer({ since }: { since: number }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    setElapsed(Math.floor((Date.now() - since) / 1000));
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - since) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [since]);
+  return <span className="tabular-nums">({elapsed}s)</span>;
+}
+
+function ToolCallRow({ tool, isActive }: { tool: { name: string; index: number; total: number; timestamp: number }; isActive: boolean }) {
+  return (
+    <div className="flex items-center gap-2.5 border-b bg-muted px-3 py-1.5 text-xs last:border-b-0">
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${isActive ? "animate-pulse bg-primary" : "bg-success"}`} />
+      <span className="truncate font-mono">tool · {formatToolName(tool.name)}</span>
+      {isActive ? (
+        <ElapsedTimer since={tool.timestamp} />
+      ) : (
+        <span className="ml-auto shrink-0 font-mono text-[10.5px] text-muted-foreground">done</span>
+      )}
+    </div>
+  );
+}
+
+/** Renders the live segment stream (text / tool calls / approvals / elicitations) for the in-flight turn. */
+function LiveTurnBody({ agentId, segments, isStreaming }: { agentId: number; segments: StreamSegment[]; isStreaming: boolean }) {
+  const blocks: React.ReactNode[] = [];
+  let toolGroup: { name: string; index: number; total: number; timestamp: number }[] = [];
+  let toolGroupStart = 0;
+  const flushTools = () => {
+    if (toolGroup.length > 0) {
+      const lastIdx = toolGroupStart + toolGroup.length - 1;
+      blocks.push(
+        <div key={`tools-${toolGroupStart}`} className="flex flex-col overflow-hidden rounded-[9px] border">
+          {toolGroup.map((t, i) => (
+            <ToolCallRow key={i} tool={t} isActive={isStreaming && toolGroupStart + i === lastIdx && toolGroupStart + i === segments.length - 1} />
+          ))}
+        </div>,
+      );
+      toolGroup = [];
+    }
+  };
+  segments.forEach((seg, i) => {
+    if (seg.type === "tool_use") {
+      if (toolGroup.length === 0) toolGroupStart = i;
+      toolGroup.push({ name: seg.name, index: seg.index, total: seg.total, timestamp: seg.timestamp });
+    } else if (seg.type === "approval_request") {
+      flushTools();
+      blocks.push(<ApprovalRequestBubble key={`approval-${i}`} data={seg.data} />);
+    } else if (seg.type === "approval_resolved") {
+      flushTools();
+    } else if (seg.type === "elicitation_request") {
+      flushTools();
+      blocks.push(<ElicitationRequestBubble key={`elicit-${i}`} data={seg.data} onRespond={(id, action, content) => sendElicitationResponse(agentId, id, action, content)} />);
+    } else {
+      flushTools();
+      blocks.push(<MarkdownBlock key={i} text={seg.content} />);
+    }
+  });
+  flushTools();
+  return (
+    <>
+      {isStreaming && blocks.length === 0 && (
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <span className="flex gap-0.5">
+            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:0ms]" />
+            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:150ms]" />
+            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:300ms]" />
+          </span>
+          <span className="text-xs">Thinking…</span>
+        </div>
+      )}
+      {blocks}
+      {isStreaming && blocks.length > 0 && <span className="inline-block w-1.5 h-4 bg-foreground/70 animate-pulse ml-0.5 align-text-bottom" />}
+    </>
+  );
+}
+
+function UserBubble({ text, timestamp, currentUserId }: { text: string; timestamp?: string; currentUserId?: string }) {
+  return (
+    <div className="flex flex-col items-end gap-1.5">
+      <div className="max-w-[600px] rounded-2xl rounded-br-md bg-primary px-3.5 py-2.5 text-[13.5px] leading-[1.55] whitespace-pre-wrap text-primary-foreground">
+        {text}
+      </div>
+      {timestamp && (
+        <span className="font-mono text-[10px] text-muted-foreground">{currentUserId ? `${currentUserId} · ` : ""}{timestamp}</span>
+      )}
+    </div>
+  );
+}
+
+function AgentAttribution({ agentName, modelLabel }: { agentName: string; modelLabel?: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="font-mono text-[10px] tracking-wide text-muted-foreground uppercase">{agentName}</span>
+      {modelLabel && (
+        <span className="rounded-[4px] border bg-muted px-1.5 py-0.5 font-mono text-[9.5px] text-muted-foreground uppercase">{modelLabel}</span>
+      )}
+    </div>
+  );
+}
+
+// Per-turn latency/tokens/cost live in the run strip at the top (aggregated across the session) —
+// no need to repeat them under every turn. This just keeps the copy action.
+function TurnFooter({ text }: { text?: string }) {
+  const handleCopy = () => {
+    if (!text) return;
+    navigator.clipboard.writeText(text);
+    toast.success("Copied to clipboard");
+  };
+  if (!text) return null;
+  return (
+    <div className="flex items-center pt-0.5">
+      <button type="button" onClick={handleCopy} className="ml-auto flex items-center gap-1 text-[10.5px] text-muted-foreground hover:text-foreground">
+        <Copy className="h-3 w-3" />copy
+      </button>
+    </div>
+  );
+}
+
+function EmptyState({ agentName, onSeed }: { agentName: string; onSeed: (text: string) => void }) {
+  const seeds = ["What can you help me with?", "Summarize your capabilities and tools", "Walk me through an example task"];
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3.5 px-6 py-11 text-center">
+      <div className="h-8 w-8 rounded-[9px] border bg-muted" />
+      <div className="flex flex-col items-center gap-1">
+        <div className="text-sm font-medium">Invoke {agentName}</div>
+        <p className="max-w-[340px] text-[12.5px] leading-[1.55] text-muted-foreground">
+          A session is created on your first message.
+        </p>
+      </div>
+      <div className="flex max-w-[520px] flex-wrap justify-center gap-1.5">
+        {seeds.map((s) => (
+          <button
+            key={s}
+            type="button"
+            onClick={() => onSeed(s)}
+            className="rounded-md border bg-muted px-2.5 py-1.5 text-xs hover:bg-accent"
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function InvokePanel({
+  agentId, agentName, qualifiers, sessions, isStreaming, modelId, allowedModelIds = [], memoryNames = [], mcpNames = [],
+  authorizerName, authorizerId, authorizerPoolId, authorizerDiscoveryUrl, isExternalIdp, loginIssuerUrl, currentUserId,
+  streamedText, segments, sessionStart, sessionEnd, error, rawError, onInvoke, onCancel, onOpenSessionDetail,
+}: InvokePanelProps) {
+  const { timezone } = useTimezone();
   const promptKey = `loom:invokePrompt:${agentId}`;
   const [prompt, setPrompt] = useState(() => sessionStorage.getItem(promptKey) ?? "");
+  const [lastPrompt, setLastPrompt] = useState<string | null>(null);
+  const [showAllSessions, setShowAllSessions] = useState(false);
 
   useEffect(() => {
     if (prompt) {
@@ -81,12 +271,10 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [enabledConnectors, setEnabledConnectors] = useState<Set<number>>(new Set());
   const [showConnectors, setShowConnectors] = useState(false);
-  const [showModelPicker, setShowModelPicker] = useState(false);
   const [apiKeyDialog, setApiKeyDialog] = useState<{ serverId: number; serverName: string } | null>(null);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [savingApiKey, setSavingApiKey] = useState(false);
   const connectorsRef = useRef<HTMLDivElement>(null);
-  const modelPickerRef = useRef<HTMLDivElement>(null);
 
   // Authorizer linking state (cross-IdP)
   const [linkStatus, setLinkStatus] = useState<"unknown" | "linked" | "unlinked" | "linking" | "not-configured" | "same-idp">("unknown");
@@ -108,7 +296,6 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
       .catch(() => setLinkStatus("unknown"));
   }, [resolvedAuthorizerId, sameIdp]);
 
-  // Auto-select credential based on link status
   useEffect(() => {
     if (linkStatus === "linked") {
       setSelectedCredential(LINKED_TOKEN);
@@ -117,7 +304,6 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
     }
   }, [linkStatus, credentialsLoaded, allCredentials]);
 
-  // Complete pending link exchange after redirect
   useEffect(() => {
     const code = sessionStorage.getItem("loom_link_code");
     if (!code || !resolvedAuthorizerId) return;
@@ -170,9 +356,6 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
   useEffect(() => {
     if (!modelId) return;
     let cancelled = false;
-    // /api/agents/models is Bedrock-only; LiteLLM's catalog is a separate
-    // on-demand endpoint. Merge both so a LiteLLM agent's allowed_model_ids
-    // resolve here — otherwise filteredModels is empty and the picker hides.
     Promise.all([
       fetchModels().catch(() => []),
       fetchLitellmModels().catch(() => []),
@@ -230,12 +413,10 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
     return () => { cancelled = true; };
   }, []);
 
-  // Load connectors
   useEffect(() => {
     listConnectors().then(setConnectors).catch(() => {});
   }, []);
 
-  // Restore enabled connectors from localStorage (only invoke-time connectors)
   useEffect(() => {
     const stored = localStorage.getItem(connectorStorageKey);
     if (stored) {
@@ -247,7 +428,6 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
     }
   }, [connectorStorageKey]);
 
-  // Close connector popover on outside click
   useEffect(() => {
     if (!showConnectors) return;
     function handleClickOutside(e: MouseEvent) {
@@ -258,18 +438,6 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showConnectors]);
-
-  // Close model picker on outside click
-  useEffect(() => {
-    if (!showModelPicker) return;
-    function handleClickOutside(e: MouseEvent) {
-      if (modelPickerRef.current && !modelPickerRef.current.contains(e.target as Node)) {
-        setShowModelPicker(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [showModelPicker]);
 
   const toggleConnector = (c: ConnectorInfo) => {
     const isEnabled = enabledConnectors.has(c.id);
@@ -335,26 +503,19 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
     }
   };
 
-  // Filter sessions that match the selected qualifier, are not expired,
-  // and belong to the current user (or have no owner recorded yet)
-  const matchingSessions = sessions.filter(
-    (s) => s.live_status !== "expired"
-  );
+  const matchingSessions = sessions.filter((s) => s.live_status !== "expired");
+  const sortedSessions = [...sessions].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
 
-  // Track whether the user has manually changed the session selector
   const userPickedRef = useRef(false);
 
-  // Reset when agent changes
   useEffect(() => {
     setSelectedSession(NEW_SESSION);
+    setLastPrompt(null);
     userPickedRef.current = false;
   }, [agentId]);
 
-  // Auto-select the most recent session when sessions load or a new one appears,
-  // unless the user has manually picked a session in this mount cycle.
   useEffect(() => {
     if (userPickedRef.current) {
-      // User made a deliberate choice — only reset if their selection disappeared
       if (
         selectedSession !== NEW_SESSION &&
         !matchingSessions.some((s) => s.session_id === selectedSession)
@@ -375,7 +536,10 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!prompt.trim() || isStreaming) return;
-    const sessionId = selectedSession === NEW_SESSION ? undefined : selectedSession;
+    const trimmed = prompt.trim();
+    const targetRecord = sessions.find((s) => s.session_id === selectedSession);
+    const sessionId = selectedSession === NEW_SESSION || !targetRecord || targetRecord.live_status === "expired"
+      ? undefined : selectedSession;
     const credentialId = selectedCredential === USER_TOKEN || selectedCredential === LINKED_TOKEN || selectedCredential === NO_CREDENTIAL || selectedCredential === MANUAL_TOKEN
       ? undefined : Number(selectedCredential);
     const token = selectedCredential === MANUAL_TOKEN && bearerToken.trim()
@@ -383,22 +547,19 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
     const runtimeModelId = selectedModel && selectedModel !== modelId ? selectedModel : undefined;
     const invokeOnlyIds = [...enabledConnectors].filter((id) => {
       const c = connectors.find((cn) => cn.id === id);
-      // Deploy-time API-key tools still need the current user's key injected
-      // into each harness invocation.
       return c && (!mcpNames.includes(c.name) || c.auth_type === "api_key");
     });
     const activeConnectorIds = invokeOnlyIds.length > 0 ? invokeOnlyIds : undefined;
     const useLinkedToken = selectedCredential === LINKED_TOKEN ? true : undefined;
-    onInvoke(prompt.trim(), qualifier, sessionId, credentialId, token, runtimeModelId, activeConnectorIds, useLinkedToken);
+    setLastPrompt(trimmed);
+    onInvoke(trimmed, qualifier, sessionId, credentialId, token, runtimeModelId, activeConnectorIds, useLinkedToken);
   };
 
   const handleQualifierChange = (value: string) => {
     setQualifier(value);
-    // Reset session selection when qualifier changes
     setSelectedSession(NEW_SESSION);
   };
 
-  // OBO delegation detection: any MCP connector on this agent using OBO mode
   const oboConnectorNames = connectors
     .filter((c) => c.delegation_mode === "obo" && mcpNames.includes(c.name))
     .map((c) => c.name);
@@ -411,90 +572,337 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
   const oboWarning = hasObo && !userTokenAvailable;
 
   const groupedModels = groupModels(filteredModels);
-
   const currentModelName = selectedModel
     ? (filteredModels.find((m) => m.model_id === selectedModel)?.display_name ?? selectedModel)
-    : (filteredModels.find((m) => m.model_id === modelId)?.display_name ?? modelId ?? "Model");
+    : (filteredModels.find((m) => m.model_id === modelId)?.display_name ?? modelId ?? "");
+
+  // ---- transcript assembly -------------------------------------------------
+  const activeSessionId = sessionStart?.session_id ?? (selectedSession !== NEW_SESSION ? selectedSession : null);
+  const activeSessionRecord = sessions.find((s) => s.session_id === activeSessionId) ?? null;
+  // Exclude the invocation that's currently rendered by the live turn below — sessionStart/sessionEnd
+  // persist after a request finishes, so once `sessions` refetches and includes this same invocation,
+  // it would otherwise render twice.
+  const historicalInvocations = (activeSessionRecord?.invocations ?? []).filter(
+    (inv) => inv.invocation_id !== sessionEnd?.invocation_id,
+  );
+  const hasLiveTurn = Boolean(sessionStart);
+  const hasTranscript = historicalInvocations.length > 0 || hasLiveTurn;
+
+  const histTokens = historicalInvocations.reduce((sum, inv) => sum + (inv.input_tokens ?? 0) + (inv.output_tokens ?? 0), 0);
+  const liveTokens = (sessionEnd?.input_tokens ?? 0) + (sessionEnd?.output_tokens ?? 0);
+  const totalTokens = histTokens + liveTokens;
+  const histCost = historicalInvocations.reduce((sum, inv) => sum + (inv.estimated_cost ?? 0), 0);
+  const totalCost = histCost + (sessionEnd?.estimated_cost ?? 0);
+  const totalTurns = historicalInvocations.length + (hasLiveTurn ? 1 : 0);
+  const lastInvocation = historicalInvocations[historicalInvocations.length - 1];
+  const lastLatencyMs = sessionEnd?.client_duration_ms ?? lastInvocation?.client_duration_ms ?? null;
+
+  const railSessions = showAllSessions ? sortedSessions : sortedSessions.slice(0, RAIL_SESSION_COUNT);
 
   return (
-    <Card>
-      <CardContent className="pt-2">
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {/* Config selects row */}
-          <div className="flex gap-4 flex-wrap">
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_300px]">
+      {/* console */}
+      <Card className="flex flex-col gap-0 overflow-hidden py-0">
+        {activeSessionId && (
+          <div className="flex flex-wrap items-center gap-3.5 border-b bg-muted px-4 py-2.5">
+            <div className="flex items-center gap-1.5">
+              <span className={`h-1.5 w-1.5 rounded-full ${isStreaming ? "animate-pulse bg-primary" : "bg-success"}`} />
+              <button
+                type="button"
+                onClick={() => { navigator.clipboard.writeText(activeSessionId); toast.success("Copied session id"); }}
+                className="font-mono text-[11.5px] hover:underline"
+                title="Copy session id"
+              >
+                {activeSessionId.slice(0, 18)}
+              </button>
+            </div>
+            <div className="h-3 w-px bg-border" />
+            {[
+              ["Turns", String(totalTurns)],
+              ["Tokens", totalTokens > 0 ? totalTokens.toLocaleString() : "—"],
+              ["Latency", formatLatencyMs(lastLatencyMs)],
+              ["Est. cost", formatCost(totalCost)],
+            ].map(([label, value]) => (
+              <div key={label} className="flex items-baseline gap-1.5">
+                <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">{label}</span>
+                <span className="font-mono text-[11.5px] tabular-nums">{value}</span>
+              </div>
+            ))}
+            {onOpenSessionDetail && (
+              <button
+                type="button"
+                onClick={() => onOpenSessionDetail(activeSessionId)}
+                className="ml-auto text-[11.5px] text-primary hover:underline"
+              >
+                Logs &amp; traces →
+              </button>
+            )}
+          </div>
+        )}
+
+        <div className="flex min-h-[360px] flex-1 flex-col gap-5 p-5">
+          {!hasTranscript ? (
+            <EmptyState agentName={agentName} onSeed={(text) => setPrompt(text)} />
+          ) : (
+            <>
+              {historicalInvocations.map((inv) => (
+                <div key={inv.invocation_id} className="flex flex-col gap-5">
+                  {inv.prompt_text && (
+                    <UserBubble text={inv.prompt_text} timestamp={inv.created_at ? formatTimestamp(inv.created_at, timezone) : undefined} currentUserId={activeSessionRecord?.user_id ?? undefined} />
+                  )}
+                  <div className="flex max-w-[760px] flex-col gap-2">
+                    <AgentAttribution agentName={agentName} />
+                    <div className="text-[13.5px] leading-[1.65] text-pretty">
+                      {inv.status === "error" ? (
+                        <span className="text-destructive">{inv.error_message ?? "This invocation failed."}</span>
+                      ) : inv.response_text ? (
+                        <MarkdownBlock text={inv.response_text} />
+                      ) : (
+                        <span className="italic text-muted-foreground">Not captured</span>
+                      )}
+                    </div>
+                    <TurnFooter text={inv.response_text ?? undefined} />
+                  </div>
+                </div>
+              ))}
+
+              {hasLiveTurn && (
+                <div className="flex flex-col gap-5">
+                  {lastPrompt && <UserBubble text={lastPrompt} timestamp="just now" currentUserId={currentUserId} />}
+                  <div className="flex max-w-[760px] flex-col gap-2">
+                    <AgentAttribution agentName={agentName} modelLabel={currentModelName || undefined} />
+                    <div className="text-[13.5px] leading-[1.65] text-pretty">
+                      <LiveTurnBody agentId={agentId} segments={segments} isStreaming={isStreaming} />
+                    </div>
+                    {!isStreaming && sessionEnd && (
+                      <TurnFooter text={streamedText} />
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {error && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/[0.06] p-3 text-sm text-destructive">
+              <p>{error}</p>
+              {rawError && rawError !== error && (
+                <details className="mt-1 text-xs">
+                  <summary className="cursor-pointer text-muted-foreground hover:text-foreground">Show details</summary>
+                  <pre className="mt-1 whitespace-pre-wrap rounded bg-muted p-2 font-mono text-xs text-muted-foreground">{rawError}</pre>
+                </details>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* composer */}
+        <div className="p-4 pt-0">
+          <form onSubmit={handleSubmit}>
+            <div className="flex flex-col rounded-xl border bg-card transition-shadow focus-within:shadow-[0_0_0_3px_var(--color-primary)]/[0.08] focus-within:ring-[3px] focus-within:ring-primary/[0.08]">
+              <Textarea
+                placeholder={hasTranscript ? "Ask a follow-up…" : "Enter your prompt…"}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    if (prompt.trim() && !isStreaming) handleSubmit(e);
+                  }
+                }}
+                rows={2}
+                className="resize-none rounded-b-none border-0 bg-transparent shadow-none focus-visible:ring-0"
+              />
+              <div className="flex items-center gap-2 rounded-b-xl border-t bg-muted px-2.5 py-2">
+                <div className="relative flex items-center gap-2" ref={connectorsRef}>
+                  {connectors.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowConnectors((v) => !v)}
+                      className="flex items-center gap-1.5 rounded-md border bg-card px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+                      title="Connectors"
+                    >
+                      <Plug className="h-3 w-3" />
+                      Connectors
+                      {enabledConnectors.size > 0 && <span className="font-mono text-[10px] text-success">{enabledConnectors.size}</span>}
+                    </button>
+                  )}
+                  {hasObo && !oboWarning && (
+                    <span
+                      className="flex items-center gap-1 rounded-md border border-primary/20 bg-primary/[0.06] px-1.5 py-1 text-[10px] text-primary"
+                      title={`User identity will be delegated to: ${oboConnectorNames.join(", ")}`}
+                    >
+                      <UserCheck className="h-3 w-3" />
+                      Identity delegated
+                    </span>
+                  )}
+                  {oboWarning && (
+                    <span className="flex items-center gap-1 rounded-md border border-warning/30 bg-warning-bg px-1.5 py-1 text-[10px] text-warning" title="OBO delegation requires a user token.">
+                      <AlertTriangle className="h-3 w-3" />
+                      Auth required
+                    </span>
+                  )}
+                  {showConnectors && (() => {
+                    const deployTimeConnectors = connectors.filter((c) => mcpNames.includes(c.name));
+                    const invokeTimeConnectors = connectors.filter((c) => !mcpNames.includes(c.name));
+                    return (
+                      <div className="absolute bottom-9 left-0 z-50 w-72 rounded-lg border bg-card py-1 shadow-md">
+                        {invokeTimeConnectors.length > 0 && (
+                          <>
+                            <div className="px-3 py-1.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">Additional tools</div>
+                            {invokeTimeConnectors.map((c) => {
+                              const isEnabled = enabledConnectors.has(c.id);
+                              const needsKey = c.auth_type === "api_key" && !c.has_user_api_key;
+                              const isConnected = c.auth_type === "none" || (c.auth_type === "api_key" && c.has_user_api_key);
+                              return (
+                                <div key={c.id} className="flex items-center justify-between px-3 py-2 text-xs hover:bg-accent">
+                                  <button type="button" onClick={() => toggleConnector(c)} className="flex min-w-0 flex-1 items-center gap-2">
+                                    <span className="truncate" title={c.name}>{c.name}</span>
+                                    {needsKey && <KeyRound className="h-3 w-3 shrink-0 text-warning" />}
+                                  </button>
+                                  <div className="flex shrink-0 items-center gap-1.5">
+                                    {isConnected && c.auth_type !== "none" && (
+                                      <button type="button" onClick={(e) => { e.stopPropagation(); void disconnectConnector(c); }} className="text-muted-foreground/50 hover:text-destructive">
+                                        <Unplug className="h-3 w-3" />
+                                      </button>
+                                    )}
+                                    <button type="button" onClick={() => toggleConnector(c)}>
+                                      <div className={`relative h-4 w-7 rounded-full transition-colors ${isEnabled ? "bg-success" : "bg-muted-foreground/30"}`}>
+                                        <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${isEnabled ? "translate-x-3.5" : "translate-x-0.5"}`} />
+                                      </div>
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </>
+                        )}
+                        {deployTimeConnectors.length > 0 && (
+                          <>
+                            <div className="mt-1 border-t px-3 py-1.5 pt-1.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">Built-in tools</div>
+                            {deployTimeConnectors.map((c) => (
+                              <div key={c.id} className="flex items-center justify-between px-3 py-2 text-xs opacity-70">
+                                <span className="truncate">{c.name}</span>
+                                <div className="relative h-4 w-7 cursor-not-allowed rounded-full bg-success/60" title="Attached at deploy time">
+                                  <div className="absolute top-0.5 h-3 w-3 translate-x-3.5 rounded-full bg-white shadow-sm" />
+                                </div>
+                              </div>
+                            ))}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })()}
+                  {apiKeyDialog && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+                      <div className="w-96 space-y-3 rounded-lg border bg-card p-4 shadow-lg">
+                        <div className="text-sm font-medium">API key for {apiKeyDialog.serverName}</div>
+                        <p className="text-xs text-muted-foreground">Enter your personal API key to connect to this MCP server.</p>
+                        <input
+                          type="password"
+                          value={apiKeyInput}
+                          onChange={(e) => setApiKeyInput(e.target.value)}
+                          placeholder="Enter your API key"
+                          onKeyDown={(e) => { if (e.key === "Enter") void handleSaveApiKey(); }}
+                          className="h-9 w-full rounded-md border bg-input-bg px-3 text-sm"
+                        />
+                        <div className="flex justify-end gap-2">
+                          <Button type="button" size="sm" variant="ghost" onClick={() => { setApiKeyDialog(null); setApiKeyInput(""); }}>Cancel</Button>
+                          <Button type="button" size="sm" onClick={() => void handleSaveApiKey()} disabled={!apiKeyInput.trim() || savingApiKey}>
+                            {savingApiKey ? "Saving..." : "Save"}
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div className="ml-auto flex items-center gap-2">
+                  <span className="font-mono text-[10.5px] text-muted-foreground">⏎ to send</span>
+                  {isStreaming ? (
+                    <Button type="button" size="icon" variant="ghost" className="h-7 w-7" onClick={onCancel} title="Stop">
+                      <Square className="h-3.5 w-3.5" />
+                    </Button>
+                  ) : (
+                    <Button type="submit" size="icon" className="h-7 w-7" disabled={!prompt.trim()} title="Send">
+                      <Send className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </form>
+        </div>
+      </Card>
+
+      {/* rail */}
+      <div className="flex flex-col gap-3.5">
+        <Card className="gap-3.5 py-4">
+          <CardContent className="flex flex-col gap-3.5">
+            <div className="text-[13px] font-semibold">Run configuration</div>
+
             {qualifiers.length > 0 && (
-              <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">Endpoint</Label>
+              <div className="flex flex-col gap-1.5">
+                <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Endpoint</span>
                 <Select value={qualifier} onValueChange={handleQualifierChange}>
-                  <SelectTrigger className="w-48">
+                  <SelectTrigger size="sm" className="w-full font-mono text-xs">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {qualifiers.map((q) => (
-                      <SelectItem key={q} value={q}>
-                        {q}
-                      </SelectItem>
+                    {qualifiers.map((q) => <SelectItem key={q} value={q}>{q}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            {filteredModels.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Model</span>
+                <Select value={selectedModel || modelId || ""} onValueChange={(v) => setSelectedModel(v === modelId ? (modelId ?? "") : v)}>
+                  <SelectTrigger size="sm" className="w-full text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {groupedModels.map(([group, models]) => (
+                      <SelectGroup key={group}>
+                        <SelectLabel>{group}</SelectLabel>
+                        {models.map((m) => (
+                          <SelectItem key={m.model_id} value={m.model_id}>
+                            {m.display_name}{m.model_id === modelId ? " (default)" : ""}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
             )}
-            <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">Session Identifier</Label>
-              <Select value={selectedSession} onValueChange={(v) => { userPickedRef.current = true; setSelectedSession(v); }}>
-                <SelectTrigger className="w-80">
-                  <SelectValue placeholder="New session" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NEW_SESSION}>New session</SelectItem>
-                  {matchingSessions.map((s) => (
-                    <SelectItem key={s.session_id} value={s.session_id}>
-                      <span className="font-mono text-xs">{s.session_id}</span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
+
+            <div className="flex flex-col gap-1.5">
               <div className="flex items-center gap-1.5">
-                <Label className="text-xs text-muted-foreground">Credential</Label>
+                <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Credential</span>
                 {(linkStatus === "linked" || linkStatus === "same-idp") && (
                   <>
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500" title={linkStatus === "same-idp" ? "Same identity provider" : "Account linked"} />
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-success" title={linkStatus === "same-idp" ? "Same identity provider" : "Account linked"} />
                     {linkStatus === "linked" && (
-                      <button
-                        type="button"
-                        onClick={() => void handleUnlinkAccount()}
-                        className="text-muted-foreground/50 hover:text-destructive transition-colors"
-                        title="Unlink account"
-                      >
+                      <button type="button" onClick={() => void handleUnlinkAccount()} className="text-muted-foreground/50 hover:text-destructive" title="Unlink account">
                         <Unplug className="h-3 w-3" />
                       </button>
                     )}
                   </>
                 )}
               </div>
-              <div className="flex items-center gap-4">
               <Select value={selectedCredential} onValueChange={(v) => { setSelectedCredential(v); if (v !== MANUAL_TOKEN) setBearerToken(""); }}>
-                <SelectTrigger className="w-96">
+                <SelectTrigger size="sm" className="w-full text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   {authorizerName ? (
                     <>
-                      {linkStatus === "linked" && (
-                        <SelectItem value={LINKED_TOKEN}>{authorizerName} / linked user token</SelectItem>
-                      )}
-                      {linkStatus === "same-idp" && (
-                        <SelectItem value={USER_TOKEN}>{authorizerName} / current user&apos;s token</SelectItem>
-                      )}
-                      {!isExternalIdp && (
-                        <SelectItem value={USER_TOKEN}>{authorizerName} / current user&apos;s token</SelectItem>
-                      )}
+                      {linkStatus === "linked" && <SelectItem value={LINKED_TOKEN}>{authorizerName} / linked user token</SelectItem>}
+                      {linkStatus === "same-idp" && <SelectItem value={USER_TOKEN}>{authorizerName} / current user&apos;s token</SelectItem>}
+                      {!isExternalIdp && <SelectItem value={USER_TOKEN}>{authorizerName} / current user&apos;s token</SelectItem>}
                       {allCredentials.map((c) => (
-                        <SelectItem key={c.id} value={String(c.id)}>
-                          {c.authorizer_name} / {c.label}
-                        </SelectItem>
+                        <SelectItem key={c.id} value={String(c.id)}>{c.authorizer_name} / {c.label}</SelectItem>
                       ))}
                       <SelectItem value={MANUAL_TOKEN}>{authorizerName} / manual token</SelectItem>
                       {isExternalIdp && !credentialsLoaded && allCredentials.length === 0 && (
@@ -507,283 +915,98 @@ export function InvokePanel({ agentId, qualifiers, sessions, isStreaming, modelI
                 </SelectContent>
               </Select>
               {resolvedAuthorizerId && linkStatus === "unlinked" && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="flex items-center gap-1.5 h-9"
-                  onClick={() => void handleLinkAccount()}
-                >
-                  <Link2 className="h-3.5 w-3.5" />
-                  Link Account
+                <Button type="button" size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={() => void handleLinkAccount()}>
+                  <Link2 className="h-3 w-3" />Link account
                 </Button>
               )}
               {resolvedAuthorizerId && linkStatus === "linking" && (
                 <span className="text-xs text-muted-foreground">Linking...</span>
               )}
-              </div>
-            </div>
-            {selectedCredential === MANUAL_TOKEN && (
-              <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">Bearer Token</Label>
-                <Input
+              {selectedCredential === MANUAL_TOKEN && (
+                <input
                   type="password"
                   placeholder="Paste bearer token..."
                   value={bearerToken}
                   onChange={(e) => setBearerToken(e.target.value)}
-                  className="w-80"
+                  className="h-8 w-full rounded-md border bg-input-bg px-2.5 text-xs"
                 />
-              </div>
-            )}
-          </div>
+              )}
+            </div>
 
-          {/* Chat-style input box */}
-      <div className="rounded-xl border bg-background shadow-sm">
-        <Textarea
-          placeholder="Enter your prompt..."
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              if (prompt.trim() && !isStreaming) handleSubmit(e);
-            }
-          }}
-          rows={3}
-          className="resize-none border-0 shadow-none focus-visible:ring-0 rounded-none rounded-t-xl"
-        />
-        <div className="flex items-center justify-between px-3 py-2 bg-background rounded-b-xl">
-          {/* Left: Connectors */}
-          <div className="relative flex items-center gap-2" ref={connectorsRef}>
-            {connectors.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setShowConnectors((v) => !v)}
-                className="flex items-center gap-1 text-xs text-muted-foreground rounded-md border px-2 py-1 hover:text-foreground hover:border-foreground/30 cursor-pointer"
-                title="Connectors"
-              >
-                <Plug className="h-3 w-3" />
-                <span>Connectors</span>
-                {enabledConnectors.size > 0 && (
-                  <span className="ml-0.5 text-[10px] text-green-600 dark:text-green-400">{enabledConnectors.size}</span>
-                )}
-              </button>
-            )}
-            {hasObo && !oboWarning && (
-              <span
-                className="flex items-center gap-1 text-[10px] text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-900 rounded-md px-1.5 py-1"
-                title={`User identity will be delegated to: ${oboConnectorNames.join(", ")}`}
-              >
-                <UserCheck className="h-3 w-3" />
-                User identity delegated
-              </span>
-            )}
-            {oboWarning && (
-              <span
-                className="flex items-center gap-1 text-[10px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-900 rounded-md px-1.5 py-1"
-                title="OBO delegation requires a user token — select a user credential to invoke."
-              >
-                <AlertTriangle className="h-3 w-3" />
-                OBO requires authentication
-              </span>
-            )}
-            {showConnectors && (() => {
-              const deployTimeConnectors = connectors.filter((c) => mcpNames.includes(c.name));
-              const invokeTimeConnectors = connectors.filter((c) => !mcpNames.includes(c.name));
-              return (
-              <div className="absolute bottom-8 left-0 z-50 w-72 rounded-lg border bg-background shadow-md py-1">
-                {invokeTimeConnectors.length > 0 && (
-                  <>
-                    <div className="px-3 py-1.5 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-                      Additional Available Tools
+            {(memoryNames.length > 0 || mcpNames.length > 0) && (
+              <>
+                <div className="h-px bg-border" />
+                <div className="flex flex-col gap-2.5">
+                  {memoryNames.length > 0 && (
+                    <div className="flex items-center justify-between gap-2.5">
+                      <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Memory</span>
+                      <span className="truncate font-mono text-[11.5px]">{memoryNames.join(", ")}</span>
                     </div>
-                    {invokeTimeConnectors.map((c) => {
-                      const isEnabled = enabledConnectors.has(c.id);
-                      const needsKey = c.auth_type === "api_key" && !c.has_user_api_key;
-                      const isConnected = c.auth_type === "none" || (c.auth_type === "api_key" && c.has_user_api_key);
-                      return (
-                        <div
-                          key={c.id}
-                          className="flex items-center justify-between px-3 py-2 text-xs hover:bg-accent transition-colors"
-                        >
-                          <button
-                            type="button"
-                            onClick={() => toggleConnector(c)}
-                            className="flex items-center gap-2 min-w-0 flex-1"
-                          >
-                            <span className="truncate" title={c.name}>{c.name}</span>
-                            {needsKey && (
-                              <span className="flex items-center gap-0.5 text-amber-500 shrink-0">
-                                <KeyRound className="h-3 w-3" />
-                              </span>
-                            )}
-                            {c.auth_type === "oauth2" && !isEnabled && (
-                              <span className="text-[10px] text-muted-foreground shrink-0">OAuth2</span>
-                            )}
-                          </button>
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            {isConnected && c.auth_type !== "none" && (
-                              <button
-                                type="button"
-                                onClick={(e) => { e.stopPropagation(); void disconnectConnector(c); }}
-                                className="text-muted-foreground/50 hover:text-destructive transition-colors"
-                                title={`Disconnect ${c.name}`}
-                              >
-                                <Unplug className="h-3 w-3" />
-                              </button>
-                            )}
-                            <button type="button" onClick={() => toggleConnector(c)}>
-                              <div
-                                className={`relative w-7 h-4 rounded-full transition-colors ${
-                                  isEnabled ? "bg-green-500" : "bg-muted-foreground/30"
-                                }`}
-                              >
-                                <div
-                                  className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
-                                    isEnabled ? "translate-x-3.5" : "translate-x-0.5"
-                                  }`}
-                                />
-                              </div>
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </>
-                )}
-                {deployTimeConnectors.length > 0 && (
-                  <>
-                    <div className="px-3 py-1.5 text-[10px] font-medium text-muted-foreground uppercase tracking-wider border-t mt-1 pt-1.5">
-                      Built-in Tools
+                  )}
+                  {mcpNames.length > 0 && (
+                    <div className="flex items-center justify-between gap-2.5">
+                      <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">MCP</span>
+                      <span className="truncate font-mono text-[11.5px]">{mcpNames.join(", ")}</span>
                     </div>
-                    {deployTimeConnectors.map((c) => (
-                      <div
-                        key={c.id}
-                        className="flex items-center justify-between px-3 py-2 text-xs opacity-70"
-                      >
-                        <span className="flex items-center gap-2 min-w-0 flex-1">
-                          <span className="truncate" title={c.name}>{c.name}</span>
-                        </span>
-                        <div
-                          className="relative w-7 h-4 rounded-full bg-green-500/60 cursor-not-allowed"
-                          title="Attached at deploy time"
-                        >
-                          <div className="absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm translate-x-3.5" />
-                        </div>
-                      </div>
-                    ))}
-                  </>
-                )}
-              </div>
-              );
-            })()}
-            {apiKeyDialog && (
-              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-                <div className="w-96 rounded-lg border bg-background shadow-lg p-4 space-y-3">
-                  <div className="text-sm font-medium">
-                    API Key for {apiKeyDialog.serverName}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Enter your personal API key to connect to this MCP server.
-                  </p>
-                  <Input
-                    type="password"
-                    value={apiKeyInput}
-                    onChange={(e) => setApiKeyInput(e.target.value)}
-                    placeholder="Enter your API key"
-                    onKeyDown={(e) => { if (e.key === "Enter") void handleSaveApiKey(); }}
-                  />
-                  <div className="flex justify-end gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => { setApiKeyDialog(null); setApiKeyInput(""); }}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={() => void handleSaveApiKey()}
-                      disabled={!apiKeyInput.trim() || savingApiKey}
-                    >
-                      {savingApiKey ? "Saving..." : "Save"}
-                    </Button>
-                  </div>
+                  )}
                 </div>
-              </div>
+              </>
             )}
-          </div>
+          </CardContent>
+        </Card>
 
-          {/* Right: Model picker + Send/Cancel */}
-          <div className="flex items-center gap-2">
-            {filteredModels.length > 0 && (
-              <div className="relative" ref={modelPickerRef}>
-                <button
-                  type="button"
-                  onClick={() => { if (filteredModels.length > 1) setShowModelPicker((v) => !v); }}
-                  className={`flex items-center gap-1 text-xs text-muted-foreground rounded-md border px-2 py-1 ${
-                    filteredModels.length > 1 ? "hover:text-foreground hover:border-foreground/30 cursor-pointer" : "cursor-default"
-                  }`}
-                >
-                  <span>{currentModelName}</span>
-                  {filteredModels.length > 1 && <ChevronDown className="h-3 w-3" />}
+        <Card className="gap-2.5 py-4">
+          <CardContent className="flex flex-col gap-2.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[13px] font-semibold">Sessions</span>
+              <Badge variant="outline" className="text-[11px] px-1.5 py-0 font-mono">{sessions.length}</Badge>
+              {sortedSessions.length > RAIL_SESSION_COUNT && (
+                <button type="button" onClick={() => setShowAllSessions((v) => !v)} className="ml-auto text-[11.5px] text-primary hover:underline">
+                  {showAllSessions ? "Show less" : "View all"}
                 </button>
-                {showModelPicker && (
-                  <div className="absolute bottom-7 right-0 z-50 w-56 rounded-lg border bg-background shadow-md py-1 max-h-64 overflow-y-auto">
-                    {groupedModels.map(([group, models]) => (
-                      <div key={group}>
-                        <div className="px-3 py-1 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-                          {group}
-                        </div>
-                        {models.map((m) => {
-                          const isDefault = m.model_id === modelId;
-                          const isSelected = selectedModel ? m.model_id === selectedModel : isDefault;
-                          return (
-                            <button
-                              type="button"
-                              key={m.model_id}
-                              onClick={() => {
-                                setSelectedModel(isDefault ? (modelId ?? "") : m.model_id);
-                                setShowModelPicker(false);
-                              }}
-                              className={`w-full text-left px-3 py-1.5 text-xs transition-colors hover:bg-accent ${
-                                isSelected ? "font-semibold text-foreground" : "text-muted-foreground"
-                              }`}
-                            >
-                              {m.display_name}
-                              {isDefault && <span className="text-[10px] opacity-60 ml-1">(default)</span>}
-                              {isSelected && !isDefault && <span className="text-[10px] opacity-60 ml-1">(selected)</span>}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ))}
+              )}
+            </div>
+            {sortedSessions.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No sessions yet.</p>
+            ) : (
+              railSessions.map((s) => {
+                const variant = statusVariant(s.live_status === "active" ? "READY" : s.live_status === "error" ? "FAILED" : s.live_status === "expired" ? null : "CREATING");
+                const isSelected = s.session_id === selectedSession;
+                return (
+                  <div
+                    key={s.session_id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => { userPickedRef.current = true; setSelectedSession(s.session_id); setLastPrompt(null); }}
+                    onKeyDown={(e) => { if (e.key === "Enter") { userPickedRef.current = true; setSelectedSession(s.session_id); setLastPrompt(null); } }}
+                    className={`flex cursor-pointer flex-col gap-1 rounded-md border px-2.5 py-2 text-left transition-colors ${isSelected ? "border-primary/30 bg-primary/[0.05]" : "hover:bg-accent/50"}`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(variant)}`} />
+                      <span className="truncate font-mono text-[11.5px]">{s.session_id.slice(0, 16)}</span>
+                      <span className="shrink-0 font-mono text-[10px] tracking-wide uppercase text-muted-foreground">{s.live_status}</span>
+                      {onOpenSessionDetail && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); onOpenSessionDetail(s.session_id); }}
+                          className="ml-auto shrink-0 text-[10.5px] text-primary hover:underline"
+                        >
+                          open
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 font-mono text-[10.5px] text-muted-foreground">
+                      <span>{s.invocations.length} turn{s.invocations.length === 1 ? "" : "s"}</span>
+                      <span>·</span>
+                      <span>{formatTimestamp(s.created_at, timezone)}</span>
+                    </div>
                   </div>
-                )}
-              </div>
+                );
+              })
             )}
-            <Button
-              type="submit"
-              size="icon"
-              variant="ghost"
-              className="h-7 w-7"
-              disabled={isStreaming || !prompt.trim()}
-              title={isStreaming ? "Streaming..." : "Send"}
-            >
-              <Send className="h-4 w-4" />
-            </Button>
-            {isStreaming && (
-              <Button type="button" variant="ghost" size="icon" className="h-7 w-7" onClick={onCancel} title="Cancel stream">
-                <X className="h-4 w-4" />
-              </Button>
-            )}
-          </div>
-        </div>
+          </CardContent>
+        </Card>
       </div>
-        </form>
-      </CardContent>
-    </Card>
+    </div>
   );
 }

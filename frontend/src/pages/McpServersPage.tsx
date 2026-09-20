@@ -1,8 +1,13 @@
 import { useState, useEffect } from "react";
 import { getRegistryConfig } from "@/api/settings";
-import { LayoutGrid, TableIcon, Plus, Pencil, Trash2 } from "lucide-react";
+import { Plus, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { ViewModeToggle } from "@/components/ViewModeToggle";
+import { StatusPill } from "@/components/StatusPill";
+import { CopyField } from "@/components/CopyField";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -16,6 +21,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { trackAction } from "@/api/audit";
 import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatTimestamp } from "@/lib/format";
+import { statusVariant, statusDotClass, type BadgeVariant } from "@/lib/status";
 import { useMcpServers } from "@/hooks/useMcpServers";
 import { McpServerForm } from "@/components/McpServerForm";
 import { McpToolList } from "@/components/McpToolList";
@@ -26,16 +32,34 @@ import { SortableCardGrid, SortButton, loadSortDirection, toggleSortDirection, s
 import { SortableTableHead, sortRows } from "@/components/SortableTableHead";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
 import { RegistryActions } from "@/components/RegistryActions";
-import type { McpServer, McpServerCreateRequest } from "@/api/types";
+import type { McpServer, McpServerCreateRequest, AgentResponse } from "@/api/types";
 
 interface McpServersPageProps {
   viewMode: "cards" | "table";
   onViewModeChange: (mode: "cards" | "table") => void;
   readOnly?: boolean;
   initialSelectedId?: number | null;
+  agents?: AgentResponse[];
+  onCountChange?: (count: number) => void;
 }
 
-export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSelectedId }: McpServersPageProps) {
+function mcpHealth(status: McpServer["status"]): { label: string; variant: BadgeVariant } {
+  switch (status) {
+    case "active": return { label: "reachable", variant: "success" };
+    case "error": return { label: "unreachable", variant: "destructive" };
+    default: return { label: "inactive", variant: "neutral" };
+  }
+}
+
+function transportLabel(t: McpServer["transport_type"]): string {
+  return t === "streamable_http" ? "Streamable HTTP" : "SSE";
+}
+
+function mcpAuthLabel(t: McpServer["auth_type"]): string {
+  return t === "oauth2" ? "OAuth2" : t === "api_key" ? "API Key" : "None";
+}
+
+export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSelectedId, agents = [], onCountChange }: McpServersPageProps) {
   const { timezone } = useTimezone();
   const { user, browserSessionId } = useAuth();
   const { servers, loading, fetchServers, createServer, updateServer, deleteServer } = useMcpServers();
@@ -49,6 +73,10 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
   useEffect(() => {
     getRegistryConfig().then((c) => setRegistryEnabled(c.enabled)).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    onCountChange?.(servers.length);
+  }, [servers.length, onCountChange]);
 
   const [cardSortDir, setCardSortDir] = useState<SortDirection>(() => loadSortDirection("mcp-servers"));
   const [tableCol, setTableCol] = useState<string | null>("name");
@@ -64,6 +92,8 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
   };
 
   const selectedServer = servers.find((s) => s.id === selectedServerId) ?? null;
+
+  const dependentsOf = (serverName: string) => agents.filter((a) => a.mcp_names?.includes(serverName));
 
   const handleCreate = async (data: McpServerCreateRequest) => {
     try {
@@ -98,40 +128,67 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
   };
 
   if (selectedServer) {
+    const health = mcpHealth(selectedServer.status);
+    const dependents = dependentsOf(selectedServer.name);
     return (
-      <div className="space-y-6">
-        <div>
-          <Button variant="ghost" size="sm" onClick={() => { setSelectedServerId(null); setEditingServer(null); }} className="mb-2">
-            &larr; Back to servers
-          </Button>
-          <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold">{selectedServer.name}</h2>
-            <RegistryStatusBadge status={selectedServer.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
-            {!readOnly && (
-              <button
-                type="button"
-                onClick={() => setEditingServer(selectedServer)}
-                className="text-muted-foreground/50 hover:text-foreground transition-colors"
-                title="Edit server"
-              >
-                <Pencil className="h-3.5 w-3.5" />
-              </button>
-            )}
-            {!readOnly && registryEnabled && (
-              <RegistryActions
-                resourceType="mcp"
-                resourceId={selectedServer.id}
-                registryRecordId={selectedServer.registry_record_id}
-                registryStatus={selectedServer.registry_status}
-                onAction={() => void fetchServers()}
-              />
-            )}
+      <Tabs key={selectedServer.id} value={detailTab} onValueChange={(v) => setDetailTab(v as typeof detailTab)} className="gap-0">
+        <div className="flex flex-col gap-4 rounded-t-xl border bg-card px-6 pt-5">
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <button type="button" onClick={() => { setSelectedServerId(null); setEditingServer(null); }} className="hover:text-foreground">Integrations</button>
+            <span>/</span>
+            <button type="button" onClick={() => { setSelectedServerId(null); setEditingServer(null); }} className="hover:text-foreground">MCP servers</button>
+            <span>/</span>
+            <span className="font-mono text-foreground">{selectedServer.name}</span>
           </div>
-          {selectedServer.description && <p className="text-sm text-muted-foreground">{selectedServer.description}</p>}
+          <div className="flex items-start gap-4">
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <h1 className="truncate font-mono text-2xl font-semibold tracking-tight">{selectedServer.name}</h1>
+                <RegistryStatusBadge status={selectedServer.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
+                <StatusPill label={health.label} variant={health.variant} />
+              </div>
+              <div className="flex items-center gap-1.5 text-[13.5px] text-muted-foreground">
+                <span className="max-w-xl truncate">{selectedServer.description ?? <span className="italic">No description set.</span>}</span>
+                {!readOnly && (
+                  <button type="button" onClick={() => setEditingServer(selectedServer)} className="shrink-0 text-[11.5px] text-primary hover:underline">
+                    Edit
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              {!readOnly && registryEnabled && (
+                <RegistryActions
+                  resourceType="mcp"
+                  resourceId={selectedServer.id}
+                  registryRecordId={selectedServer.registry_record_id}
+                  registryStatus={selectedServer.registry_status}
+                  onAction={() => void fetchServers()}
+                />
+              )}
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmingDeleteId(selectedServer.id)}
+                  className="text-muted-foreground/60 transition-colors hover:text-destructive"
+                  title="Delete server"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          </div>
+          <TabsList variant="line" className="h-auto justify-start gap-5 rounded-none bg-transparent p-0">
+            <TabsTrigger value="tools" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">Tools</TabsTrigger>
+            <TabsTrigger value="access" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">Access</TabsTrigger>
+            {selectedServer.auth_type === "api_key" && (
+              <TabsTrigger value="api-key" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">API Key</TabsTrigger>
+            )}
+          </TabsList>
         </div>
 
         {editingServer && (
-          <Card>
+          <Card className="mt-4">
             <CardContent className="pt-4">
               <McpServerForm
                 onSubmit={handleUpdate}
@@ -156,50 +213,76 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
           </Card>
         )}
 
-        <div className="flex rounded-md border text-sm w-fit" role="tablist">
-          {(["tools", "access"] as const).map((tab, idx) => (
-            <button
-              key={tab}
-              type="button"
-              role="tab"
-              aria-selected={detailTab === tab}
-              className={`px-4 py-1.5 transition-colors ${
-                idx === 0 ? "rounded-l-md" : ""
-              } ${
-                idx === 1 && selectedServer.auth_type !== "api_key" ? "rounded-r-md" : ""
-              } ${
-                detailTab === tab
-                  ? "bg-primary text-primary-foreground"
-                  : "hover:bg-accent"
-              }`}
-              onClick={() => setDetailTab(tab)}
-            >
-              {tab === "tools" ? "Tools" : "Access"}
-            </button>
-          ))}
-          {selectedServer.auth_type === "api_key" && (
-            <button
-              type="button"
-              role="tab"
-              aria-selected={detailTab === "api-key"}
-              className={`px-4 py-1.5 transition-colors rounded-r-md ${
-                detailTab === "api-key"
-                  ? "bg-primary text-primary-foreground"
-                  : "hover:bg-accent"
-              }`}
-              onClick={() => setDetailTab("api-key")}
-            >
-              API Key
-            </button>
-          )}
-        </div>
-
-        {detailTab === "tools" && <McpToolList serverId={selectedServer.id} readOnly={readOnly} />}
-        {detailTab === "access" && <McpAccessControl serverId={selectedServer.id} readOnly={readOnly} />}
-        {detailTab === "api-key" && selectedServer && (
-          <McpUserApiKeyPanel serverId={selectedServer.id} hasAdminApiKey={selectedServer.has_admin_api_key} />
+        {confirmingDeleteId === selectedServer.id && (
+          <div className="mt-4 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
+            <span>Delete <span className="font-mono">{selectedServer.name}</span>? This can't be undone.</span>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setConfirmingDeleteId(null)}>Cancel</Button>
+              <Button size="sm" variant="destructive" onClick={() => void handleDelete(selectedServer.id)}>Delete</Button>
+            </div>
+          </div>
         )}
-      </div>
+
+        <TabsContent value="tools" className="grid grid-cols-1 gap-4 pt-4 lg:grid-cols-[1fr_320px]">
+          <McpToolList serverId={selectedServer.id} readOnly={readOnly} />
+          <div className="flex flex-col gap-3.5">
+            <Card className="gap-3.5 py-4">
+              <CardContent className="flex flex-col gap-3.5">
+                <span className="text-[13px] font-semibold">Connection</span>
+                <CopyField label="Endpoint" value={selectedServer.endpoint_url} />
+                <div className="flex items-center justify-between gap-2.5">
+                  <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Transport</span>
+                  <span className="font-mono text-xs">{transportLabel(selectedServer.transport_type)}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2.5">
+                  <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Auth</span>
+                  <span className="font-mono text-xs">{mcpAuthLabel(selectedServer.auth_type)}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2.5">
+                  <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Elicitation</span>
+                  <span className="font-mono text-xs">{selectedServer.supports_elicitation ? "Supported" : "Not supported"}</span>
+                </div>
+                {selectedServer.created_at && (
+                  <div className="flex items-center justify-between gap-2.5">
+                    <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Created</span>
+                    <span className="font-mono text-xs">{formatTimestamp(selectedServer.created_at, timezone)}</span>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="gap-2.5 py-4">
+              <CardHeader className="px-[18px]">
+                <div className="flex items-center gap-2">
+                  <CardTitle className="text-[13px] font-semibold">Used by</CardTitle>
+                  <Badge variant="outline" className="text-[11px] px-1.5 py-0 font-mono">{dependents.length}</Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-1.5 px-[18px]">
+                {dependents.length === 0 ? (
+                  <p className="rounded-md border border-dashed px-3 py-2.5 text-[11.5px] text-muted-foreground">No agents reference this server yet.</p>
+                ) : (
+                  <>
+                    {dependents.map((a) => (
+                      <div key={a.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 font-mono text-[11.5px]">
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(statusVariant(a.status))}`} />
+                        <span className="truncate">{a.name ?? a.runtime_id}</span>
+                      </div>
+                    ))}
+                    <p className="text-[11px] text-muted-foreground">Deleting this server may break {dependents.length === 1 ? "this agent" : "these agents"}.</p>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+        <TabsContent value="access" className="pt-4">
+          <McpAccessControl serverId={selectedServer.id} readOnly={readOnly} />
+        </TabsContent>
+        <TabsContent value="api-key" className="pt-4">
+          <McpUserApiKeyPanel serverId={selectedServer.id} hasAdminApiKey={selectedServer.has_admin_api_key} />
+        </TabsContent>
+      </Tabs>
     );
   }
 
@@ -207,33 +290,12 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
     <div className="space-y-6">
       <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-lg font-semibold">MCP Server Administration</h2>
+          <h2 className="text-lg font-semibold">MCP servers</h2>
           <p className="text-sm text-muted-foreground">
-            Register and manage Model Context Protocol servers for agent tool access.
+            Tool servers available to agents on this platform.
           </p>
         </div>
-        <div className="flex rounded-md border text-sm shrink-0" role="tablist">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={viewMode === "cards"}
-            className={`px-2 py-1 rounded-l-md transition-colors ${viewMode === "cards" ? "bg-primary text-primary-foreground" : "hover:bg-accent"}`}
-            onClick={() => onViewModeChange("cards")}
-            title="Card view"
-          >
-            <LayoutGrid className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={viewMode === "table"}
-            className={`px-2 py-1 rounded-r-md transition-colors ${viewMode === "table" ? "bg-primary text-primary-foreground" : "hover:bg-accent"}`}
-            onClick={() => onViewModeChange("table")}
-            title="Table view"
-          >
-            <TableIcon className="h-3.5 w-3.5" />
-          </button>
-        </div>
+        <ViewModeToggle viewMode={viewMode} onViewModeChange={onViewModeChange} />
       </div>
 
       <div className="flex items-center justify-between">
@@ -245,7 +307,6 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
           {!readOnly && (
             <Button
               size="sm"
-              variant="outline"
               onClick={() => setShowAddForm(!showAddForm)}
             >
               <Plus className="h-3.5 w-3.5 mr-1" />
@@ -284,81 +345,99 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
           storageKey="mcp-servers"
           sortDirection={cardSortDir}
           onSortDirectionChange={(d) => { if (d) { setCardSortDir(d); saveSortDirection("mcp-servers", d); } }}
-          renderItem={(server) => (
-            <Card
-              className="relative cursor-pointer transition-colors hover:bg-accent/50 py-3 gap-1"
-              onClick={() => setSelectedServerId(server.id)}
-            >
-              <CardHeader className="gap-1 pb-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div className="text-sm font-medium truncate min-w-0" title={server.name}>
+          renderItem={(server) => {
+            const health = mcpHealth(server.status);
+            const dependentCount = dependentsOf(server.name).length;
+            return (
+              <Card
+                className="group relative flex h-full cursor-pointer flex-col gap-3.5 py-4 transition-colors hover:bg-accent/50"
+                onClick={() => setSelectedServerId(server.id)}
+              >
+                <CardHeader className="gap-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <CardTitle className="min-w-0 flex-1 truncate font-mono text-sm font-medium tracking-tight" title={server.name}>
                       {server.name}
-                    </div>
-                    <RegistryStatusBadge status={server.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    {!readOnly && (
-                      <>
+                    </CardTitle>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <RegistryStatusBadge status={server.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
+                      {!readOnly && (
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); setEditingServer(server); setSelectedServerId(server.id); }}
-                          className="text-muted-foreground/50 hover:text-foreground transition-colors"
+                          className="text-muted-foreground/50 opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                           title="Edit server"
                         >
                           <Pencil className="h-3.5 w-3.5" />
                         </button>
+                      )}
+                      {!readOnly && (
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); setConfirmingDeleteId(server.id); }}
-                          className="text-muted-foreground/50 hover:text-destructive transition-colors"
+                          className="text-muted-foreground/50 opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100"
                           title="Delete server"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-2 text-xs text-muted-foreground">
-                <div className="rounded border bg-input-bg p-3 space-y-0.5">
-                  <div className="truncate" title={server.endpoint_url}><span className="text-muted-foreground/70">Endpoint:</span> {server.endpoint_url}</div>
-                  <div><span className="text-muted-foreground/70">Transport:</span> {server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</div>
-                  <div><span className="text-muted-foreground/70">Authentication:</span> {server.auth_type === "oauth2" ? "OAuth2" : server.auth_type === "api_key" ? "API Key" : "None"}</div>
-                  <div><span className="text-muted-foreground/70">Elicitation:</span> {server.supports_elicitation ? "Supported" : "Not supported"}</div>
-                  {server.created_at && (
-                    <div><span className="text-muted-foreground/70">Created:</span> {formatTimestamp(server.created_at, timezone)}</div>
-                  )}
-                </div>
-                {confirmingDeleteId === server.id && (
-                  <div
-                    className="absolute inset-x-0 bottom-0 rounded-b-lg border-t bg-card px-4 py-2"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <div className="flex items-center justify-end gap-2">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-6 text-xs"
-                        onClick={() => setConfirmingDeleteId(null)}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        className="h-6 text-xs"
-                        onClick={() => void handleDelete(server.id)}
-                      >
-                        Confirm
-                      </Button>
+                      )}
                     </div>
                   </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
+                </CardHeader>
+                <CardContent className="flex flex-1 flex-col gap-3.5">
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <CopyField value={server.endpoint_url} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-2.5 text-xs">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Transport</span>
+                      <span className="truncate">{transportLabel(server.transport_type)}</span>
+                    </div>
+                    <div className="flex flex-col gap-0.5">
+                      <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Auth</span>
+                      <span className="truncate">{mcpAuthLabel(server.auth_type)}</span>
+                    </div>
+                    <div className="flex flex-col gap-0.5">
+                      <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Elicitation</span>
+                      <span className="truncate">{server.supports_elicitation ? "Supported" : "Not supported"}</span>
+                    </div>
+                  </div>
+                  <div className="mt-auto flex items-center gap-2 border-t pt-3 text-[11px] text-muted-foreground">
+                    <span className="flex items-center gap-1.5">
+                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(health.variant)}`} />
+                      {health.label}
+                    </span>
+                    <span className="h-2.5 w-px bg-border" />
+                    <span>{dependentCount} agent{dependentCount === 1 ? "" : "s"}</span>
+                  </div>
+                  {confirmingDeleteId === server.id && (
+                    <div
+                      className="absolute inset-x-0 bottom-0 rounded-b-lg border-t bg-card px-4 py-2"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="flex items-center justify-end gap-2">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 text-xs"
+                          onClick={() => setConfirmingDeleteId(null)}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          className="h-6 text-xs"
+                          onClick={() => void handleDelete(server.id)}
+                        >
+                          Confirm
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          }}
         />
       ) : (
         <div className="rounded-md border overflow-hidden">
@@ -389,8 +468,8 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
                 >
                   <TableCell className="font-medium text-sm">{server.name}</TableCell>
                   <TableCell className="text-xs text-muted-foreground truncate">{server.endpoint_url}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{server.transport_type === "streamable_http" ? "Streamable HTTP" : "SSE"}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{server.auth_type === "oauth2" ? "OAuth2" : server.auth_type === "api_key" ? "API Key" : "None"}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{transportLabel(server.transport_type)}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{mcpAuthLabel(server.auth_type)}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     <RegistryStatusBadge status={server.registry_status} showUnregistered={registryEnabled} registryEnabled={registryEnabled} />
                   </TableCell>

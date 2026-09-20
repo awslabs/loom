@@ -1,58 +1,53 @@
 import { useState } from "react";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { RoleManagementPanel } from "@/components/RoleManagementPanel";
 import { AuthorizerManagementPanel } from "@/components/AuthorizerManagementPanel";
 import { PermissionRequestsPanel } from "@/components/PermissionRequestsPanel";
 import { IdentityProviderPanel } from "@/components/IdentityProviderPanel";
 import { ApprovalPolicyPanel } from "@/components/ApprovalPolicyPanel";
+import type { AgentResponse } from "@/api/types";
 
 type SecurityTab = "identity" | "roles" | "authorizers" | "permissions" | "approvals";
 
-export function SecurityAdminPage({ readOnly }: { readOnly?: boolean }) {
+export function SecurityAdminPage({ readOnly, agents = [] }: { readOnly?: boolean; agents?: AgentResponse[] }) {
   const [activeTab, setActiveTab] = useState<SecurityTab>("identity");
+  const [counts, setCounts] = useState<Partial<Record<SecurityTab, number>>>({});
+
+  const setCount = (tab: SecurityTab) => (n: number) => setCounts((prev) => (prev[tab] === n ? prev : { ...prev, [tab]: n }));
 
   const tabs: { key: SecurityTab; label: string }[] = [
-    { key: "identity", label: "Identity Providers" },
-    { key: "roles", label: "IAM Roles" },
+    { key: "identity", label: "Identity providers" },
+    { key: "roles", label: "IAM roles" },
     { key: "authorizers", label: "Authorizers" },
-    { key: "approvals", label: "Approval Policies" },
-    { key: "permissions", label: "Permission Requests" },
+    { key: "approvals", label: "Approval policies" },
+    { key: "permissions", label: "Permission requests" },
   ];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div>
-        <h2 className="text-lg font-semibold">Security Administration</h2>
-        <p className="text-sm text-muted-foreground">Manage identity providers, IAM roles, authorizer configurations, and permission requests.</p>
+        <h2 className="text-lg font-semibold">Security</h2>
+        <p className="text-sm text-muted-foreground">Identity, roles, and authorization for the platform.</p>
       </div>
 
-      <div className="flex rounded-md border text-sm w-fit" role="tablist">
-        {tabs.map((tab, i) => (
-          <button
-            key={tab.key}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === tab.key}
-            className={`px-4 py-1.5 transition-colors ${
-              i === 0 ? "rounded-l-md" : ""
-            } ${
-              i === tabs.length - 1 ? "rounded-r-md" : ""
-            } ${
-              activeTab === tab.key
-                ? "bg-primary text-primary-foreground"
-                : "hover:bg-accent"
-            }`}
-            onClick={() => setActiveTab(tab.key)}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as SecurityTab)}>
+        <TabsList variant="line" className="h-auto justify-start gap-5 rounded-none border-b bg-transparent p-0">
+          {tabs.map((tab) => (
+            <TabsTrigger key={tab.key} value={tab.key} className="gap-1.5 rounded-none px-0.5 pb-2.5 text-[13px] font-medium data-[state=active]:shadow-none">
+              {tab.label}
+              {counts[tab.key] !== undefined && (
+                <span className="rounded-md bg-muted px-1.5 py-0 font-mono text-[10px] text-muted-foreground">{counts[tab.key]}</span>
+              )}
+            </TabsTrigger>
+          ))}
+        </TabsList>
 
-      {activeTab === "identity" && <IdentityProviderPanel readOnly={readOnly} />}
-      {activeTab === "roles" && <RoleManagementPanel readOnly={readOnly} />}
-      {activeTab === "authorizers" && <AuthorizerManagementPanel readOnly={readOnly} />}
-      {activeTab === "permissions" && <PermissionRequestsPanel readOnly={readOnly} />}
-      {activeTab === "approvals" && <ApprovalPolicyPanel readOnly={readOnly} />}
+        <TabsContent value="identity" className="pt-4"><IdentityProviderPanel readOnly={readOnly} onCountChange={setCount("identity")} /></TabsContent>
+        <TabsContent value="roles" className="pt-4"><RoleManagementPanel readOnly={readOnly} agents={agents} onCountChange={setCount("roles")} /></TabsContent>
+        <TabsContent value="authorizers" className="pt-4"><AuthorizerManagementPanel readOnly={readOnly} onCountChange={setCount("authorizers")} /></TabsContent>
+        <TabsContent value="permissions" className="pt-4"><PermissionRequestsPanel readOnly={readOnly} onCountChange={setCount("permissions")} /></TabsContent>
+        <TabsContent value="approvals" className="pt-4"><ApprovalPolicyPanel readOnly={readOnly} onCountChange={setCount("approvals")} /></TabsContent>
+      </Tabs>
     </div>
   );
 }

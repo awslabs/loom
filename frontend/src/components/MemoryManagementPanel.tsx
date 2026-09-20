@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
+import { StatusPill } from "@/components/StatusPill";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Table,
   TableBody,
@@ -446,28 +447,13 @@ export function MemoryManagementPanel({ viewMode, readOnly, groupRestriction, ow
       </div>
 
       {showAddForm && (
-        <Card>
-          <CardContent className="pt-4 space-y-3">
-            <div className="flex rounded-md border text-sm w-fit" role="tablist">
-              {(["create", "import"] as const).map((tab) => (
-                <button
-                  key={tab}
-                  type="button"
-                  role="tab"
-                  aria-selected={addMode === tab}
-                  className={`px-4 py-1.5 transition-colors ${
-                    tab === "create" ? "rounded-l-md" : "rounded-r-md"
-                  } ${
-                    addMode === tab
-                      ? "bg-primary text-primary-foreground"
-                      : "hover:bg-accent"
-                  }`}
-                  onClick={() => { setAddMode(tab); resetForm(); }}
-                >
-                  {tab === "create" ? "Create" : "Import"}
-                </button>
-              ))}
-            </div>
+        <Card className="gap-0 py-0">
+          <Tabs value={addMode} onValueChange={(v) => { setAddMode(v as "create" | "import"); resetForm(); }} className="gap-0">
+            <TabsList variant="line" className="h-auto justify-start gap-5 rounded-none border-b bg-transparent px-4 pt-3.5">
+              <TabsTrigger value="create" className="rounded-none px-0.5 pb-2.5 text-[13px] font-medium data-[state=active]:shadow-none">Create</TabsTrigger>
+              <TabsTrigger value="import" className="rounded-none px-0.5 pb-2.5 text-[13px] font-medium data-[state=active]:shadow-none">Import</TabsTrigger>
+            </TabsList>
+            <TabsContent value={addMode} className="p-4 space-y-3">
 
             {addMode === "create" ? (
               <>
@@ -720,7 +706,8 @@ export function MemoryManagementPanel({ viewMode, readOnly, groupRestriction, ow
                 </div>
               </>
             )}
-          </CardContent>
+            </TabsContent>
+          </Tabs>
         </Card>
       )}
 
@@ -882,9 +869,7 @@ export function MemoryManagementPanel({ viewMode, readOnly, groupRestriction, ow
                       <TableCell className="font-medium text-sm">{mem.name}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1.5">
-                          <Badge variant={statusVariant(mem.status)} className="text-[10px] px-1.5 py-0">
-                            {mem.status}
-                          </Badge>
+                          <StatusPill label={mem.status} variant={statusVariant(mem.status)} />
                           {isTransitional(mem.status) && (
                             <>
                               <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />

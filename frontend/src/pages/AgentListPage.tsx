@@ -1,9 +1,10 @@
 import { useState, useEffect } from "react";
-import { Plus, LayoutGrid, TableIcon, X, Eye, EyeOff } from "lucide-react";
+import { Plus, X, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Table,
   TableBody,
@@ -15,6 +16,8 @@ import { MultiSelect } from "@/components/ui/multi-select";
 import { AddFilterDropdown } from "@/components/ui/add-filter-dropdown";
 import { AgentRegistrationForm } from "@/components/AgentRegistrationForm";
 import { AgentCard } from "@/components/AgentCard";
+import { ViewModeToggle } from "@/components/ViewModeToggle";
+import { StatusPill } from "@/components/StatusPill";
 import { SortableCardGrid, SortButton, loadSortDirection, toggleSortDirection, saveSortDirection, type SortDirection } from "@/components/SortableCardGrid";
 import { SortableTableHead, sortRows } from "@/components/SortableTableHead";
 import { toast } from "sonner";
@@ -86,7 +89,6 @@ export function AgentListPage({
 
 
   const showOnCardPolicies = tagPolicies.filter(tp => tp.show_on_card);
-  const showOnCardKeys = showOnCardPolicies.map(tp => tp.key);
 
   // R3: Progressive disclosure filtering
   const requiredPolicies = showOnCardPolicies.filter(tp => tp.required);
@@ -98,11 +100,6 @@ export function AgentListPage({
   // Persist filter state to localStorage
   useEffect(() => { localStorage.setItem("loom:tagFilters:agents", JSON.stringify(tagFilters)); }, [tagFilters]);
   useEffect(() => { localStorage.setItem("loom:customFilterKeys:agents", JSON.stringify(activeCustomFilterKeys)); }, [activeCustomFilterKeys]);
-
-  // R4: Custom tag show/hide toggle
-  const [showCustomTags, setShowCustomTags] = useState(() => localStorage.getItem("loom:showCustomTags") !== "false");
-  const requiredKeySet = new Set(requiredPolicies.map(tp => tp.key));
-  const effectiveShowOnCardKeys = showCustomTags ? showOnCardKeys : showOnCardKeys.filter(k => requiredKeySet.has(k));
 
   const [agentSortDir, setAgentSortDir] = useState<SortDirection>(() => loadSortDirection("builder-agents"));
   const [agentTableCol, setAgentTableCol] = useState<string | null>("name");
@@ -117,6 +114,8 @@ export function AgentListPage({
     }
   };
 
+  const [nameSearch, setNameSearch] = useState("");
+
   const filteredAgents = agents
     .filter(agent => {
       return Object.entries(tagFilters).every(([key, values]) => {
@@ -124,7 +123,9 @@ export function AgentListPage({
         return values.includes(agent.tags?.[key] ?? "");
       });
     })
-    .filter(agent => !groupRestriction || agent.tags?.["loom:group"] === groupRestriction);
+    .filter(agent => !groupRestriction || agent.tags?.["loom:group"] === groupRestriction)
+    .filter(agent => nameSearch.trim() === "" || (agent.name ?? agent.runtime_id ?? "").toLowerCase().includes(nameSearch.trim().toLowerCase()));
+  const maxAgentCost = Math.max(0, ...filteredAgents.map(a => a.cost_summary?.total_cost ?? 0));
 
   const handleRegister = async (arn: string, modelId?: string) => {
     setSubmitting(true);
@@ -175,28 +176,7 @@ export function AgentListPage({
           <h2 className="text-lg font-semibold">Agent Administration</h2>
           <p className="text-sm text-muted-foreground">Deploy new agents or import existing ones.</p>
         </div>
-        <div className="flex rounded-md border text-sm shrink-0" role="tablist">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={viewMode === "cards"}
-            className={`px-2 py-1 rounded-l-md transition-colors ${viewMode === "cards" ? "bg-primary text-primary-foreground" : "hover:bg-accent"}`}
-            onClick={() => onViewModeChange("cards")}
-            title="Card view"
-          >
-            <LayoutGrid className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={viewMode === "table"}
-            className={`px-2 py-1 rounded-r-md transition-colors ${viewMode === "table" ? "bg-primary text-primary-foreground" : "hover:bg-accent"}`}
-            onClick={() => onViewModeChange("table")}
-            title="Table view"
-          >
-            <TableIcon className="h-3.5 w-3.5" />
-          </button>
-        </div>
+        <ViewModeToggle viewMode={viewMode} onViewModeChange={onViewModeChange} />
       </div>
 
       <div className="space-y-4">
@@ -211,7 +191,6 @@ export function AgentListPage({
             <SortButton direction={agentSortDir} onClick={() => setAgentSortDir(toggleSortDirection("builder-agents", agentSortDir))} />
             <Button
               size="sm"
-              variant="outline"
               onClick={() => setShowAddForm(!showAddForm)}
               disabled={readOnly}
             >
@@ -222,47 +201,41 @@ export function AgentListPage({
         </div>
 
         {showAddForm && (
-          <Card>
-            <CardContent className="pt-4 space-y-3">
-              <div className="flex rounded-md border text-sm w-fit" role="tablist">
-                {(["deploy", "register"] as const).map((tab) => (
-                  <button
-                    key={tab}
-                    type="button"
-                    role="tab"
-                    aria-selected={activeTab === tab}
-                    className={`px-4 py-1.5 transition-colors ${
-                      tab === "deploy" ? "rounded-l-md" : "rounded-r-md"
-                    } ${
-                      activeTab === tab
-                        ? "bg-primary text-primary-foreground"
-                        : "hover:bg-accent"
-                    }`}
-                    onClick={() => setActiveTab(tab)}
-                  >
-                    {tab === "deploy" ? "Deploy" : "Import"}
-                  </button>
-                ))}
-              </div>
-
-              <AgentRegistrationForm
-                mode={activeTab}
-                onRegister={handleRegister}
-                onDeploy={onDeploy ? handleDeploy : undefined}
-                onDeployHarness={onDeployHarness ? handleDeployHarness : undefined}
-                isLoading={submitting}
-                groupRestriction={groupRestriction}
-                ownerRestriction={ownerRestriction}
-                exportAgentId={exportAgentId}
-              />
-            </CardContent>
+          <Card className="gap-0 py-0">
+            <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as BuilderTab)} className="gap-0">
+              <TabsList variant="line" className="h-auto justify-start gap-5 rounded-none border-b bg-transparent px-4 pt-3.5">
+                <TabsTrigger value="deploy" className="rounded-none px-0.5 pb-2.5 text-[13px] font-medium data-[state=active]:shadow-none">Deploy</TabsTrigger>
+                <TabsTrigger value="register" className="rounded-none px-0.5 pb-2.5 text-[13px] font-medium data-[state=active]:shadow-none">Import</TabsTrigger>
+              </TabsList>
+              <TabsContent value={activeTab} className="p-4">
+                <AgentRegistrationForm
+                  mode={activeTab}
+                  onRegister={handleRegister}
+                  onDeploy={onDeploy ? handleDeploy : undefined}
+                  onDeployHarness={onDeployHarness ? handleDeployHarness : undefined}
+                  isLoading={submitting}
+                  groupRestriction={groupRestriction}
+                  ownerRestriction={ownerRestriction}
+                  exportAgentId={exportAgentId}
+                />
+              </TabsContent>
+            </Tabs>
           </Card>
         )}
 
-        {/* Tag Filters */}
-        {showOnCardPolicies.length > 0 && agents.length > 0 && (
+        {/* Toolbar: search + tag filters */}
+        {agents.length > 0 && (
           <div className="flex flex-wrap items-end gap-3">
-            {requiredPolicies.map(tp => {
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={nameSearch}
+                onChange={(e) => setNameSearch(e.target.value)}
+                placeholder="Search by name"
+                className="h-8 w-48 pl-8 text-xs"
+              />
+            </div>
+            {showOnCardPolicies.length > 0 && requiredPolicies.map(tp => {
               const distinctValues = [...new Set(
                 agents.map(a => a.tags?.[tp.key]).filter(Boolean)
               )] as string[];
@@ -280,77 +253,63 @@ export function AgentListPage({
                 </div>
               );
             })}
-            <div className="space-y-1">
-              <div className="h-4 flex items-center">
-                <label className="text-[10px] text-muted-foreground">custom</label>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 w-[2.25rem] p-0 bg-input-bg"
-                onClick={() => {
-                  const next = !showCustomTags;
-                  setShowCustomTags(next);
-                  localStorage.setItem("loom:showCustomTags", String(next));
-                }}
-                title={showCustomTags ? "Hide custom tags" : "Show custom tags"}
-              >
-                {showCustomTags ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-              </Button>
-            </div>
-            {customPolicies.filter(p => activeCustomFilterKeys.includes(p.key)).map(tp => {
-              const distinctValues = [...new Set(
-                agents.map(a => a.tags?.[tp.key]).filter(Boolean)
-              )] as string[];
-              return (
-                <div key={tp.key} className="space-y-1">
-                  <div className="h-4 flex items-center gap-1">
-                    <label className="text-[10px] text-muted-foreground">{tp.key}</label>
-                    <button
-                      type="button"
-                      className="text-muted-foreground hover:text-foreground"
-                      onClick={() => {
-                        setActiveCustomFilterKeys(prev => prev.filter(k => k !== tp.key));
-                        setTagFilters(prev => {
-                          const next = { ...prev };
-                          delete next[tp.key];
-                          return next;
-                        });
-                      }}
-                      title="Remove filter"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
+            {showOnCardPolicies.length > 0 && (
+              <>
+                {customPolicies.filter(p => activeCustomFilterKeys.includes(p.key)).map(tp => {
+                  const distinctValues = [...new Set(
+                    agents.map(a => a.tags?.[tp.key]).filter(Boolean)
+                  )] as string[];
+                  return (
+                    <div key={tp.key} className="space-y-1">
+                      <div className="h-4 flex items-center gap-1">
+                        <label className="text-[10px] text-muted-foreground">{tp.key}</label>
+                        <button
+                          type="button"
+                          className="text-muted-foreground hover:text-foreground"
+                          onClick={() => {
+                            setActiveCustomFilterKeys(prev => prev.filter(k => k !== tp.key));
+                            setTagFilters(prev => {
+                              const next = { ...prev };
+                              delete next[tp.key];
+                              return next;
+                            });
+                          }}
+                          title="Remove filter"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                      <MultiSelect
+                        values={tagFilters[tp.key] ?? []}
+                        options={distinctValues.sort()}
+                        onChange={(v) => setTagFilters(prev => ({ ...prev, [tp.key]: v }))}
+                      />
+                    </div>
+                  );
+                })}
+                {customPolicies.filter(p => !activeCustomFilterKeys.includes(p.key)).length > 0 && (
+                  <div className="space-y-1">
+                    <div className="h-4 flex items-center">
+                      <label className="text-[10px] text-muted-foreground">custom filters</label>
+                    </div>
+                    <AddFilterDropdown
+                      options={customPolicies
+                        .filter(p => !activeCustomFilterKeys.includes(p.key))
+                        .map(p => ({ key: p.key, label: p.key }))}
+                      onSelect={(v) => setActiveCustomFilterKeys(prev => [...prev, v])}
+                    />
                   </div>
-                  <MultiSelect
-                    values={tagFilters[tp.key] ?? []}
-                    options={distinctValues.sort()}
-                    onChange={(v) => setTagFilters(prev => ({ ...prev, [tp.key]: v }))}
-                  />
-                </div>
-              );
-            })}
-            {customPolicies.filter(p => !activeCustomFilterKeys.includes(p.key)).length > 0 && (
-              <div className="space-y-1">
-                <div className="h-4 flex items-center">
-                  <label className="text-[10px] text-muted-foreground">custom filters</label>
-                </div>
-                <AddFilterDropdown
-                  options={customPolicies
-                    .filter(p => !activeCustomFilterKeys.includes(p.key))
-                    .map(p => ({ key: p.key, label: p.key }))}
-                  onSelect={(v) => setActiveCustomFilterKeys(prev => [...prev, v])}
-                />
-              </div>
+                )}
+              </>
             )}
-            {(Object.values(tagFilters).some(v => v.length > 0) || activeCustomFilterKeys.length > 0) && (
+            {(nameSearch.trim() !== "" || Object.values(tagFilters).some(v => v.length > 0) || activeCustomFilterKeys.length > 0) && (
               <Button
                 variant="ghost"
                 size="sm"
                 className="h-7 text-xs self-end"
-                onClick={() => { setTagFilters({}); setActiveCustomFilterKeys([]); }}
+                onClick={() => { setNameSearch(""); setTagFilters({}); setActiveCustomFilterKeys([]); }}
               >
-                Clear filters
+                Reset
               </Button>
             )}
             <span className="text-xs text-muted-foreground ml-auto self-end">
@@ -388,11 +347,11 @@ export function AgentListPage({
                     onDelete={onDelete}
                     onEdit={hasScope("admin:write") ? (id) => { setExportAgentId(id); setShowAddForm(true); } : undefined}
                     readOnly={readOnly}
-                    showOnCardKeys={effectiveShowOnCardKeys}
                     deleteStartTime={deleteStartTimes?.[agent.id]}
                     updateStartTime={updateStartTimes?.[agent.id]}
                     userGroups={userGroups}
                     registryEnabled={registryEnabled}
+                    maxCost={maxAgentCost}
                   />
                 )}
               />
@@ -434,9 +393,7 @@ export function AgentListPage({
                           </div>
                         </TableCell>
                         <TableCell>
-                          <Badge variant={statusVariant(agent.status)} className="text-[10px] px-1.5 py-0">
-                            {agent.status ?? "unknown"}
-                          </Badge>
+                          <StatusPill label={agent.status ?? "UNKNOWN"} variant={statusVariant(agent.status)} />
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {agent.cost_summary && agent.cost_summary.total_cost > 0

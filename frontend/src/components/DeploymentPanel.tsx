@@ -1,10 +1,13 @@
 import { useState, useEffect } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Loader2, Pencil, Check, X } from "lucide-react";
+import { Loader2, Check, X } from "lucide-react";
 import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatTimestamp } from "@/lib/format";
 import { statusVariant } from "@/lib/status";
+import { StatusPill } from "@/components/StatusPill";
+import { CopyField } from "@/components/CopyField";
 import { fetchModels } from "@/api/agents";
 import type { AgentResponse, ModelOption } from "@/api/types";
 import { groupModels } from "@/lib/models";
@@ -39,169 +42,185 @@ function sourceLabel(agent: AgentResponse): string {
   return agent.source ?? "Unknown";
 }
 
-export function DeploymentPanel({ agent, onPatchAgent }: DeploymentPanelProps) {
-  const { timezone } = useTimezone();
-  const [editingModels, setEditingModels] = useState(false);
-  const [modelsDraft, setModelsDraft] = useState<string[]>([]);
-  const [defaultModelDraft, setDefaultModelDraft] = useState<string>("");
-  const [savingModels, setSavingModels] = useState(false);
+/** Provider-labeled model chip rows, shared between the deployed (DeploymentPanel) and registered-only paths. */
+export function ModelsCard({
+  agent,
+  onPatchAgent,
+}: {
+  agent: AgentResponse;
+  onPatchAgent?: (id: number, updates: { model_id?: string; allowed_model_ids?: string[] }) => Promise<AgentResponse>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<string[]>([]);
+  const [defaultDraft, setDefaultDraft] = useState<string>("");
+  const [saving, setSaving] = useState(false);
   const [allModels, setAllModels] = useState<ModelOption[]>([]);
 
   useEffect(() => {
     fetchModels().then(setAllModels).catch(() => {});
   }, []);
 
-  const handleEditModels = () => {
-    setModelsDraft([...agent.allowed_model_ids]);
-    setDefaultModelDraft(agent.model_id ?? "");
-    setEditingModels(true);
+  const allowedIds = agent.allowed_model_ids ?? [];
+  if (allowedIds.length === 0 && !agent.model_id) return null;
+
+  const handleEdit = () => {
+    setDraft([...allowedIds]);
+    setDefaultDraft(agent.model_id ?? "");
+    setEditing(true);
   };
 
-  const handleSaveModels = async () => {
+  const handleSave = async () => {
     if (!onPatchAgent) return;
-    setSavingModels(true);
+    setSaving(true);
     try {
-      const updates: { model_id?: string; allowed_model_ids: string[] } = {
-        allowed_model_ids: modelsDraft,
-      };
-      if (defaultModelDraft && defaultModelDraft !== agent.model_id) {
-        updates.model_id = defaultModelDraft;
-      }
+      const updates: { model_id?: string; allowed_model_ids: string[] } = { allowed_model_ids: draft };
+      if (defaultDraft && defaultDraft !== agent.model_id) updates.model_id = defaultDraft;
       await onPatchAgent(agent.id, updates);
-      setEditingModels(false);
+      setEditing(false);
     } finally {
-      setSavingModels(false);
+      setSaving(false);
     }
   };
 
-  const toggleModel = (modelId: string) => {
-    if (modelId === defaultModelDraft) return;
-    setModelsDraft((prev) =>
-      prev.includes(modelId) ? prev.filter((id) => id !== modelId) : [...prev, modelId]
-    );
+  const toggle = (modelId: string) => {
+    if (modelId === defaultDraft) return;
+    setDraft((prev) => (prev.includes(modelId) ? prev.filter((id) => id !== modelId) : [...prev, modelId]));
   };
 
-  const getDisplayName = (modelId: string) =>
-    allModels.find((m) => m.model_id === modelId)?.display_name ?? modelId;
+  const shownModels = editing ? allModels : allModels.filter((m) => allowedIds.includes(m.model_id) || m.model_id === agent.model_id);
+  const grouped = groupModels(shownModels);
 
   return (
-    <div className="space-y-3">
-      {/* Allowed Models */}
-      <div className="text-xs text-muted-foreground">
-        <div className="flex items-center gap-1.5">
-          <span className="font-medium">Allowed Models:</span>
-          {!editingModels && onPatchAgent && (
-            <Button variant="ghost" size="icon" className="h-5 w-5" onClick={handleEditModels}>
-              <Pencil className="h-3 w-3" />
-            </Button>
-          )}
-        </div>
-        {editingModels ? (
-          <div className="space-y-2 mt-1">
-            <div className="space-y-1.5">
-              {groupModels(allModels).map(([group, models]) => (
-                <div key={group} className="flex flex-wrap gap-x-4 gap-y-1 items-center">
-                  <span className="text-[10px] font-medium text-muted-foreground w-16 shrink-0">{group}</span>
-                  {models.map((m) => {
-                    const isDefault = m.model_id === defaultModelDraft;
-                    const isChecked = modelsDraft.includes(m.model_id);
-                    return (
-                      <label key={m.model_id} className="flex items-center gap-1.5 text-xs cursor-pointer">
-                        <input
-                          type="checkbox"
-                          className="h-3.5 w-3.5 shrink-0"
-                          checked={isChecked}
-                          disabled={isDefault}
-                          onChange={() => toggleModel(m.model_id)}
-                        />
-                        <span>{m.display_name}</span>
-                        {isChecked && (
-                          <button
-                            type="button"
-                            onClick={() => setDefaultModelDraft(m.model_id)}
-                            className={`text-[10px] px-1 rounded ${
-                              isDefault
-                                ? "bg-primary text-primary-foreground"
-                                : "bg-accent text-muted-foreground hover:bg-accent/80"
-                            }`}
-                          >
-                            {isDefault ? "default" : "set default"}
-                          </button>
-                        )}
-                      </label>
-                    );
-                  })}
+    <Card className="gap-0 py-0">
+      <CardHeader className="flex-row items-center gap-2 border-b py-3.5 px-[18px] [.border-b]:pb-3.5">
+        <CardTitle className="text-[13.5px] font-semibold">Allowed models</CardTitle>
+        <Badge variant="outline" className="text-[11px] px-1.5 py-0 font-mono">{allowedIds.length || 1}</Badge>
+        {!editing && onPatchAgent && (
+          <button type="button" onClick={handleEdit} className="ml-auto text-[11.5px] text-primary hover:underline">
+            Edit
+          </button>
+        )}
+      </CardHeader>
+      <CardContent className="flex flex-col px-[18px] py-2">
+        {editing ? (
+          <div className="flex flex-col gap-3 py-2">
+            <p className="text-xs text-muted-foreground">Select which models users may choose at invoke time:</p>
+            <div className="flex flex-col gap-2">
+              {grouped.map(([group, models]) => (
+                <div key={group} className="grid grid-cols-[96px_1fr] items-center gap-3.5">
+                  <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">{group}</span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {models.map((m) => {
+                      const isDefault = m.model_id === defaultDraft;
+                      const isChecked = draft.includes(m.model_id);
+                      return (
+                        <label
+                          key={m.model_id}
+                          className={`flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 font-mono text-[11.5px] ${
+                            isDefault ? "border border-primary/30 bg-primary/[0.07] text-primary" : isChecked ? "border bg-muted" : "border border-dashed text-muted-foreground"
+                          }`}
+                        >
+                          <input type="checkbox" className="h-3 w-3 shrink-0" checked={isChecked} disabled={isDefault} onChange={() => toggle(m.model_id)} />
+                          {m.display_name}
+                          {isChecked && (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.preventDefault(); setDefaultDraft(m.model_id); }}
+                              className={`text-[9.5px] tracking-wide uppercase ${isDefault ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}
+                            >
+                              {isDefault ? "default" : "set default"}
+                            </button>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
                 </div>
               ))}
             </div>
-            <div className="flex gap-2">
-              <Button size="sm" className="h-6 text-xs" onClick={() => void handleSaveModels()} disabled={savingModels}>
-                <Check className="h-3 w-3 mr-1" />
-                Save
+            <div className="flex gap-2 pt-1">
+              <Button size="sm" className="h-6 text-xs" onClick={() => void handleSave()} disabled={saving}>
+                <Check className="h-3 w-3 mr-1" />Save
               </Button>
-              <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setEditingModels(false)} disabled={savingModels}>
-                <X className="h-3 w-3 mr-1" />
-                Cancel
+              <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setEditing(false)} disabled={saving}>
+                <X className="h-3 w-3 mr-1" />Cancel
               </Button>
             </div>
           </div>
         ) : (
-          <div className="mt-0.5">
-            {agent.allowed_model_ids.length > 0 ? (
-              <div className="space-y-1">
-                {groupModels(allModels.filter((m) => agent.allowed_model_ids.includes(m.model_id))).map(([group, models]) => (
-                  <div key={group} className="flex flex-wrap gap-1 items-center">
-                    <span className="text-[10px] font-medium text-muted-foreground w-16 shrink-0">{group}</span>
-                    {models.map((m) => (
-                      <Badge key={m.model_id} variant="outline" className="text-[10px] px-1.5 py-0">
-                        {m.display_name}{m.model_id === agent.model_id ? " (default)" : ""}
-                      </Badge>
-                    ))}
-                  </div>
-                ))}
+          <div className="flex flex-col">
+            {grouped.map(([group, models], i) => (
+              <div key={group} className={`grid grid-cols-[96px_1fr] items-center gap-3.5 py-3.5 ${i < grouped.length - 1 ? "border-b" : ""}`}>
+                <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">{group}</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {models.map((m) => {
+                    const isDefault = m.model_id === agent.model_id;
+                    return (
+                      <span
+                        key={m.model_id}
+                        className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-mono text-[11.5px] ${
+                          isDefault ? "border border-primary/30 bg-primary/[0.07] text-primary" : "border bg-muted text-foreground"
+                        }`}
+                      >
+                        {isDefault && <span className="h-1 w-1 rounded-full bg-primary" />}
+                        {m.display_name}
+                        {isDefault && <span className="text-[9.5px] tracking-wide">DEFAULT</span>}
+                      </span>
+                    );
+                  })}
+                </div>
               </div>
-            ) : agent.model_id ? (
-              <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-                {getDisplayName(agent.model_id)} (default)
-              </Badge>
-            ) : (
-              <span className="italic">None configured</span>
-            )}
+            ))}
           </div>
         )}
-      </div>
+      </CardContent>
+    </Card>
+  );
+}
 
-      {/* Deployed configuration details */}
-      <div className="rounded-md border bg-background p-3 space-y-1.5 text-xs text-muted-foreground">
-        <div className="flex items-center justify-between">
-          <span className="font-medium text-foreground">Deployed Configuration</span>
-          {isCreating(agent) && (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-          )}
+export function DeploymentPanel({ agent }: DeploymentPanelProps) {
+  const { timezone } = useTimezone();
+
+  return (
+    <Card className="gap-0 py-0">
+      <CardHeader className="flex-row items-center gap-2.5 border-b py-3.5 px-[18px] [.border-b]:pb-3.5">
+        <CardTitle className="text-[13.5px] font-semibold">Deployment</CardTitle>
+        <StatusPill label={agent.status ?? "UNKNOWN"} variant={statusVariant(agent.status)} />
+        {isCreating(agent) && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+        {agent.deployed_at && (
+          <span className="ml-auto font-mono text-[11px] text-muted-foreground">deployed {formatTimestamp(agent.deployed_at, timezone)}</span>
+        )}
+      </CardHeader>
+      <CardContent className="grid grid-cols-3 gap-x-5 gap-y-4 px-[18px] py-4">
+        <div className="flex flex-col gap-0.5">
+          <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Type</span>
+          <span className="text-[13px]">{sourceLabel(agent)}</span>
         </div>
-        <div>Deployment Type: {sourceLabel(agent)}</div>
-        <div className="flex items-center gap-1.5">
-          <span>Runtime Status:</span>
-          <Badge variant={statusVariant(agent.status)} className="text-[10px] px-1.5 py-0">
-            {agent.status ?? "—"}
-          </Badge>
-        </div>
-        {agent.source !== "harness" && <div>Protocol: {agent.protocol ?? "—"}</div>}
-        <div>Network: {agent.network_mode ?? "—"}</div>
-        {agent.code_interpreter_id && (
-          <div className="flex items-center gap-1.5">
-            <span>Code Interpreter:</span>
-            <Badge variant={statusVariant(agent.code_interpreter_status ?? null)} className="text-[10px] px-1.5 py-0">
-              {agent.code_interpreter_status ?? "UNKNOWN"}
-            </Badge>
-            <span className="text-[10px] text-muted-foreground/60 font-mono truncate">{agent.code_interpreter_id}</span>
+        {agent.source !== "harness" && (
+          <div className="flex flex-col gap-0.5">
+            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Protocol</span>
+            <span className="text-[13px]">{agent.protocol ?? "—"}</span>
           </div>
         )}
-        <div className="truncate">Execution Role: {agent.execution_role_arn ?? "—"}</div>
-        {agent.deployed_at && (
-          <div>Deployed: {formatTimestamp(agent.deployed_at, timezone)}</div>
+        <div className="flex flex-col gap-0.5">
+          <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Network</span>
+          <span className="text-[13px]">{agent.network_mode ?? "—"}</span>
+        </div>
+        {agent.code_interpreter_id && (
+          <div className="col-span-3 flex flex-col gap-0.5">
+            <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Code interpreter</span>
+            <div className="flex items-center gap-2">
+              <StatusPill label={agent.code_interpreter_status ?? "PROVISIONED"} variant={statusVariant(agent.code_interpreter_status ?? null)} />
+              <span className="truncate font-mono text-[12px] text-muted-foreground">{agent.code_interpreter_id}</span>
+            </div>
+          </div>
         )}
-      </div>
-    </div>
+        {agent.execution_role_arn && (
+          <div className="col-span-3">
+            <CopyField label="Execution role" value={agent.execution_role_arn} />
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

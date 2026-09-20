@@ -1,13 +1,11 @@
 """Generic OAuth2 token retrieval using client credentials grant."""
 
 import base64
-import json
 import logging
-import urllib.parse
-import urllib.request
 from typing import Any
 
-from app.services.oidc import fetch_discovery, OIDCDiscoveryError, require_https_url
+from app.services.net_guard import get_trusted_oauth_hosts, is_trusted_oauth_host, safe_post
+from app.services.oidc import fetch_discovery
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +30,12 @@ def get_oauth2_token(
     disc = fetch_discovery(discovery_url)
     token_url = disc["token_endpoint"]
 
+    if not is_trusted_oauth_host(token_url, get_trusted_oauth_hosts()):
+        raise ValueError(
+            f"Refusing to send OAuth2 client credentials to untrusted token endpoint {token_url!r} "
+            "(host is not a configured identity provider or authorizer)"
+        )
+
     credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -41,11 +45,6 @@ def get_oauth2_token(
     if scopes:
         body_params["scope"] = " ".join(scopes)
 
-    require_https_url(token_url)
-    data = urllib.parse.urlencode(body_params).encode()
-    req = urllib.request.Request(token_url, data=data, headers=headers, method="POST")
-
-    with urllib.request.urlopen(req) as resp:  # nosec B310
-        result = json.loads(resp.read().decode())
-
-    return result
+    resp = safe_post(token_url, data=body_params, headers=headers)
+    resp.raise_for_status()
+    return resp.json()

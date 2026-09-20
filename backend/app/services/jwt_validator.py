@@ -2,13 +2,12 @@
 import json
 import logging
 import time
-import urllib.request
 from typing import Any
 
 import jwt
 from jwt import algorithms as jwt_algorithms
 
-from app.services.oidc import require_https_url
+from app.services.net_guard import safe_get
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +24,10 @@ def _get_jwks(jwks_url: str) -> dict[str, Any]:
         if now - fetch_time < JWKS_CACHE_TTL:
             return keys
 
-    require_https_url(jwks_url)
     logger.info("Fetching JWKS from %s", jwks_url)
-    req = urllib.request.Request(jwks_url)
-    with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310
-        jwks = json.loads(resp.read().decode())
+    resp = safe_get(jwks_url, timeout=10)
+    resp.raise_for_status()
+    jwks = json.loads(resp.content.decode())
 
     _jwks_cache[jwks_url] = (jwks, now)
     return jwks

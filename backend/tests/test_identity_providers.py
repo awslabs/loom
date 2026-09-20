@@ -52,15 +52,15 @@ def _make_token(private_key, claims: dict, kid: str = "test-kid-1") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Fake urllib response helper
+# Fake safe_get/safe_post response helper
 # ---------------------------------------------------------------------------
 
-def _fake_urlopen_response(body: dict):
-    """Return a context-manager-compatible mock that mimics urllib.request.urlopen."""
+def _fake_response(body: dict):
+    """Return a mock mimicking the httpx.Response returned by net_guard.safe_get/safe_post."""
     mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps(body).encode()
-    mock_resp.__enter__ = lambda s: s
-    mock_resp.__exit__ = MagicMock(return_value=False)
+    mock_resp.content = json.dumps(body).encode()
+    mock_resp.json.return_value = body
+    mock_resp.raise_for_status.return_value = None
     return mock_resp
 
 
@@ -79,9 +79,9 @@ class TestOIDCDiscovery(unittest.TestCase):
         "scopes_supported": ["openid", "profile", "email"],
     }
 
-    @patch("app.services.oidc.urllib.request.urlopen")
-    def test_fetch_discovery_success(self, mock_urlopen):
-        mock_urlopen.return_value = _fake_urlopen_response(self.DISCOVERY_DOC)
+    @patch("app.services.oidc.safe_get")
+    def test_fetch_discovery_success(self, mock_safe_get):
+        mock_safe_get.return_value = _fake_response(self.DISCOVERY_DOC)
         result = fetch_discovery("https://idp.example.com")
         self.assertEqual(result["jwks_uri"], self.DISCOVERY_DOC["jwks_uri"])
         self.assertEqual(result["authorization_endpoint"], self.DISCOVERY_DOC["authorization_endpoint"])
@@ -89,17 +89,17 @@ class TestOIDCDiscovery(unittest.TestCase):
         self.assertEqual(result["scopes_supported"], ["openid", "profile", "email"])
         self.assertEqual(result["issuer"], "https://idp.example.com")
 
-    @patch("app.services.oidc.urllib.request.urlopen")
-    def test_fetch_discovery_unreachable(self, mock_urlopen):
-        mock_urlopen.side_effect = ConnectionError("Connection refused")
+    @patch("app.services.oidc.safe_get")
+    def test_fetch_discovery_unreachable(self, mock_safe_get):
+        mock_safe_get.side_effect = ConnectionError("Connection refused")
         with self.assertRaises(OIDCDiscoveryError) as ctx:
             fetch_discovery("https://unreachable.example.com")
         self.assertIn("Failed to fetch discovery document", str(ctx.exception))
 
-    @patch("app.services.oidc.urllib.request.urlopen")
-    def test_fetch_discovery_missing_fields(self, mock_urlopen):
+    @patch("app.services.oidc.safe_get")
+    def test_fetch_discovery_missing_fields(self, mock_safe_get):
         incomplete_doc = {"issuer": "https://idp.example.com"}
-        mock_urlopen.return_value = _fake_urlopen_response(incomplete_doc)
+        mock_safe_get.return_value = _fake_response(incomplete_doc)
         with self.assertRaises(OIDCDiscoveryError) as ctx:
             fetch_discovery("https://idp.example.com")
         self.assertIn("missing required fields", str(ctx.exception))
@@ -528,16 +528,17 @@ class TestGenericTokenEndpoint(unittest.TestCase):
         return auth.id, cred.id
 
     @patch("app.routers.security.get_secret", return_value="the-client-secret")
-    @patch("app.services.token.urllib.request.urlopen")
+    @patch("app.services.token.get_trusted_oauth_hosts", return_value={"idp.example.com"})
+    @patch("app.services.token.safe_post")
     @patch("app.services.token.fetch_discovery", return_value=MOCK_DISCOVERY)
-    def test_generic_token_success(self, mock_disc, mock_urlopen, mock_get_secret):
+    def test_generic_token_success(self, mock_disc, mock_safe_post, mock_trusted_hosts, mock_get_secret):
         auth_id, cred_id = self._create_authorizer_and_credential()
         token_response_body = {
             "access_token": "eyJhbGciOi...",
             "token_type": "Bearer",
             "expires_in": 3600,
         }
-        mock_urlopen.return_value = _fake_urlopen_response(token_response_body)
+        mock_safe_post.return_value = _fake_response(token_response_body)
 
         resp = self.client.post(f"/api/security/authorizers/{auth_id}/credentials/{cred_id}/token")
         self.assertEqual(resp.status_code, 200)
@@ -549,9 +550,10 @@ class TestGenericTokenEndpoint(unittest.TestCase):
         mock_disc.assert_called_once_with("https://idp.example.com")
 
     @patch("app.routers.security.get_secret", return_value="the-client-secret")
-    @patch("app.services.token.urllib.request.urlopen", side_effect=ConnectionError("refused"))
+    @patch("app.services.token.get_trusted_oauth_hosts", return_value={"idp.example.com"})
+    @patch("app.services.token.safe_post", side_effect=ConnectionError("refused"))
     @patch("app.services.token.fetch_discovery", return_value=MOCK_DISCOVERY)
-    def test_generic_token_provider_error(self, mock_disc, mock_urlopen, mock_get_secret):
+    def test_generic_token_provider_error(self, mock_disc, mock_safe_post, mock_trusted_hosts, mock_get_secret):
         auth_id, cred_id = self._create_authorizer_and_credential()
         resp = self.client.post(f"/api/security/authorizers/{auth_id}/credentials/{cred_id}/token")
         self.assertEqual(resp.status_code, 502)

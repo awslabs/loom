@@ -67,21 +67,21 @@ class TestResolveAccessToken(unittest.TestCase):
         result = resolve_access_token(1, "u1", "us-east-1", "https://issuer", "cid", "csecret")
         self.assertIsNone(result)
 
-    @patch("app.services.authorizer_linking.urllib.request.urlopen")
+    @patch("app.services.authorizer_linking.get_trusted_oauth_hosts", return_value={"idp"})
+    @patch("app.services.authorizer_linking.safe_post")
     @patch("app.services.authorizer_linking.fetch_discovery")
     @patch("app.services.authorizer_linking.get_secret")
-    def test_resolves_token(self, mock_get, mock_disc, mock_urlopen):
+    def test_resolves_token(self, mock_get, mock_disc, mock_safe_post, mock_trusted_hosts):
         mock_get.return_value = json.dumps({"refresh_token": "rt123"})
         mock_disc.return_value = {"token_endpoint": "https://idp/token", "authorization_endpoint": "https://idp/auth", "jwks_uri": "https://idp/jwks"}
 
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({
+        mock_resp.json.return_value = {
             "access_token": "at-new",
             "expires_in": 3600,
-        }).encode()
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        }
+        mock_resp.raise_for_status.return_value = None
+        mock_safe_post.return_value = mock_resp
 
         result = resolve_access_token(1, "u1", "us-east-1", "https://issuer", "cid", "csecret")
         self.assertEqual(result, "at-new")
@@ -95,20 +95,20 @@ class TestResolveAccessToken(unittest.TestCase):
 
 
 class TestExchangeCodeForTokens(unittest.TestCase):
-    @patch("app.services.authorizer_linking.urllib.request.urlopen")
+    @patch("app.services.authorizer_linking.get_trusted_oauth_hosts", return_value={"idp"})
+    @patch("app.services.authorizer_linking.safe_post")
     @patch("app.services.authorizer_linking.fetch_discovery")
-    def test_exchanges_code(self, mock_disc, mock_urlopen):
+    def test_exchanges_code(self, mock_disc, mock_safe_post, mock_trusted_hosts):
         mock_disc.return_value = {"token_endpoint": "https://idp/token", "authorization_endpoint": "https://idp/auth", "jwks_uri": "https://idp/jwks"}
 
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({
+        mock_resp.json.return_value = {
             "access_token": "at",
             "refresh_token": "rt",
             "expires_in": 3600,
-        }).encode()
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        }
+        mock_resp.raise_for_status.return_value = None
+        mock_safe_post.return_value = mock_resp
 
         result = exchange_code_for_tokens(
             discovery_url="https://issuer",

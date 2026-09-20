@@ -4,12 +4,11 @@ import base64
 import json
 import logging
 import time
-import urllib.parse
-import urllib.request
 from typing import Any
 
 from app.services.secrets import store_secret, get_secret, delete_secret
-from app.services.oidc import fetch_discovery, require_https_url
+from app.services.net_guard import get_trusted_oauth_hosts, is_trusted_oauth_host, safe_post
+from app.services.oidc import fetch_discovery
 
 logger = logging.getLogger(__name__)
 
@@ -74,13 +73,17 @@ def resolve_access_token(
         disc = fetch_discovery(discovery_url)
         token_url = disc["token_endpoint"]
 
+        if not is_trusted_oauth_host(token_url, get_trusted_oauth_hosts()):
+            raise ValueError(
+                f"Refusing to send refresh token to untrusted token endpoint {token_url!r} "
+                "(host is not a configured identity provider or authorizer)"
+            )
+
         body_params = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
             "client_id": user_client_id,
         }
-        require_https_url(token_url)
-        data = urllib.parse.urlencode(body_params).encode()
         headers: dict[str, str] = {
             "Content-Type": "application/x-www-form-urlencoded",
         }
@@ -89,14 +92,9 @@ def resolve_access_token(
                 f"{user_client_id}:{user_client_secret}".encode()
             ).decode()
             headers["Authorization"] = f"Basic {credentials}"
-        req = urllib.request.Request(
-            token_url,
-            data=data,
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310
-            result: dict[str, Any] = json.loads(resp.read().decode())
+        resp = safe_post(token_url, data=body_params, headers=headers, timeout=10)
+        resp.raise_for_status()
+        result: dict[str, Any] = resp.json()
 
         access_token = result["access_token"]
         expires_in = int(result.get("expires_in", 3600))
@@ -122,6 +120,12 @@ def exchange_code_for_tokens(
     disc = fetch_discovery(discovery_url)
     token_url = disc["token_endpoint"]
 
+    if not is_trusted_oauth_host(token_url, get_trusted_oauth_hosts()):
+        raise ValueError(
+            f"Refusing to send authorization code to untrusted token endpoint {token_url!r} "
+            "(host is not a configured identity provider or authorizer)"
+        )
+
     body_params = {
         "grant_type": "authorization_code",
         "code": code,
@@ -129,8 +133,6 @@ def exchange_code_for_tokens(
         "code_verifier": code_verifier,
         "client_id": user_client_id,
     }
-    require_https_url(token_url)
-    data = urllib.parse.urlencode(body_params).encode()
     headers: dict[str, str] = {
         "Content-Type": "application/x-www-form-urlencoded",
     }
@@ -139,11 +141,6 @@ def exchange_code_for_tokens(
             f"{user_client_id}:{user_client_secret}".encode()
         ).decode()
         headers["Authorization"] = f"Basic {credentials}"
-    req = urllib.request.Request(
-        token_url,
-        data=data,
-        headers=headers,
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310
-        return json.loads(resp.read().decode())
+    resp = safe_post(token_url, data=body_params, headers=headers, timeout=10)
+    resp.raise_for_status()
+    return resp.json()

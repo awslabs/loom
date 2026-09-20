@@ -88,14 +88,16 @@ class TestOboTokenSSRFGuardAndTokenLeak(unittest.TestCase):
         mock_post.assert_not_called()
 
     def test_legitimate_https_endpoints_still_work(self) -> None:
-        """Sanity check: the guard doesn't break the legitimate Okta OBO path."""
+        """Sanity check: the guard doesn't break the legitimate Okta OBO path
+        once auth.example.com is a deployment-trusted identity provider."""
         server = _make_server(
             oauth2_well_known_url="https://auth.example.com/.well-known/openid-configuration",
             oauth2_audience="api://downstream",
         )
         victim_token = "victim-cognito-access-token"  # nosec B105
         with patch("app.services.mcp.safe_get") as mock_safe_get, \
-             patch("app.services.mcp.safe_post") as mock_safe_post:
+             patch("app.services.mcp.safe_post") as mock_safe_post, \
+             patch("app.services.mcp.get_trusted_oauth_hosts", return_value={"auth.example.com"}):
             mock_safe_get.return_value.raise_for_status.return_value = None
             mock_safe_get.return_value.json.return_value = {
                 "token_endpoint": "https://auth.example.com/oauth2/v1/token",
@@ -107,6 +109,47 @@ class TestOboTokenSSRFGuardAndTokenLeak(unittest.TestCase):
         # Confirm the victim token was sent only to the validated https endpoint.
         _, kwargs = mock_safe_post.call_args
         self.assertEqual(kwargs["data"]["subject_token"], victim_token)
+
+    def test_untrusted_public_https_token_endpoint_blocks_before_forwarding_user_token(self) -> None:
+        """The finding's residual gap after the 1.6.1 internal-address fix:
+        a well-known document hosted on a public HTTPS server the attacker
+        controls, advertising a token_endpoint on that same (public, non-
+        internal) attacker server. safe_get/safe_post alone would allow this
+        — nothing about it is a private/metadata address — so the deployment-
+        configured-IdP allowlist is the only thing that can block it."""
+        server = _make_server(
+            oauth2_well_known_url="https://attacker.example.net/.well-known/openid-configuration",
+        )
+        victim_token = "victim-cognito-access-token"  # nosec B105
+        with patch("app.services.mcp.safe_get") as mock_safe_get, \
+             patch("app.services.mcp.safe_post") as mock_safe_post, \
+             patch("app.services.mcp.get_trusted_oauth_hosts", return_value={"auth.example.com"}):
+            mock_safe_get.return_value.raise_for_status.return_value = None
+            mock_safe_get.return_value.json.return_value = {
+                "token_endpoint": "https://attacker.example.net/collect",
+            }
+            result = _get_obo_token(server, victim_token)
+        self.assertIsNone(result)
+        mock_safe_post.assert_not_called()
+
+    def test_m2m_untrusted_public_https_token_endpoint_blocks_before_leaking_client_secret(self) -> None:
+        """Same residual gap on the client-credentials path: the MCP server's
+        own stored client_secret must not be POSTed to an untrusted public
+        token endpoint either."""
+        server = _make_server(
+            oauth2_well_known_url="https://attacker.example.net/.well-known/openid-configuration",
+            delegation_mode="m2m",
+        )
+        with patch("app.services.mcp.safe_get") as mock_safe_get, \
+             patch("app.services.mcp.safe_post") as mock_safe_post, \
+             patch("app.services.mcp.get_trusted_oauth_hosts", return_value=set()):
+            mock_safe_get.return_value.raise_for_status.return_value = None
+            mock_safe_get.return_value.json.return_value = {
+                "token_endpoint": "https://attacker.example.net/collect",
+            }
+            token = _get_oauth2_token(server)
+        self.assertIsNone(token)
+        mock_safe_post.assert_not_called()
 
 
 if __name__ == "__main__":

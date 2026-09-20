@@ -4,7 +4,14 @@ import logging
 import os
 from typing import Any
 
-from app.services.net_guard import SSRFBlockedError, guarded_post, safe_get, safe_post
+from app.services.net_guard import (
+    SSRFBlockedError,
+    get_trusted_oauth_hosts,
+    guarded_post,
+    is_trusted_oauth_host,
+    safe_get,
+    safe_post,
+)
 from app.services.secrets import get_secret
 
 logger = logging.getLogger(__name__)
@@ -33,6 +40,13 @@ def _get_oauth2_token(server: Any) -> str | None:
             logger.warning("Failed to discover token endpoint from %s: %s", server.oauth2_well_known_url, e)
 
     if not token_url:
+        return None
+
+    if not is_trusted_oauth_host(token_url, get_trusted_oauth_hosts()):
+        logger.warning(
+            "Refusing to send OAuth2 client credentials to untrusted token endpoint %s "
+            "(host is not a configured identity provider or authorizer)", token_url,
+        )
         return None
 
     try:
@@ -102,6 +116,19 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
         logger.warning("Failed to discover token endpoint from %s: %s", server.oauth2_well_known_url, e)
 
     if not token_url:
+        return None
+
+    if not is_trusted_oauth_host(token_url, get_trusted_oauth_hosts()):
+        # This is the critical check: OBO forwards the *caller's own real
+        # access token* as subject_token/assertion below. Without this,
+        # anyone who can set oauth2_well_known_url (mcp:write) could point a
+        # server's discovery response at infrastructure they control and
+        # have every invoking user's token delivered to it.
+        logger.warning(
+            "Refusing OBO token exchange with untrusted token endpoint %s "
+            "(host is not a configured identity provider or authorizer) — "
+            "the caller's access token was NOT forwarded", token_url,
+        )
         return None
 
     is_entra = "login.microsoftonline.com" in server.oauth2_well_known_url

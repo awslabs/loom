@@ -237,3 +237,65 @@ def guarded_post(
 ) -> httpx.Response:
     """SSRF-guarded POST for MCP/A2A connection targets (private addresses allowed)."""
     return _guarded_request("POST", url, json=json, headers=headers, timeout=timeout, follow_redirects=follow_redirects)
+
+
+def get_trusted_oauth_hosts() -> set[str]:
+    """Hostnames of OAuth2/OIDC providers this deployment has explicitly configured.
+
+    ``safe_get``/``safe_post`` guarantee an OAuth2 well-known/token-endpoint
+    fetch can't reach an internal or metadata address, but on their own they
+    still allow *any* public HTTPS host. That's exactly the gap client-
+    credentials (M2M) and on-behalf-of (OBO) token exchange can't tolerate:
+    the well-known URL is supplied by whoever holds ``mcp:write``/
+    ``a2a:write`` — a delegated-admin scope, not the platform's top trust
+    level — and the discovery document it returns is equally attacker-
+    influenced. Sending the resource's own ``client_secret`` (M2M) or, worse,
+    the calling user's real access token (OBO) to whatever ``token_endpoint``
+    that document names would hand either straight to an attacker-chosen
+    public server.
+
+    The resolved token endpoint must therefore also match a host this
+    deployment already trusts as an identity provider: the platform's own
+    federated-login IdP(s) (``IdentityProvider.issuer_url``) or one of the
+    authorizers a ``security:write`` admin has registered
+    (``AuthorizerConfig.discovery_url``). Both are populated only through
+    admin UI flows gated by a higher-trust scope than ``mcp:write``/
+    ``a2a:write``, so a resource admin alone can no longer redirect a token
+    exchange to infrastructure they control. Registering a brand-new
+    downstream IdP for a single MCP server/A2A agent now requires first
+    adding it as an Authorizer config (Security tab) — a deliberate one-time
+    step, not a regression: see SECURITY.md / SPECIFICATIONS.md.
+    """
+    from app.db import SessionLocal
+    from app.models.authorizer_config import AuthorizerConfig
+    from app.models.identity_provider import IdentityProvider
+
+    hosts: set[str] = set()
+    try:
+        db = SessionLocal()
+        try:
+            for (issuer_url,) in db.query(IdentityProvider.issuer_url).all():
+                host = urllib.parse.urlparse(issuer_url).hostname
+                if host:
+                    hosts.add(host.lower())
+            for (discovery_url,) in db.query(AuthorizerConfig.discovery_url).all():
+                if not discovery_url:
+                    continue
+                host = urllib.parse.urlparse(discovery_url).hostname
+                if host:
+                    hosts.add(host.lower())
+        finally:
+            db.close()
+    except Exception:
+        # Fail closed, not crashed: if the trust set can't be determined
+        # (e.g. a transient DB error), treat it as empty rather than letting
+        # an OAuth2 token exchange proceed unchecked or the request 500.
+        logger.exception("Failed to load trusted OAuth host set; treating as empty (fail closed)")
+        return set()
+    return hosts
+
+
+def is_trusted_oauth_host(url: str, trusted_hosts: set[str]) -> bool:
+    """Return True if url's hostname is (case-insensitively) in trusted_hosts."""
+    host = urllib.parse.urlparse(url).hostname
+    return bool(host) and host.lower() in trusted_hosts

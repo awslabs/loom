@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.dependencies.auth import UserInfo, require_scopes, invalidate_idp_cache
+from app.dependencies.auth import UserInfo, derive_scopes, require_scopes, invalidate_idp_cache
 from app.models.identity_provider import IdentityProvider
 from app.services.oidc import fetch_discovery, OIDCDiscoveryError
 from app.services.secrets import store_secret, delete_secret
@@ -72,6 +72,34 @@ def _run_discovery(idp: IdentityProvider) -> None:
         raise OIDCDiscoveryError(f"Unexpected error during discovery: {e}") from e
 
 
+def _assert_group_mappings_within_caller_scopes(group_mappings: dict[str, list[str]], caller: UserInfo) -> None:
+    """Reject an IdP group-mapping table that would grant scopes the caller doesn't have.
+
+    security:write alone lets an admin configure an IdP's external->internal
+    group mapping; without this check, that admin could map an attacker-
+    controlled external group name to a reserved group like g-admins-super
+    and self-escalate to full admin:write on next login through that IdP.
+    Applying the same "no delegation beyond what you hold" rule the rest of
+    the scope model uses closes this for every target group, not just the
+    reserved ones, since e.g. mapping to g-admins-mcp would equally grant
+    mcp:write the caller doesn't have. Unrecognized group names (not in
+    GROUP_SCOPES) grant no scopes on their own, so they're never blocked.
+    """
+    target_groups = {g for mapped in group_mappings.values() for g in mapped}
+    if not target_groups:
+        return
+    granted = derive_scopes(list(target_groups))
+    excess = granted - caller.scopes
+    if excess:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Group mapping would grant scopes you don't have: "
+                f"{', '.join(sorted(excess))}"
+            ),
+        )
+
+
 def _enforce_single_active(db: Session, new_idp_id: int | None, new_status: str) -> None:
     """If setting an IdP to active, deactivate all others."""
     if new_status != "active":
@@ -96,6 +124,9 @@ def create_identity_provider(
     existing = db.query(IdentityProvider).filter(IdentityProvider.name == request.name).first()
     if existing:
         raise HTTPException(status_code=409, detail="Identity provider with this name already exists")
+
+    if request.group_mappings:
+        _assert_group_mappings_within_caller_scopes(request.group_mappings, user)
 
     client_secret_arn = None
     if request.client_secret:
@@ -172,6 +203,9 @@ def update_identity_provider(
     idp = db.query(IdentityProvider).filter(IdentityProvider.id == idp_id).first()
     if not idp:
         raise HTTPException(status_code=404, detail="Identity provider not found")
+
+    if request.group_mappings:
+        _assert_group_mappings_within_caller_scopes(request.group_mappings, user)
 
     rerun_discovery = False
     for field in ("name", "provider_type", "issuer_url", "client_id", "client_type", "scopes", "audience", "group_claim_path", "status"):

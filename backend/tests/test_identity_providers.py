@@ -20,7 +20,7 @@ from app.main import app
 from app.models.identity_provider import IdentityProvider
 from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
-from app.dependencies.auth import _map_external_groups, derive_scopes
+from app.dependencies.auth import UserInfo, _map_external_groups, derive_scopes, get_current_user
 from app.services.oidc import fetch_discovery, OIDCDiscoveryError
 from app.services.jwt_validator import validate_token, _jwks_cache
 
@@ -275,6 +275,11 @@ class TestIdentityProviderCRUD(unittest.TestCase):
     def tearDownClass(cls):
         Base.metadata.drop_all(bind=cls.engine)
 
+    def _override_user(self, groups: list[str]) -> None:
+        """Override get_current_user to return a user with only the given groups' scopes."""
+        user = UserInfo(sub="test-sub", username="test-user", groups=groups, scopes=derive_scopes(groups))
+        app.dependency_overrides[get_current_user] = lambda: user
+
     def _idp_payload(self, **overrides) -> dict:
         defaults = {
             "name": "test-azure-ad",
@@ -371,6 +376,82 @@ class TestIdentityProviderCRUD(unittest.TestCase):
         resp = self.client.post("/api/settings/identity-providers", json=self._idp_payload(client_secret=None))
         self.assertEqual(resp.status_code, 422)
         self.assertIn("unreachable", resp.json()["detail"])
+
+    @patch("app.routers.identity_providers.delete_secret")
+    @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
+    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    def test_create_idp_rejects_mapping_to_reserved_super_admin_group(self, mock_disc, mock_store, mock_del):
+        """A security-scoped admin (security:write only) must not be able to
+        map an external group to g-admins-super, which would grant scopes
+        (admin:write, agent:write, memory:write, ...) they don't have."""
+        self._override_user(["t-admin", "g-admins-security"])
+        resp = self.client.post(
+            "/api/settings/identity-providers",
+            json=self._idp_payload(group_mappings={"attacker-ext-group": ["t-admin", "g-admins-super"]}),
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("admin:write", resp.json()["detail"])
+        mock_store.assert_not_called()
+
+        # Confirm nothing was persisted.
+        list_resp = self.client.get("/api/settings/identity-providers")
+        self.assertEqual(list_resp.json(), [])
+
+    @patch("app.routers.identity_providers.delete_secret")
+    @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
+    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    def test_create_idp_rejects_mapping_to_any_group_caller_lacks(self, mock_disc, mock_store, mock_del):
+        """Same rule applies to non-reserved groups: a security-scoped admin
+        cannot grant mcp:write via a mapping to g-admins-mcp either."""
+        self._override_user(["t-admin", "g-admins-security"])
+        resp = self.client.post(
+            "/api/settings/identity-providers",
+            json=self._idp_payload(group_mappings={"some-ext-group": ["g-admins-mcp"]}),
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("mcp:write", resp.json()["detail"])
+
+    @patch("app.routers.identity_providers.delete_secret")
+    @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
+    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    def test_create_idp_allows_mapping_within_caller_own_scopes(self, mock_disc, mock_store, mock_del):
+        """A security-scoped admin CAN map an external group to their own
+        group (or to a scope-free type group), since that grants nothing
+        beyond what they already hold."""
+        self._override_user(["t-admin", "g-admins-security"])
+        resp = self.client.post(
+            "/api/settings/identity-providers",
+            json=self._idp_payload(group_mappings={"corp-security-team": ["t-admin", "g-admins-security"]}),
+        )
+        self.assertEqual(resp.status_code, 201)
+
+    @patch("app.routers.identity_providers.delete_secret")
+    @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
+    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    def test_super_admin_can_still_map_to_reserved_super_admin_group(self, mock_disc, mock_store, mock_del):
+        """A genuine super-admin (holds every scope) is unaffected."""
+        self._override_user(["t-admin", "g-admins-super"])
+        resp = self.client.post(
+            "/api/settings/identity-providers",
+            json=self._idp_payload(group_mappings={"corp-admins": ["t-admin", "g-admins-super"]}),
+        )
+        self.assertEqual(resp.status_code, 201)
+
+    @patch("app.routers.identity_providers.delete_secret")
+    @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
+    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    def test_update_idp_rejects_mapping_to_reserved_super_admin_group(self, mock_disc, mock_store, mock_del):
+        """Same check applies to PUT, closing the update-path self-escalation."""
+        self._override_user(["t-admin", "g-admins-super"])
+        create_resp = self.client.post("/api/settings/identity-providers", json=self._idp_payload(group_mappings=None))
+        idp_id = create_resp.json()["id"]
+
+        self._override_user(["t-admin", "g-admins-security"])
+        resp = self.client.put(
+            f"/api/settings/identity-providers/{idp_id}",
+            json={"group_mappings": {"attacker-ext-group": ["t-admin", "g-admins-super"]}},
+        )
+        self.assertEqual(resp.status_code, 403)
 
 
 # ===================================================================

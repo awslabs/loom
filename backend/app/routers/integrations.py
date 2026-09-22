@@ -92,7 +92,7 @@ def create_integration(
     db: Session = Depends(get_db),
 ) -> IntegrationResponse:
     """Add an integration to an agent."""
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
 
     integration = Integration(
         agent_id=agent_id,
@@ -117,7 +117,7 @@ def list_integrations(
     db: Session = Depends(get_db),
 ) -> List[IntegrationResponse]:
     """List all integrations for an agent."""
-    get_agent_or_404(agent_id, db)
+    get_agent_or_404(agent_id, db, user)
     integrations = db.query(Integration).filter(
         Integration.agent_id == agent_id
     ).all()
@@ -133,7 +133,7 @@ def update_integration(
     db: Session = Depends(get_db),
 ) -> IntegrationResponse:
     """Update an integration."""
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
         Integration.agent_id == agent_id
@@ -170,7 +170,7 @@ def delete_integration(
     db: Session = Depends(get_db),
 ) -> None:
     """Delete an integration from an agent."""
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
         Integration.agent_id == agent_id

@@ -20,6 +20,7 @@ from app.models.memory import Memory
 from app.models.session import InvocationSession
 from app.models.tag_policy import TagPolicy
 from app.models.tag_profile import TagProfile
+from app.routers.utils import check_resource_group_access
 from app.services.memory import (
     create_memory as svc_create_memory,
     get_memory as svc_get_memory,
@@ -162,6 +163,18 @@ def _build_memory_response(memory: Memory, db: Session) -> MemoryResponse:
     resp = MemoryResponse(**memory.to_dict())
     resp.cost_summary = _memory_cost_summary(memory, db)
     return resp
+
+
+def _get_memory_or_404(memory_id: int, db: Session, user: UserInfo) -> Memory:
+    """Fetch a memory by ID, raise 404 if missing, 403 if outside the caller's group."""
+    memory = db.query(Memory).filter(Memory.id == memory_id).first()
+    if not memory:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Memory with id {memory_id} not found"
+        )
+    check_resource_group_access(memory, user, resource_label="memory")
+    return memory
 
 
 def _handle_aws_error(e: Exception) -> None:
@@ -468,21 +481,14 @@ def list_memories(
 @router.get("/{memory_id}", response_model=MemoryResponse)
 def get_memory(memory_id: int, user: UserInfo = Depends(require_scopes("memory:read")), db: Session = Depends(get_db)) -> MemoryResponse:
     """Get a specific memory resource by DB ID."""
-    memory = db.query(Memory).filter(Memory.id == memory_id).first()
-    if not memory:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Memory with id {memory_id} not found"
-        )
+    memory = _get_memory_or_404(memory_id, db, user)
     return _build_memory_response(memory, db)
 
 
 @router.get("/{memory_id}/export")
 def export_memory(memory_id: int, user: UserInfo = Depends(require_scopes("admin:write")), db: Session = Depends(get_db)):
     """Export memory config in create-compatible format. Super admin only."""
-    memory = db.query(Memory).filter(Memory.id == memory_id).first()
-    if not memory:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Memory with id {memory_id} not found")
+    memory = _get_memory_or_404(memory_id, db, user)
     data: dict = {
         "name": memory.name,
         "description": memory.description,
@@ -532,12 +538,7 @@ def export_memory(memory_id: int, user: UserInfo = Depends(require_scopes("admin
 @router.post("/{memory_id}/refresh", response_model=MemoryResponse)
 def refresh_memory(memory_id: int, user: UserInfo = Depends(require_scopes("memory:read")), db: Session = Depends(get_db)) -> MemoryResponse:
     """Refresh memory status from AWS."""
-    memory = db.query(Memory).filter(Memory.id == memory_id).first()
-    if not memory:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Memory with id {memory_id} not found"
-        )
+    memory = _get_memory_or_404(memory_id, db, user)
 
     # Resolve the AWS memory ID: prefer stored memory_id, fallback to ARN extraction
     aws_memory_id = memory.memory_id
@@ -593,12 +594,7 @@ def delete_memory(
     db: Session = Depends(get_db),
 ) -> MemoryResponse:
     """Delete a memory resource. When cleanup_aws=True, initiates async deletion in AWS."""
-    memory = db.query(Memory).filter(Memory.id == memory_id).first()
-    if not memory:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Memory with id {memory_id} not found"
-        )
+    memory = _get_memory_or_404(memory_id, db, user)
 
     # Enforce demo-admin group restriction
     if "g-admins-demo" in user.groups and "g-admins-super" not in user.groups:
@@ -647,12 +643,7 @@ def delete_memory(
 @router.delete("/{memory_id}/purge", status_code=status.HTTP_204_NO_CONTENT)
 def purge_memory(memory_id: int, user: UserInfo = Depends(require_scopes("memory:write")), db: Session = Depends(get_db)) -> None:
     """Remove a memory resource from the local database (no AWS call)."""
-    memory = db.query(Memory).filter(Memory.id == memory_id).first()
-    if not memory:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Memory with id {memory_id} not found"
-        )
+    memory = _get_memory_or_404(memory_id, db, user)
     db.delete(memory)
     db.commit()
 
@@ -669,12 +660,7 @@ def get_memory_records(
     Records are scoped to the requesting user's username (from JWT) as the actorId.
     Users cannot access records belonging to other actors.
     """
-    memory = db.query(Memory).filter(Memory.id == memory_id).first()
-    if not memory:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Memory with id {memory_id} not found",
-        )
+    memory = _get_memory_or_404(memory_id, db, user)
     if not memory.memory_id:
         return MemoryRecordsResponse(memory_id="", actor_id=user.username, records=[])
 

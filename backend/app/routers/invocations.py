@@ -27,6 +27,7 @@ from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
 from app.models.mcp import McpServer
 from app.models.approval_policy import ApprovalPolicy
+from app.routers.utils import check_resource_group_access
 
 from app.services.agentcore import invoke_agent, invoke_agent_ws
 from app.services.harness import invoke_harness_stream
@@ -1864,6 +1865,7 @@ def get_agent_token(
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    check_resource_group_access(agent, user, resource_label="agent")
 
     auth_config = agent.get_authorizer_config()
     if not auth_config or auth_config.get("type") != "cognito" or not auth_config.get("pool_id"):

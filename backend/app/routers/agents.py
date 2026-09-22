@@ -2925,7 +2925,7 @@ def list_agents(
 @router.get("/{agent_id}", response_model=AgentResponse)
 def get_agent(agent_id: int, user: UserInfo = Depends(require_scopes("agent:read")), db: Session = Depends(get_db)) -> AgentResponse:
     """Get metadata for a specific registered agent."""
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
     return _agent_response(agent, db)
 
 
@@ -2942,7 +2942,7 @@ def get_agent_status(
     During local build phases (before create_runtime is called), returns current
     DB state without making AWS API calls.
     """
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
 
     # Local build phases — runtime doesn't exist in AWS yet, just return DB state
     _local_phases = {"initializing", "creating_credentials", "creating_role", "building_artifact", "creating_ci_resource", "deploying"}
@@ -3088,7 +3088,7 @@ def delete_agent(
     Args:
         cleanup_aws: If True, also delete the runtime, endpoint, and IAM role from AWS.
     """
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
 
     # Enforce demo-admin group restriction
     if "g-admins-demo" in user.groups and "g-admins-super" not in user.groups:
@@ -3334,7 +3334,7 @@ def purge_agent(
     db: Session = Depends(get_db),
 ) -> None:
     """Remove an agent and its sessions/invocations from the local database (no AWS call)."""
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
     # Delete invocations before sessions to respect FK constraints
     session_ids = [
         s.session_id for s in
@@ -3350,7 +3350,7 @@ def purge_agent(
 @router.post("/{agent_id}/refresh", response_model=AgentResponse)
 def refresh_agent(agent_id: int, user: UserInfo = Depends(require_scopes("agent:write")), db: Session = Depends(get_db)) -> AgentResponse:
     """Re-fetch metadata from AgentCore and update the local record."""
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
 
     # Harness agents: refresh via get_harness
     if agent.harness_id and agent.source == "harness":
@@ -3449,7 +3449,7 @@ def refresh_agent(agent_id: int, user: UserInfo = Depends(require_scopes("agent:
 @router.post("/{agent_id}/redeploy", response_model=AgentResponse)
 def redeploy_agent_endpoint(agent_id: int, user: UserInfo = Depends(require_scopes("agent:write")), db: Session = Depends(get_db)) -> AgentResponse:
     """Redeploy an agent with its current code and config."""
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
 
     if agent.source != "deploy":
         raise HTTPException(
@@ -3506,7 +3506,7 @@ def redeploy_deploy_agent(
     Rebuilds the artifact and calls update_agent_runtime in-place so the
     existing runtime ID and ARN are preserved.
     """
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
 
     if agent.source != "deploy":
         raise HTTPException(
@@ -3661,7 +3661,7 @@ def redeploy_harness_agent(
     Uses the UpdateHarness API to modify the existing harness in-place,
     then updates the local agent record and config.
     """
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
 
     if agent.source != "harness":
         raise HTTPException(
@@ -3874,7 +3874,7 @@ def redeploy_harness_agent(
 @router.get("/{agent_id}/config", response_model=list[ConfigEntryResponse])
 def get_agent_config(agent_id: int, user: UserInfo = Depends(require_scopes("agent:read")), db: Session = Depends(get_db)) -> list[ConfigEntryResponse]:
     """Get all configuration entries for an agent. Secret values are masked."""
-    get_agent_or_404(agent_id, db)
+    get_agent_or_404(agent_id, db, user)
     entries = db.query(ConfigEntry).filter(ConfigEntry.agent_id == agent_id).all()
     result = []
     for entry in entries:
@@ -3888,7 +3888,7 @@ def get_agent_config(agent_id: int, user: UserInfo = Depends(require_scopes("age
 @router.get("/{agent_id}/export")
 def export_agent(agent_id: int, user: UserInfo = Depends(require_scopes("admin:write")), db: Session = Depends(get_db)):
     """Export agent config in form-compatible format. Super admin only."""
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
     data: dict[str, Any] = {}
 
     # Extract from AGENT_CONFIG_JSON
@@ -4034,7 +4034,7 @@ def patch_agent(
     db: Session = Depends(get_db),
 ) -> AgentResponse:
     """Update editable fields on an agent (e.g. description, model_id, allowed_model_ids)."""
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
     if "description" in request.model_fields_set:
         agent.description = request.description
         if agent.runtime_id and agent.source == "deploy":
@@ -4136,7 +4136,7 @@ def update_agent_config(
     db: Session = Depends(get_db),
 ) -> list[ConfigEntryResponse]:
     """Update configuration entries for an agent. Adds new keys and updates existing ones."""
-    get_agent_or_404(agent_id, db)
+    get_agent_or_404(agent_id, db, user)
 
     for key, value in request.config.items():
         existing = db.query(ConfigEntry).filter(
@@ -4408,7 +4408,7 @@ async def get_agent_integration(
     db: Session = Depends(get_db),
     user: dict = Depends(require_scopes("agent:read")),
 ):
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
     if agent.status != "READY":
         raise HTTPException(status_code=400, detail="Integration info is only available for agents with status READY")
     return _build_integration_info(agent, db)
@@ -4459,7 +4459,7 @@ def test_obo_exchange(
     calls ACPS ``get-resource-oauth2-token`` with
     ``oauth2Flow=ON_BEHALF_OF_TOKEN_EXCHANGE``, and returns the decoded claims.
     """
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
 
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):

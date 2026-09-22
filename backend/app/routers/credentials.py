@@ -54,7 +54,7 @@ def create_credential_provider(
     db: Session = Depends(get_db),
 ) -> CredentialProviderResponse:
     """Create a credential provider for an agent."""
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
 
     # Call AgentCore API to create the OAuth2 credential provider
     callback_url = None
@@ -98,7 +98,7 @@ def list_credential_providers(
     db: Session = Depends(get_db),
 ) -> List[CredentialProviderResponse]:
     """List all credential providers for an agent."""
-    get_agent_or_404(agent_id, db)
+    get_agent_or_404(agent_id, db, user)
     providers = db.query(CredentialProvider).filter(
         CredentialProvider.agent_id == agent_id
     ).all()
@@ -116,7 +116,7 @@ def delete_credential_provider_endpoint(
     db: Session = Depends(get_db),
 ) -> None:
     """Delete a credential provider."""
-    agent = get_agent_or_404(agent_id, db)
+    agent = get_agent_or_404(agent_id, db, user)
     provider = db.query(CredentialProvider).filter(
         CredentialProvider.id == provider_id,
         CredentialProvider.agent_id == agent_id

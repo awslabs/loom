@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import init_db
-from app.routers import a2a, admin, agents, approvals, auth, costs, credentials, identity_providers, integrations, invocations, logs, mcp, memories, registry, security, settings, traces
+from app.routers import a2a, admin, agents, approvals, auth, costs, credentials, evaluations, identity_providers, integrations, invocations, logs, mcp, memories, registry, security, settings, traces
 
 # Configure logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
@@ -102,6 +102,7 @@ app.include_router(approvals.router)
 app.include_router(auth.router)
 app.include_router(costs.router)
 app.include_router(credentials.router)
+app.include_router(evaluations.router)
 app.include_router(identity_providers.router)
 app.include_router(integrations.router)
 app.include_router(invocations.router)

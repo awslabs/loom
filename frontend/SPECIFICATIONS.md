@@ -75,7 +75,8 @@ frontend/
 │   │   ├── InvocationTable.tsx # Invocation timing data + token/cost columns
 │   │   ├── LogViewer.tsx       # Paginated log viewer with toggleable line numbers and timestamps
 │   │   ├── TraceList.tsx      # Trace summary table (Trace ID, Start/End Time, Duration, Spans, Events) with clickable rows
-│   │   └── TraceGraph.tsx     # Interactive waterfall timeline with colored span bars, hover detail panel, click-to-select events, expand/collapse all
+│   │   ├── TraceGraph.tsx     # Interactive waterfall timeline with colored span bars, hover detail panel, click-to-select events, expand/collapse all
+│   │   └── AgentEvaluationsPanel.tsx # Evaluations tab: AgentCore evaluation sources, evaluated sessions/test cases, scores and judge explanations
 │   ├── pages/
 │   │   ├── AgentListPage.tsx   # Agents persona: registration form + agent grid
 │   │   ├── AgentDetailPage.tsx # Sessions, latency, invoke, response

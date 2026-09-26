@@ -1155,3 +1155,75 @@ export interface IntegrationInfoResponse {
   endpoints: IntegrationEndpoint[];
   auth: IntegrationAuthSigV4 | IntegrationAuthOAuth2;
 }
+
+// ---------------------------------------------------------------------------
+// AgentCore Evaluations (read-only results)
+// ---------------------------------------------------------------------------
+
+export interface OnlineEvaluationSource {
+  id: string;
+  name: string | null;
+  status: string | null;
+  execution_status: string | null;
+  sampling_percentage: number | null;
+  session_timeout_minutes: number | null;
+  evaluators: string[];
+  shared: boolean;
+  last_evaluated_at: string | null;
+  updated_at: string | null;
+}
+
+export interface EvaluatorSummary {
+  evaluator_id: string | null;
+  average_score: number | null;
+  total_evaluated: number | null;
+  total_failed: number | null;
+}
+
+export interface BatchEvaluationSource {
+  id: string;
+  name: string | null;
+  description: string | null;
+  status: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  evaluators: string[];
+  shared: boolean;
+  targeted_session_count: number;
+  sessions_total: number | null;
+  sessions_completed: number | null;
+  sessions_failed: number | null;
+  sessions_ignored: number | null;
+  evaluator_summaries: EvaluatorSummary[];
+}
+
+export interface EvaluationOverviewResponse {
+  online: OnlineEvaluationSource[];
+  batch: BatchEvaluationSource[];
+}
+
+export interface EvaluationScore {
+  evaluator: string | null;
+  value: number | null;
+  label: string | null;
+  explanation: string | null;
+  level: string | null;
+}
+
+export interface EvaluatedTrace {
+  session_id: string | null;
+  trace_id: string | null;
+  trace_time: string | null;
+  evaluated_at: string | null;
+  scores: EvaluationScore[];
+}
+
+export interface EvaluationResultsResponse {
+  results: EvaluatedTrace[];
+  truncated: boolean;
+}
+
+export interface EvaluatedExchangeResponse {
+  prompt: string | null;
+  answer: string | null;
+}

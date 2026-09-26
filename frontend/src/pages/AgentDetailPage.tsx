@@ -12,6 +12,7 @@ import { DeploymentPanel, ModelsCard } from "@/components/DeploymentPanel";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
 import { RegistryActions } from "@/components/RegistryActions";
 import { ExternalIntegrationSection } from "@/components/ExternalIntegrationSection";
+import { AgentEvaluationsPanel } from "@/components/AgentEvaluationsPanel";
 import { StatusPill } from "@/components/StatusPill";
 import { statusVariant } from "@/lib/status";
 import { useTimezone } from "@/contexts/TimezoneContext";
@@ -193,6 +194,7 @@ export function AgentDetailPage({
         <TabsList variant="line" className="h-auto justify-start gap-5 rounded-none bg-transparent p-0">
           <TabsTrigger value="details" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">Details</TabsTrigger>
           <TabsTrigger value="invoke" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">Invoke</TabsTrigger>
+          <TabsTrigger value="evaluations" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">Evaluations</TabsTrigger>
         </TabsList>
       </div>
 
@@ -349,6 +351,9 @@ export function AgentDetailPage({
         {(sessionStart?.user_token || tokenInfos.length > 0) && (
           <TokenInfoCard userToken={sessionStart?.user_token} oboTokens={tokenInfos} groupMappings={authConfig?.group_mappings} authorizerName={agent.authorizer_config?.name} />
         )}
+      </TabsContent>
+      <TabsContent value="evaluations">
+        <AgentEvaluationsPanel agentId={agent.id} />
       </TabsContent>
     </Tabs>
   );

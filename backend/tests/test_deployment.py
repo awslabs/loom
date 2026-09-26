@@ -78,6 +78,7 @@ class TestCreateRuntime(unittest.TestCase):
         self.assertEqual(call_kwargs["networkConfiguration"], {"networkMode": "PUBLIC"})
         self.assertEqual(call_kwargs["protocolConfiguration"], {"serverProtocol": "HTTP"})
         self.assertIn("tags", call_kwargs)
+        self.assertEqual(call_kwargs["platformVersion"], "V2")
         self.assertEqual(result["agentRuntimeId"], "rt-123")
 
     @patch("boto3.client")
@@ -418,6 +419,7 @@ class TestUpdateRuntime(unittest.TestCase):
         call_kwargs = mock_client.update_agent_runtime.call_args[1]
         self.assertEqual(call_kwargs["agentRuntimeId"], "rt-123")
         self.assertEqual(call_kwargs["environmentVariables"], {"KEY": "new_value"})
+        self.assertEqual(call_kwargs["platformVersion"], "V2")
         self.assertEqual(result["status"], "UPDATING")
 
     @patch("boto3.client")
@@ -432,6 +434,7 @@ class TestUpdateRuntime(unittest.TestCase):
         call_kwargs = mock_client.update_agent_runtime.call_args[1]
         self.assertEqual(call_kwargs["agentRuntimeId"], "rt-123")
         self.assertNotIn("environmentVariables", call_kwargs)
+        self.assertEqual(call_kwargs["platformVersion"], "V2")
 
     @patch("boto3.client")
     def test_update_runtime_with_role_arn(self, mock_boto_client: MagicMock) -> None:

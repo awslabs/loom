@@ -221,6 +221,11 @@ def create_runtime(
         implement the same BedrockAgentCoreApp entrypoint contract at
         src/handler.py, so no agent_framework parameter is needed here.
 
+        platformVersion is always set to "V2" so every runtime gets
+        AgentCore Runtime v2's snapshot-restore cold starts with no
+        caller-supplied flag; requires boto3>=1.43.95 for the field to
+        exist on CreateAgentRuntime.
+
     Returns:
         create_agent_runtime API response
     """
@@ -247,6 +252,7 @@ def create_runtime(
         "protocolConfiguration": {"serverProtocol": protocol},
         "environmentVariables": env_vars,
         "tags": _merge_tags(extra=tags),
+        "platformVersion": "V2",
     }
 
     network_config: dict[str, Any] = {"networkMode": network_mode}
@@ -400,6 +406,12 @@ def update_runtime(
         lifecycle_config: Optional updated lifecycle configuration
         region: AWS region name
 
+    Note:
+        platformVersion is always set to "V2" so every redeploy moves the
+        runtime onto AgentCore Runtime v2 as a side effect of the existing
+        in-place update, with no caller-supplied flag; requires
+        boto3>=1.43.95 for the field to exist on UpdateAgentRuntime.
+
     Returns:
         update_agent_runtime API response
     """
@@ -407,7 +419,7 @@ def update_runtime(
 
     client = boto3.client("bedrock-agentcore-control", region_name=region)
 
-    params: dict[str, Any] = {"agentRuntimeId": runtime_id}
+    params: dict[str, Any] = {"agentRuntimeId": runtime_id, "platformVersion": "V2"}
     if description is not None:
         params["description"] = description
     if env_vars is not None:

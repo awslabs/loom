@@ -28,14 +28,16 @@ import { SecurityAdminPage } from "@/pages/SecurityAdminPage";
 import { MemoryManagementPage } from "@/pages/MemoryManagementPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { IntegrationsPage } from "@/pages/IntegrationsPage";
+import { SkillsPage } from "@/pages/SkillsPage";
 import type { SessionResponse, InvocationResponse } from "@/api/types";
 import { getRegistryConfig } from "@/api/settings";
+import { listRegistryRecords } from "@/api/registry";
 import { listMemories } from "@/api/memories";
 import { listMcpServers } from "@/api/mcp";
 import { listA2aAgents } from "@/api/a2a";
 import { AuthProvider, useAuth, GROUP_SCOPES, type Scope } from "@/contexts/AuthContext";
 import { LoginPage } from "@/pages/LoginPage";
-import { BookOpen, Shield, Bot, Brain, Network, LogOut, User, Settings, Eye, BarChart3, Sun, Moon } from "lucide-react";
+import { BookOpen, Shield, Bot, Brain, Network, LogOut, User, Settings, Eye, BarChart3, Sun, Moon, Puzzle } from "lucide-react";
 import { AdminDashboardPage } from "./pages/AdminDashboardPage";
 import { ChatPage } from "./pages/ChatPage";
 import { OAuthLinkCallbackPage } from "./pages/OAuthLinkCallbackPage";
@@ -65,7 +67,7 @@ import { recordPageView, sendBeaconPageView, trackAction } from "./api/audit";
 //     this is also a no-op for current groups)
 //   - Catalog > Registry section: visible iff registry:read; editable iff
 //     registry:write (unchanged from the standalone Registry page's gate)
-type Persona = "catalog" | "security" | "builder" | "memory" | "integrations" | "settings" | "admin";
+type Persona = "catalog" | "security" | "builder" | "memory" | "integrations" | "skills" | "settings" | "admin";
 
 const USER_GROUPS: Record<string, string[]> = {
   "admin": ["t-admin", "g-admins-super"],
@@ -198,6 +200,7 @@ function AppContent() {
   const [viewAsUser, setViewAsUser] = useState<string | null>(null);
   const [pendingMcpId, setPendingMcpId] = useState<number | null>(null);
   const [pendingA2aId, setPendingA2aId] = useState<number | null>(null);
+  const [pendingSkillId, setPendingSkillId] = useState<string | null>(null);
   const [integrationsTab, setIntegrationsTab] = useState<"mcp" | "a2a">("mcp");
 
   // Reset all navigation state when user logs in (skip if returning from link callback)
@@ -307,6 +310,9 @@ function AppContent() {
       setPendingMcpId(null);
       setPendingA2aId(null);
     }
+    if (activePersona !== "skills") {
+      setPendingSkillId(null);
+    }
   }, [activePersona, isAuthenticated, fetchAgents]);
 
   const [registryEnabled, setRegistryEnabled] = useState(false);
@@ -318,6 +324,7 @@ function AppContent() {
   const [memoryCount, setMemoryCount] = useState(0);
   const [mcpCount, setMcpCount] = useState(0);
   const [a2aCount, setA2aCount] = useState(0);
+  const [skillsCount, setSkillsCount] = useState(0);
   useEffect(() => {
     if (isAuthenticated && effectiveHasScope("memory:read")) {
       void listMemories().then((data) => setMemoryCount(data.length)).catch(() => {});
@@ -331,6 +338,14 @@ function AppContent() {
   useEffect(() => {
     if (isAuthenticated && effectiveHasScope("a2a:read")) {
       void listA2aAgents().then((data) => setA2aCount(data.length)).catch(() => {});
+    }
+  }, [isAuthenticated, effectiveHasScope]);
+  useEffect(() => {
+    if (isAuthenticated && effectiveHasScope("registry:read")) {
+      void getRegistryConfig()
+        .then((c) => (c.enabled ? listRegistryRecords({ descriptorType: "SKILL" }) : []))
+        .then((data) => setSkillsCount(data.length))
+        .catch(() => {});
     }
   }, [isAuthenticated, effectiveHasScope]);
 
@@ -557,6 +572,15 @@ function AppContent() {
                 count={mcpCount + a2aCount}
               />
             )}
+            {effectiveHasScope("registry:read") && (
+              <SidebarItem
+                icon={Puzzle}
+                label={t("nav.skills")}
+                active={activePersona === "skills"}
+                onClick={() => setActivePersona("skills")}
+                count={skillsCount}
+              />
+            )}
           </SidebarSection>
           <SidebarSection label={t("nav.sections.operate")}>
             {(effectiveHasScope("security:read") || effectiveHasScope("security:write")) && (
@@ -692,10 +716,12 @@ function AppContent() {
               canViewMemories={effectiveHasScope("memory:read")}
               canViewMcp={effectiveHasScope("mcp:read")}
               canViewA2a={effectiveHasScope("a2a:read")}
+              canViewSkills={effectiveHasScope("registry:read")}
               groupRestriction={groupRestriction}
               userGroups={viewAsUser ? (USER_GROUPS[viewAsUser] ?? []) : (user?.groups ?? [])}
               onNavigateToMcp={(serverId) => { setPendingMcpId(serverId); setIntegrationsTab("mcp"); setActivePersona("integrations"); }}
               onNavigateToA2a={(agentId) => { setPendingA2aId(agentId); setIntegrationsTab("a2a"); setActivePersona("integrations"); }}
+              onNavigateToSkill={(recordId) => { setPendingSkillId(recordId); setActivePersona("skills"); }}
             />
           )}
 
@@ -801,6 +827,9 @@ function AppContent() {
               pendingA2aId={pendingA2aId}
               agents={agents}
             />
+          )}
+          {activePersona === "skills" && (
+            <SkillsPage key={`skill-${pendingSkillId ?? "none"}`} initialSelectedId={pendingSkillId} />
           )}
           {activePersona === "settings" && (
             <SettingsPage

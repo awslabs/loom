@@ -33,6 +33,7 @@ class A2aAgent(Base):
     agentcore_session_id = Column(String, nullable=True)  # persisted AgentCore Runtime session ID
     registry_record_id = Column(String, nullable=True)
     registry_status = Column(String, nullable=True)  # DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, DEPRECATED
+    resource_tags = Column(Text, nullable=True)  # JSON dict, e.g. {"loom:group": "demo"}
     last_fetched_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -48,6 +49,25 @@ class A2aAgent(Base):
             return json.loads(val)
         except json.JSONDecodeError:
             return None
+
+    def get_tags(self) -> dict[str, str]:
+        """Parse resource_tags from JSON text.
+
+        Named resource_tags at the column level (not `tags`) because
+        A2aAgentSkill already uses `tags` for skill labels on a related
+        table; get_tags()/set_tags() mirror the loom:group convention used
+        by Agent/Memory/ManagedRole/AuthorizerConfig/McpServer.
+        """
+        if not self.resource_tags:
+            return {}
+        try:
+            return json.loads(self.resource_tags)
+        except json.JSONDecodeError:
+            return {}
+
+    def set_tags(self, tags: dict[str, str]) -> None:
+        """Serialize resource_tags to JSON text."""
+        self.resource_tags = json.dumps(tags)
 
     def to_dict(self) -> dict:
         return {
@@ -75,6 +95,7 @@ class A2aAgent(Base):
             "agentcore_session_id": self.agentcore_session_id,
             "registry_record_id": self.registry_record_id,
             "registry_status": self.registry_status,
+            "tags": self.get_tags(),
             "last_fetched_at": (self.last_fetched_at.isoformat() + "Z") if self.last_fetched_at else None,
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None,
             "updated_at": (self.updated_at.isoformat() + "Z") if self.updated_at else None,

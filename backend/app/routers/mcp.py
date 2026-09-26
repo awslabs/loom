@@ -14,6 +14,7 @@ from sqlalchemy import or_
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.mcp import McpServer, McpTool, McpServerAccess
+from app.routers.utils import check_resource_group_access
 from app.services.mcp import test_mcp_connection as svc_test_connection
 from app.services.mcp import fetch_mcp_tools as svc_fetch_tools
 from app.services.mcp import invoke_mcp_tool as svc_invoke_tool
@@ -162,13 +163,14 @@ class ToolInvokeResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _get_server_or_404(server_id: int, db: Session) -> McpServer:
+def _get_server_or_404(server_id: int, db: Session, user: UserInfo) -> McpServer:
     server = db.query(McpServer).filter(McpServer.id == server_id).first()
     if not server:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"MCP server with id {server_id} not found",
         )
+    check_resource_group_access(server, user, resource_label="mcp server")
     return server
 
 
@@ -259,7 +261,7 @@ def get_mcp_server(
     user: UserInfo = Depends(require_scopes("mcp:read")),
     db: Session = Depends(get_db),
 ) -> McpServerResponse:
-    server = _get_server_or_404(server_id, db)
+    server = _get_server_or_404(server_id, db, user)
     return McpServerResponse(**server.to_dict())
 
 
@@ -270,7 +272,7 @@ def export_mcp_server(
     db: Session = Depends(get_db),
 ):
     """Export full MCP server config including secrets. Super admin only."""
-    server = _get_server_or_404(server_id, db)
+    server = _get_server_or_404(server_id, db, user)
     data: dict = {
         "name": server.name,
         "description": server.description,
@@ -303,7 +305,7 @@ def update_mcp_server(
     user: UserInfo = Depends(require_scopes("mcp:write")),
     db: Session = Depends(get_db),
 ) -> McpServerResponse:
-    server = _get_server_or_404(server_id, db)
+    server = _get_server_or_404(server_id, db, user)
 
     update_data = request.model_dump(exclude_unset=True)
     new_api_key = update_data.pop("api_key", None)
@@ -329,7 +331,7 @@ def delete_mcp_server(
     user: UserInfo = Depends(require_scopes("mcp:write")),
     db: Session = Depends(get_db),
 ) -> McpServerResponse:
-    server = _get_server_or_404(server_id, db)
+    server = _get_server_or_404(server_id, db, user)
     if server.registry_record_id:
         try:
             from app.services.registry import get_registry_client
@@ -390,7 +392,7 @@ def test_connection(
     user: UserInfo = Depends(require_scopes("mcp:write")),
     db: Session = Depends(get_db),
 ) -> TestConnectionResponse:
-    server = _get_server_or_404(server_id, db)
+    server = _get_server_or_404(server_id, db, user)
     api_key = resolve_api_key(server)
     user_token = _extract_user_token(raw_request) if getattr(server, "delegation_mode", "m2m") == "obo" else None
     result = svc_test_connection(server, api_key=api_key, user_token=user_token)
@@ -406,7 +408,7 @@ def get_mcp_tools(
     user: UserInfo = Depends(require_scopes("mcp:read")),
     db: Session = Depends(get_db),
 ) -> list[McpToolResponse]:
-    _get_server_or_404(server_id, db)
+    _get_server_or_404(server_id, db, user)
     tools = db.query(McpTool).filter(McpTool.server_id == server_id).all()
     return [McpToolResponse(**t.to_dict()) for t in tools]
 
@@ -418,7 +420,7 @@ def refresh_mcp_tools(
     user: UserInfo = Depends(require_scopes("mcp:write")),
     db: Session = Depends(get_db),
 ) -> list[McpToolResponse]:
-    server = _get_server_or_404(server_id, db)
+    server = _get_server_or_404(server_id, db, user)
     api_key = resolve_api_key(server)
     user_token = _extract_user_token(request) if getattr(server, "delegation_mode", "m2m") == "obo" else None
 
@@ -473,7 +475,7 @@ def invoke_mcp_tool(
     user: UserInfo = Depends(require_scopes("mcp:write")),
     db: Session = Depends(get_db),
 ) -> ToolInvokeResponse:
-    server = _get_server_or_404(server_id, db)
+    server = _get_server_or_404(server_id, db, user)
     api_key = resolve_api_key(server)
     result = svc_invoke_tool(server, request.tool_name, request.arguments, api_key=api_key)
     return ToolInvokeResponse(**result)
@@ -497,7 +499,7 @@ def set_user_api_key(
     user: UserInfo = Depends(require_scopes("mcp:read")),
     db: Session = Depends(get_db),
 ) -> UserApiKeyStatusResponse:
-    server = _get_server_or_404(server_id, db)
+    server = _get_server_or_404(server_id, db, user)
     region = os.getenv("AWS_REGION", "us-east-1")
     store_secret(
         f"loom/mcp/{server.name}/api-key/{user.sub}",
@@ -514,7 +516,7 @@ def get_user_api_key_status(
     user: UserInfo = Depends(require_scopes("mcp:read")),
     db: Session = Depends(get_db),
 ) -> UserApiKeyStatusResponse:
-    server = _get_server_or_404(server_id, db)
+    server = _get_server_or_404(server_id, db, user)
     region = os.getenv("AWS_REGION", "us-east-1")
     try:
         from app.services.secrets import get_secret
@@ -530,7 +532,7 @@ def delete_user_api_key(
     user: UserInfo = Depends(require_scopes("mcp:read")),
     db: Session = Depends(get_db),
 ) -> UserApiKeyStatusResponse:
-    server = _get_server_or_404(server_id, db)
+    server = _get_server_or_404(server_id, db, user)
     region = os.getenv("AWS_REGION", "us-east-1")
     delete_secret(f"loom/mcp/{server.name}/api-key/{user.sub}", region)
     return UserApiKeyStatusResponse(has_user_api_key=False)
@@ -545,7 +547,7 @@ def get_access_rules(
     user: UserInfo = Depends(require_scopes("mcp:read")),
     db: Session = Depends(get_db),
 ) -> list[McpAccessRuleResponse]:
-    _get_server_or_404(server_id, db)
+    _get_server_or_404(server_id, db, user)
     rules = db.query(McpServerAccess).filter(McpServerAccess.server_id == server_id).all()
     return [McpAccessRuleResponse(**r.to_dict()) for r in rules]
 
@@ -557,7 +559,7 @@ def update_access_rules(
     user: UserInfo = Depends(require_scopes("mcp:write")),
     db: Session = Depends(get_db),
 ) -> list[McpAccessRuleResponse]:
-    _get_server_or_404(server_id, db)
+    _get_server_or_404(server_id, db, user)
 
     # Replace all existing rules
     db.query(McpServerAccess).filter(McpServerAccess.server_id == server_id).delete()

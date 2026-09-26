@@ -14,6 +14,7 @@ from sqlalchemy import or_
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.a2a import A2aAgent, A2aAgentSkill, A2aAgentAccess
+from app.routers.utils import check_resource_group_access
 from app.services.a2a import (
     _build_headers,
     _is_agentcore_url,
@@ -136,13 +137,14 @@ class TestConnectionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _get_agent_or_404(agent_id: int, db: Session) -> A2aAgent:
+def _get_agent_or_404(agent_id: int, db: Session, user: UserInfo) -> A2aAgent:
     agent = db.query(A2aAgent).filter(A2aAgent.id == agent_id).first()
     if not agent:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"A2A agent with id {agent_id} not found",
         )
+    check_resource_group_access(agent, user, resource_label="a2a agent")
     return agent
 
 
@@ -256,7 +258,7 @@ def get_a2a_agent(
     user: UserInfo = Depends(require_scopes("a2a:read")),
     db: Session = Depends(get_db),
 ) -> A2aAgentResponse:
-    agent = _get_agent_or_404(agent_id, db)
+    agent = _get_agent_or_404(agent_id, db, user)
     return A2aAgentResponse(**agent.to_dict())
 
 
@@ -267,7 +269,7 @@ def update_a2a_agent(
     user: UserInfo = Depends(require_scopes("a2a:write")),
     db: Session = Depends(get_db),
 ) -> A2aAgentResponse:
-    agent = _get_agent_or_404(agent_id, db)
+    agent = _get_agent_or_404(agent_id, db, user)
 
     update_data = request.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -292,7 +294,7 @@ def delete_a2a_agent(
     user: UserInfo = Depends(require_scopes("a2a:write")),
     db: Session = Depends(get_db),
 ) -> A2aAgentResponse:
-    agent = _get_agent_or_404(agent_id, db)
+    agent = _get_agent_or_404(agent_id, db, user)
     if agent.registry_record_id:
         try:
             from app.services.registry import get_registry_client
@@ -334,7 +336,7 @@ def test_connection(
     user: UserInfo = Depends(require_scopes("a2a:write")),
     db: Session = Depends(get_db),
 ) -> TestConnectionResponse:
-    agent = _get_agent_or_404(agent_id, db)
+    agent = _get_agent_or_404(agent_id, db, user)
     result = svc_test_connection(agent)
     return TestConnectionResponse(**result)
 
@@ -348,7 +350,7 @@ def get_agent_card(
     user: UserInfo = Depends(require_scopes("a2a:read")),
     db: Session = Depends(get_db),
 ) -> dict:
-    agent = _get_agent_or_404(agent_id, db)
+    agent = _get_agent_or_404(agent_id, db, user)
     raw = agent.agent_card_raw
     if raw:
         try:
@@ -364,7 +366,7 @@ def refresh_agent_card(
     user: UserInfo = Depends(require_scopes("a2a:write")),
     db: Session = Depends(get_db),
 ) -> A2aAgentResponse:
-    agent = _get_agent_or_404(agent_id, db)
+    agent = _get_agent_or_404(agent_id, db, user)
     headers = _build_headers(agent)
 
     try:
@@ -390,7 +392,7 @@ def get_agent_skills(
     user: UserInfo = Depends(require_scopes("a2a:read")),
     db: Session = Depends(get_db),
 ) -> list[A2aSkillResponse]:
-    _get_agent_or_404(agent_id, db)
+    _get_agent_or_404(agent_id, db, user)
     skills = db.query(A2aAgentSkill).filter(A2aAgentSkill.agent_id == agent_id).all()
     return [A2aSkillResponse(**s.to_dict()) for s in skills]
 
@@ -404,7 +406,7 @@ def get_access_rules(
     user: UserInfo = Depends(require_scopes("a2a:read")),
     db: Session = Depends(get_db),
 ) -> list[A2aAccessRuleResponse]:
-    _get_agent_or_404(agent_id, db)
+    _get_agent_or_404(agent_id, db, user)
     rules = db.query(A2aAgentAccess).filter(A2aAgentAccess.agent_id == agent_id).all()
     return [A2aAccessRuleResponse(**r.to_dict()) for r in rules]
 
@@ -416,7 +418,7 @@ def update_access_rules(
     user: UserInfo = Depends(require_scopes("a2a:write")),
     db: Session = Depends(get_db),
 ) -> list[A2aAccessRuleResponse]:
-    _get_agent_or_404(agent_id, db)
+    _get_agent_or_404(agent_id, db, user)
 
     db.query(A2aAgentAccess).filter(A2aAgentAccess.agent_id == agent_id).delete()
 
@@ -449,7 +451,7 @@ def export_a2a_agent(
     db: Session = Depends(get_db),
 ):
     """Export full A2A agent config including secrets. Super admin only."""
-    agent = _get_agent_or_404(agent_id, db)
+    agent = _get_agent_or_404(agent_id, db, user)
     data: dict = {
         "base_url": agent.base_url,
         "name": agent.name,

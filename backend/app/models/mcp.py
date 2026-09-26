@@ -29,11 +29,25 @@ class McpServer(Base):
     runtime_endpoint_url = Column(String, nullable=True)  # direct runtime URL for WebSocket (bypasses Gateway)
     registry_record_id = Column(String, nullable=True)
     registry_status = Column(String, nullable=True)  # DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, DEPRECATED
+    tags = Column(Text, nullable=True)  # JSON dict, e.g. {"loom:group": "demo"}
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     tools = relationship("McpTool", back_populates="server", cascade="all, delete-orphan")
     access_rules = relationship("McpServerAccess", back_populates="server", cascade="all, delete-orphan")
+
+    def get_tags(self) -> dict[str, str]:
+        """Parse tags from JSON text."""
+        if not self.tags:
+            return {}
+        try:
+            return json.loads(self.tags)
+        except json.JSONDecodeError:
+            return {}
+
+    def set_tags(self, tags: dict[str, str]) -> None:
+        """Serialize tags to JSON text."""
+        self.tags = json.dumps(tags)
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +71,7 @@ class McpServer(Base):
             "runtime_endpoint_url": self.runtime_endpoint_url,
             "registry_record_id": self.registry_record_id,
             "registry_status": self.registry_status,
+            "tags": self.get_tags(),
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None,
             "updated_at": (self.updated_at.isoformat() + "Z") if self.updated_at else None,
         }

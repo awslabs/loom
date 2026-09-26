@@ -17,6 +17,7 @@ from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
 from app.models.permission_request import PermissionRequest
 from app.models.agent import Agent
+from app.routers.utils import check_resource_group_access
 from app.services.security import (
     apply_permissions_to_role,
     create_iam_role_with_policy,
@@ -219,6 +220,7 @@ def get_role(role_id: int, user: UserInfo = Depends(require_scopes("security:rea
     role = db.query(ManagedRole).filter(ManagedRole.id == role_id).first()
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
+    check_resource_group_access(role, user, resource_label="role")
     result = role.to_dict()
 
     # Try to fetch live policy from AWS
@@ -238,6 +240,7 @@ def update_role(role_id: int, request: UpdateRoleRequest, user: UserInfo = Depen
     role = db.query(ManagedRole).filter(ManagedRole.id == role_id).first()
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
+    check_resource_group_access(role, user, resource_label="role")
 
     if request.description is not None:
         role.description = request.description
@@ -261,6 +264,7 @@ def delete_role(role_id: int, user: UserInfo = Depends(require_scopes("security:
     role = db.query(ManagedRole).filter(ManagedRole.id == role_id).first()
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
+    check_resource_group_access(role, user, resource_label="role")
 
     # Check if any agent references this role
     agent_using = db.query(Agent).filter(Agent.execution_role_arn == role.role_arn).first()
@@ -388,6 +392,7 @@ def get_authorizer(auth_id: int, user: UserInfo = Depends(require_scopes("securi
     auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
     if not auth:
         raise HTTPException(status_code=404, detail="Authorizer not found")
+    check_resource_group_access(auth, user, resource_label="authorizer")
     return auth.to_dict()
 
 
@@ -399,6 +404,7 @@ def update_authorizer(
     auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
     if not auth:
         raise HTTPException(status_code=404, detail="Authorizer not found")
+    check_resource_group_access(auth, user, resource_label="authorizer")
 
     if request.name is not None:
         auth.name = request.name
@@ -458,6 +464,7 @@ def delete_authorizer(auth_id: int, user: UserInfo = Depends(require_scopes("sec
     auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
     if not auth:
         raise HTTPException(status_code=404, detail="Authorizer not found")
+    check_resource_group_access(auth, user, resource_label="authorizer")
 
     region = _get_region()
 
@@ -498,6 +505,7 @@ def create_credential(auth_id: int, request: CreateCredentialRequest, user: User
     auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
     if not auth:
         raise HTTPException(status_code=404, detail="Authorizer not found")
+    check_resource_group_access(auth, user, resource_label="authorizer")
 
     client_secret_arn = None
     if request.client_secret:
@@ -528,6 +536,10 @@ def create_credential(auth_id: int, request: CreateCredentialRequest, user: User
 @router.get("/authorizers/{auth_id}/credentials")
 def list_credentials(auth_id: int, user: UserInfo = Depends(require_scopes("security:read")), db: Session = Depends(get_db)) -> list[dict]:
     """List credentials for an authorizer."""
+    auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
+    if not auth:
+        raise HTTPException(status_code=404, detail="Authorizer not found")
+    check_resource_group_access(auth, user, resource_label="authorizer")
     creds = db.query(AuthorizerCredential).filter(
         AuthorizerCredential.authorizer_config_id == auth_id
     ).order_by(AuthorizerCredential.id).all()
@@ -537,6 +549,10 @@ def list_credentials(auth_id: int, user: UserInfo = Depends(require_scopes("secu
 @router.delete("/authorizers/{auth_id}/credentials/{cred_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_credential(auth_id: int, cred_id: int, user: UserInfo = Depends(require_scopes("security:write")), db: Session = Depends(get_db)) -> None:
     """Delete a credential from an authorizer."""
+    auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
+    if not auth:
+        raise HTTPException(status_code=404, detail="Authorizer not found")
+    check_resource_group_access(auth, user, resource_label="authorizer")
     cred = db.query(AuthorizerCredential).filter(
         AuthorizerCredential.id == cred_id,
         AuthorizerCredential.authorizer_config_id == auth_id,
@@ -556,6 +572,7 @@ def get_credential_token(auth_id: int, cred_id: int, user: UserInfo = Depends(re
     auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
     if not auth:
         raise HTTPException(status_code=404, detail="Authorizer not found")
+    check_resource_group_access(auth, user, resource_label="authorizer")
 
     cred = db.query(AuthorizerCredential).filter(
         AuthorizerCredential.id == cred_id,
@@ -613,6 +630,7 @@ def get_link_status(auth_id: int, user: UserInfo = Depends(require_scopes("agent
     auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
     if not auth:
         raise HTTPException(status_code=404, detail="Authorizer not found")
+    check_resource_group_access(auth, user, resource_label="authorizer")
     linkable = bool(auth.user_client_id and auth.discovery_url)
     if not linkable:
         return {"linked": False, "linkable": False}
@@ -628,6 +646,7 @@ def get_link_authorize_url(auth_id: int, request: Request, user: UserInfo = Depe
     auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
     if not auth:
         raise HTTPException(status_code=404, detail="Authorizer not found")
+    check_resource_group_access(auth, user, resource_label="authorizer")
     if not auth.user_client_id or not auth.discovery_url:
         raise HTTPException(status_code=400, detail="Authorizer not configured for user linking")
 
@@ -674,6 +693,7 @@ def link_callback(auth_id: int, request: LinkCallbackRequest, user: UserInfo = D
     auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
     if not auth:
         raise HTTPException(status_code=404, detail="Authorizer not found")
+    check_resource_group_access(auth, user, resource_label="authorizer")
     if not auth.user_client_id or not auth.discovery_url:
         raise HTTPException(status_code=400, detail="Authorizer not configured for user linking")
 
@@ -707,6 +727,7 @@ def delete_link(auth_id: int, user: UserInfo = Depends(require_scopes("agent:rea
     auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
     if not auth:
         raise HTTPException(status_code=404, detail="Authorizer not found")
+    check_resource_group_access(auth, user, resource_label="authorizer")
     region = _get_region()
     delete_user_tokens(auth_id, user.sub, region)
 
@@ -722,6 +743,7 @@ def create_permission_request(
     role = db.query(ManagedRole).filter(ManagedRole.id == request.managed_role_id).first()
     if not role:
         raise HTTPException(status_code=404, detail="Managed role not found")
+    check_resource_group_access(role, user, resource_label="role")
 
     perm_req = PermissionRequest(
         managed_role_id=request.managed_role_id,
@@ -757,6 +779,9 @@ def review_permission_request(
     perm_req = db.query(PermissionRequest).filter(PermissionRequest.id == request_id).first()
     if not perm_req:
         raise HTTPException(status_code=404, detail="Permission request not found")
+    role = db.query(ManagedRole).filter(ManagedRole.id == perm_req.managed_role_id).first()
+    if role:
+        check_resource_group_access(role, user, resource_label="role")
 
     if perm_req.status != "pending":
         raise HTTPException(status_code=400, detail="Permission request is not pending")

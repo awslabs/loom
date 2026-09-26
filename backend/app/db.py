@@ -149,6 +149,8 @@ def _migrate_add_columns(eng) -> None:
         ("agents", "vpc_config_id", "INTEGER"),
         ("agents", "status_reason", "TEXT"),
         ("agents", "agent_framework", "VARCHAR"),
+        ("mcp_servers", "tags", "TEXT"),
+        ("a2a_agents", "resource_tags", "TEXT"),
     ]
 
     is_postgres = eng.dialect.name == "postgresql"

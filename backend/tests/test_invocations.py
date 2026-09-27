@@ -489,6 +489,33 @@ class TestInvocationsRouter(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["live_status"], "streaming")
 
+    def test_invocation_persists_model_id(self):
+        """Test that model_id is persisted on the Invocation record."""
+        session = InvocationSession(
+            agent_id=self.agent.id,
+            session_id="model-id-session",
+            qualifier="DEFAULT",
+            status="pending",
+            created_at=datetime.utcnow(),
+        )
+        self.session.add(session)
+        self.session.commit()
+
+        inv = Invocation(
+            session_id="model-id-session",
+            invocation_id="model-id-inv",
+            status="pending",
+            prompt_text="test",
+            model_id="anthropic.claude-3-sonnet",
+            created_at=datetime.utcnow(),
+        )
+        self.session.add(inv)
+        self.session.commit()
+        self.session.refresh(inv)
+
+        self.assertEqual(inv.model_id, "anthropic.claude-3-sonnet")
+
+        
     def test_live_status_active_complete_session(self):
         """Test live_status is 'active' for a recently completed session."""
         session = InvocationSession(

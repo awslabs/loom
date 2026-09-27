@@ -1475,6 +1475,7 @@ async def invoke_agent_endpoint(
         invocation_id=str(uuid.uuid4()),
         status="pending",
         prompt_text=request_body.prompt,
+        model_id=runtime_model_id,
         created_at=datetime.utcnow(),
     )
     db.add(invocation)

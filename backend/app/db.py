@@ -109,6 +109,7 @@ def _migrate_add_columns(eng) -> None:
         ("invocations", "model_id", "VARCHAR"), 
         ("invocation_sessions", "user_id", "VARCHAR"),
         ("invocation_sessions", "hidden_at", "DATETIME"),
+        ("invocation_sessions", "groups", "VARCHAR"),
         ("agents", "description", "TEXT"),
         ("mcp_servers", "registry_record_id", "VARCHAR"),
         ("mcp_servers", "registry_status", "VARCHAR"),

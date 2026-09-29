@@ -76,6 +76,7 @@ export interface AgentHarnessDeployRequest {
   authorizer_client_secret: string | null;
   mcp_servers: number[];
   memory_ids?: number[];
+  skill_ids?: string[];
   tags?: Record<string, string>;
   harness_max_iterations: number | null;
   harness_max_tokens: number | null;
@@ -123,6 +124,7 @@ export interface AgentDeployRequest {
   memory_ids: number[];
   mcp_servers: number[];
   a2a_agents: number[];
+  skill_ids?: string[];
   code_interpreter_enabled: boolean;
   code_interpreter_region: string;
   code_interpreter_network_mode: string;
@@ -1098,12 +1100,17 @@ export interface RegistryRecord {
   description: string | null;
   created_at: string | null;
   updated_at: string | null;
+  record_version: string | null;
 }
 
 export interface RegistryRecordDetail extends RegistryRecord {
   descriptors: Record<string, unknown>;
-  record_version: string | null;
   status_reason: string | null;
+}
+
+export interface SkillDependent {
+  agent_id: number;
+  agent_name: string;
 }
 
 export type McpNamespace = "aws.agentcore" | "remote.mcp" | "npm" | "custom";

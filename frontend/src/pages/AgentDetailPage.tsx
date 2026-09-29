@@ -11,6 +11,7 @@ import { LatencySummary } from "@/components/LatencySummary";
 import { DeploymentPanel, ModelsCard } from "@/components/DeploymentPanel";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
 import { RegistryActions } from "@/components/RegistryActions";
+import { getRegistryRecord } from "@/api/registry";
 import { ExternalIntegrationSection } from "@/components/ExternalIntegrationSection";
 import { AttachedSkillsSection } from "@/components/AttachedSkillsSection";
 import { StatusPill } from "@/components/StatusPill";
@@ -34,6 +35,11 @@ interface AgentDetailPageProps {
   canInvoke?: boolean;
   registryReadOnly?: boolean;
   registryEnabled?: boolean;
+  /** registry:read — gates visibility of the Skills section, same as the
+   * Skills page itself. Domain-admin groups that reach this page via
+   * agent:write but hold no registry:read must not see skill names/ids
+   * via the attach picker either. */
+  canViewSkills?: boolean;
   userGroups?: string[];
   initialTab?: "details" | "invoke";
 }
@@ -49,6 +55,7 @@ export function AgentDetailPage({
   canInvoke = true,
   registryReadOnly,
   registryEnabled = false,
+  canViewSkills = false,
   userGroups = [],
   initialTab = "details",
 }: AgentDetailPageProps) {
@@ -112,6 +119,20 @@ export function AgentDetailPage({
   useEffect(() => {
     if (sessionStart?.user_id) setBackendUserId(sessionStart.user_id);
   }, [sessionStart]);
+
+  // Registry record's own statusReason (why it was approved/rejected) — same
+  // governance detail the Skills detail page shows, distinct from
+  // agent.status_reason (an AgentCore Runtime deployment failureReason).
+  const [registryStatusReason, setRegistryStatusReason] = useState<string | null>(null);
+  useEffect(() => {
+    if (!registryEnabled || !canViewSkills || !agent.registry_record_id) {
+      setRegistryStatusReason(null);
+      return;
+    }
+    getRegistryRecord(agent.registry_record_id)
+      .then((rec) => setRegistryStatusReason(rec.status_reason ?? null))
+      .catch(() => setRegistryStatusReason(null));
+  }, [registryEnabled, canViewSkills, agent.registry_record_id, agent.registry_status]);
   const currentUserId = backendUserId ?? user?.username ?? user?.sub;
 
   const handleInvoke = async (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean) => {
@@ -275,7 +296,7 @@ export function AgentDetailPage({
             </Card>
           )}
 
-          {registryEnabled && (
+          {registryEnabled && canViewSkills && (
             <Card className="gap-2.5 py-4">
               <CardHeader className="px-[18px]">
                 <CardTitle className="text-[13px] font-semibold">Skills</CardTitle>
@@ -293,6 +314,9 @@ export function AgentDetailPage({
               </CardHeader>
               <CardContent className="flex flex-col gap-2.5 px-[18px]">
                 <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{approvalContext}</p>
+                {registryStatusReason && (
+                  <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{registryStatusReason}</p>
+                )}
                 {canManageRegistry && (
                   <RegistryActions
                     resourceType="agent"

@@ -3,6 +3,7 @@ import { Loader2, Plus, Puzzle, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { useAuth } from "@/contexts/AuthContext";
 import { listIntegrations, createIntegration, deleteIntegration } from "@/api/integrations";
 import { listRegistryRecords } from "@/api/registry";
 import type { AgentIntegration, RegistryRecord } from "@/api/types";
@@ -18,6 +19,8 @@ interface AttachedSkillsSectionProps {
  * existing config unchanged, does not pick up new attachments. See
  * `_get_attached_skill_prompt_text` in backend/app/routers/agents.py. */
 export function AttachedSkillsSection({ agentId }: AttachedSkillsSectionProps) {
+  const { hasScope } = useAuth();
+  const canView = hasScope("registry:read");
   const [attached, setAttached] = useState<AgentIntegration[]>([]);
   const [approvedSkills, setApprovedSkills] = useState<RegistryRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,7 +44,12 @@ export function AttachedSkillsSection({ agentId }: AttachedSkillsSectionProps) {
     }
   }, [agentId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (canView) void load(); }, [load, canView]);
+
+  // Same gate as SkillsPage.tsx: don't fetch or render any skill name/id
+  // without registry:read, even though the parent (AgentDetailPage) already
+  // hides this whole section for that case — belt and suspenders.
+  if (!canView) return null;
 
   const attachedRecordIds = new Set(attached.map((i) => i.integration_config?.record_id));
   const availableOptions = approvedSkills

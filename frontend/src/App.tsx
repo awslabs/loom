@@ -764,6 +764,7 @@ function AppContent() {
                   canInvoke={effectiveHasScope("invoke")}
                   registryReadOnly={!effectiveHasScope("registry:write")}
                   registryEnabled={registryEnabled}
+                  canViewSkills={effectiveHasScope("registry:read")}
                   userGroups={viewAsUser ? (USER_GROUPS[viewAsUser] ?? []) : (user?.groups ?? [])}
                   initialTab={agentInitialTab}
                 />

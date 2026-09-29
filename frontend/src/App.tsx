@@ -341,13 +341,12 @@ function AppContent() {
     }
   }, [isAuthenticated, effectiveHasScope]);
   useEffect(() => {
-    if (isAuthenticated && effectiveHasScope("registry:read")) {
-      void getRegistryConfig()
-        .then((c) => (c.enabled ? listRegistryRecords({ descriptorType: "SKILL" }) : []))
+    if (isAuthenticated && effectiveHasScope("registry:read") && registryEnabled) {
+      void listRegistryRecords({ descriptorType: "SKILL" })
         .then((data) => setSkillsCount(data.length))
         .catch(() => {});
     }
-  }, [isAuthenticated, effectiveHasScope]);
+  }, [isAuthenticated, effectiveHasScope, registryEnabled]);
 
   type ViewMode = "cards" | "table";
   const [catalogViewMode, setCatalogViewMode] = useState<ViewMode>("cards");

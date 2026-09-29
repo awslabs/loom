@@ -408,7 +408,11 @@ def update_record(
         record_version="1.0",
         description=description,
     ))
-    rec = _call_registry(lambda: client.get_record(record_id))
+    # UpdateRegistryRecord is asynchronous, like CreateRegistryRecord — wait
+    # for the record to leave UPDATING before returning, or the caller (and
+    # anyone re-listing shortly after) can observe the transient UPDATING
+    # status, which the frontend has no case for and renders as "UNREGISTERED".
+    rec = _call_registry(lambda: client.wait_for_record(record_id))
     return _record_to_detail_response(rec) if rec else _record_to_detail_response(result)
 
 

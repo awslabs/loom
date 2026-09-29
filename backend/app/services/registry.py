@@ -164,16 +164,24 @@ class RegistryClient:
         )
 
     def wait_for_record(self, record_id: str, poll_interval: int = 5) -> dict[str, Any]:
-        """Poll until the record leaves the CREATING state."""
+        """Poll until the record leaves an in-progress state (CREATING or
+        UPDATING — both CreateRegistryRecord and UpdateRegistryRecord are
+        asynchronous). Without waiting for UPDATING to clear too, a caller
+        that reads the record immediately after an update can observe the
+        transient UPDATING status, which RegistryStatusBadge has no case for
+        and falls back to rendering as "UNREGISTERED" instead of the
+        record's real (DRAFT/APPROVED/etc.) status.
+        """
         if not self._require_registry():
             return {}
+        in_progress = {"CREATING", "UPDATING"}
         while True:
             rec = self.get_record(record_id)
             status = rec.get("status", "")
-            if status != "CREATING":
+            if status not in in_progress:
                 logger.info("Record %s reached status %s", record_id, status)
                 return rec
-            logger.debug("Record %s still CREATING; polling in %ds", record_id, poll_interval)
+            logger.debug("Record %s still %s; polling in %ds", record_id, status, poll_interval)
             time.sleep(poll_interval)
 
     def list_records(self) -> dict[str, Any]:

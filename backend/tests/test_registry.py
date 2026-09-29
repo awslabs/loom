@@ -316,6 +316,7 @@ class TestRegistryRouter(unittest.TestCase):
         kwargs (e.g. a removed `descriptor_type` param) raises a TypeError
         instead of silently succeeding, as a bare MagicMock() would.
         """
+        self._override_admin_user()
         server = self._create_mcp_server()
         mock_client = MagicMock(spec=RegistryClient)
         mock_client.build_mcp_descriptors.return_value = {
@@ -345,9 +346,9 @@ class TestRegistryRouter(unittest.TestCase):
         mock_client.update_record.return_value = {
             **SAMPLE_REGISTRY_RECORD,
             "recordId": "rec-lifecycle",
-            "status": "DRAFT",
+            "status": "UPDATING",
         }
-        mock_client.get_record.return_value = {
+        mock_client.wait_for_record.return_value = {
             **SAMPLE_REGISTRY_RECORD,
             "recordId": "rec-lifecycle",
             "status": "DRAFT",
@@ -521,21 +522,21 @@ class TestRegistryRouter(unittest.TestCase):
         must fall through to re-submitted content instead of 404ing."""
         self._override_admin_user()
         mock_client = MagicMock()
-        mock_client.get_record.side_effect = [
-            {
-                "recordId": "rec-skill",
-                "recordType": "SKILL",
-                "descriptors": {
-                    "agentSkillsDefinition": {
-                        "data": json.dumps({
-                            "name": "security-scan", "description": "old desc",
-                            "license": "MIT", "metadata": {"author": "original-author", "version": "1.0.0"},
-                        }),
-                    },
+        mock_client.get_record.return_value = {
+            "recordId": "rec-skill",
+            "recordType": "SKILL",
+            "descriptors": {
+                "agentSkillsDefinition": {
+                    "data": json.dumps({
+                        "name": "security-scan", "description": "old desc",
+                        "license": "MIT", "metadata": {"author": "original-author", "version": "1.0.0"},
+                    }),
                 },
             },
-            {**SAMPLE_REGISTRY_RECORD, "recordId": "rec-skill", "recordType": "SKILL", "status": "DRAFT"},
-        ]
+        }
+        mock_client.wait_for_record.return_value = {
+            **SAMPLE_REGISTRY_RECORD, "recordId": "rec-skill", "recordType": "SKILL", "status": "DRAFT",
+        }
         mock_client.build_skill_descriptors = MagicMock(return_value={"agentSkillsDefinition": {"data": "{}"}})
         mock_get_client.return_value = mock_client
 
@@ -974,6 +975,28 @@ class TestRegistryService(unittest.TestCase):
         call_kwargs = client.control.update_registry_record.call_args.kwargs
         self.assertEqual(call_kwargs["displayName"], {"optionalValue": "Security Scan"})
         self.assertEqual(call_kwargs["description"], {"optionalValue": "A skill"})
+
+    def test_wait_for_record_treats_updating_as_in_progress(self):
+        """Regression test: UpdateRegistryRecord is asynchronous just like
+        CreateRegistryRecord, transiently reporting status=UPDATING. The
+        original wait_for_record only checked `!= "CREATING"`, so it would
+        treat UPDATING as already-settled and return immediately — caught
+        live: a just-updated skill briefly showed as "UNREGISTERED" in the
+        UI (RegistryStatusBadge has no case for UPDATING) instead of its
+        real DRAFT/APPROVED status."""
+        client = RegistryClient(registry_id="test-registry", region="us-east-1")
+        client.control = MagicMock()
+        client.control.get_registry_record.side_effect = [
+            {"status": "UPDATING"},
+            {"status": "UPDATING"},
+            {"status": "DRAFT"},
+        ]
+
+        with patch("app.services.registry.time.sleep"):
+            rec = client.wait_for_record("rec-123", poll_interval=0)
+
+        self.assertEqual(rec["status"], "DRAFT")
+        self.assertEqual(client.control.get_registry_record.call_count, 3)
 
     def test_client_without_registry_id(self):
         from app.services.registry import RegistryClient

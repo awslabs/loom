@@ -23,34 +23,57 @@ router = APIRouter(prefix="/api/settings", tags=["approvals"])
 # ---------------------------------------------------------------------------
 # In-memory approval coordination store
 # ---------------------------------------------------------------------------
-# Maps request_id -> {event: asyncio.Event, decision: str | None, reason: str | None, decided_by: str | None}
+# Maps request_id -> {event, decision, reason, decided_by, requester_id}
 _pending_approvals: dict[str, dict[str, Any]] = {}
 
 
-def create_approval_request(request_id: str | None = None) -> str:
-    """Register a pending approval and return its request_id."""
+def create_approval_request(request_id: str | None = None, requester_id: str | None = None) -> str:
+    """Register a pending approval and return its request_id.
+
+    requester_id should be the owning session's user (InvocationSession.user_id,
+    i.e. user.username) so decide_approval can enforce that only the requester
+    may resolve it — mirrors the ownership check already applied to session
+    reuse and hide_session in invocations.py.
+    """
     rid = request_id or str(uuid.uuid4())
     _pending_approvals[rid] = {
         "event": asyncio.Event(),
         "decision": None,
         "reason": None,
         "decided_by": None,
+        "requester_id": requester_id,
     }
     return rid
 
 
-def resolve_approval(request_id: str, decision: str, decided_by: str | None = None, reason: str | None = None, content: dict | None = None) -> bool:
-    """Resolve a pending approval. Returns True if the request was found."""
+def resolve_approval(
+    request_id: str,
+    decision: str,
+    decided_by: str | None = None,
+    reason: str | None = None,
+    content: dict | None = None,
+    caller_id: str | None = None,
+) -> str:
+    """Resolve a pending approval.
+
+    Returns "ok", "not_found", or "forbidden" (caller_id doesn't match the
+    requester_id recorded at creation). Fails open — no requester_id recorded
+    at creation means no check is enforced — matching this codebase's existing
+    convention of treating untagged/unowned resources as accessible to anyone.
+    """
     entry = _pending_approvals.get(request_id)
     if not entry:
-        return False
+        return "not_found"
+    requester_id = entry.get("requester_id")
+    if requester_id and caller_id and requester_id != caller_id:
+        return "forbidden"
     entry["decision"] = decision
     entry["decided_by"] = decided_by
     entry["reason"] = reason
     if content is not None:
         entry["content"] = content
     entry["event"].set()
-    return True
+    return "ok"
 
 
 async def wait_for_approval(request_id: str, timeout: float = 300.0) -> dict[str, Any]:
@@ -232,28 +255,34 @@ async def decide_approval(
     if body.decision not in ("approved", "rejected"):
         raise HTTPException(400, "decision must be 'approved' or 'rejected'")
 
+    caller_id = user.username or user.sub
+
     # Retry briefly if the approval request hasn't been registered yet (race condition)
-    found = resolve_approval(
+    result = resolve_approval(
         request_id,
         decision=body.decision,
         decided_by=user.sub,
         reason=body.reason,
         content=body.content,
+        caller_id=caller_id,
     )
-    if not found:
+    if result == "not_found":
         for _ in range(10):
             await asyncio.sleep(0.5)
-            found = resolve_approval(
+            result = resolve_approval(
                 request_id,
                 decision=body.decision,
                 decided_by=user.sub,
                 reason=body.reason,
                 content=body.content,
+                caller_id=caller_id,
             )
-            if found:
+            if result != "not_found":
                 break
-    if not found:
+    if result == "not_found":
         raise HTTPException(404, "Approval request not found or already resolved")
+    if result == "forbidden":
+        raise HTTPException(403, "You can only decide on your own approval requests")
 
     log_entry = db.query(ApprovalLog).filter(ApprovalLog.request_id == request_id).first()
     if log_entry:

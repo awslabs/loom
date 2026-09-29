@@ -10,6 +10,7 @@ from app.db import Base, get_db
 from app.dependencies.auth import UserInfo, get_current_user
 from app.models.approval_policy import ApprovalPolicy
 from app.models.approval_log import ApprovalLog
+from app.routers.approvals import create_approval_request, _pending_approvals
 
 
 def _admin_user():
@@ -21,6 +22,15 @@ def _admin_user():
             "security:read", "security:write", "invoke",
             "agent:read", "agent:write",
         },
+    )
+
+
+def _user(username: str) -> UserInfo:
+    return UserInfo(
+        sub=f"sub-{username}",
+        username=username,
+        groups=["t-user", "g-users-demo"],
+        scopes={"agent:read", "memory:read", "mcp:read", "invoke"},
     )
 
 
@@ -185,6 +195,46 @@ class TestApprovalDecision(unittest.TestCase):
             "decision": "approved",
         })
         self.assertEqual(response.status_code, 404)
+
+    def test_owner_can_decide_own_approval(self) -> None:
+        """The user who owns the session that raised the approval may decide it."""
+        request_id = create_approval_request(requester_id="victim-a")
+        app.dependency_overrides[get_current_user] = lambda: _user("victim-a")
+        response = self.client.post(f"/api/settings/approvals/{request_id}/decide", json={
+            "decision": "approved",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "approved")
+        entry = _pending_approvals[request_id]
+        self.assertEqual(entry["decision"], "approved")
+        self.assertEqual(entry["decided_by"], "sub-victim-a")
+        del _pending_approvals[request_id]
+
+    def test_other_user_cannot_decide_someone_elses_approval(self) -> None:
+        """Cross-user IDOR: attacker B must not be able to resolve victim A's pending approval."""
+        request_id = create_approval_request(requester_id="victim-a")
+        app.dependency_overrides[get_current_user] = lambda: _user("attacker-b")
+        response = self.client.post(f"/api/settings/approvals/{request_id}/decide", json={
+            "decision": "approved",
+        })
+        self.assertEqual(response.status_code, 403)
+        # The pending approval must remain untouched — still pending, not attacker-decided.
+        entry = _pending_approvals[request_id]
+        self.assertIsNone(entry["decision"])
+        self.assertIsNone(entry["decided_by"])
+        del _pending_approvals[request_id]
+
+    def test_decide_without_recorded_requester_fails_open(self) -> None:
+        """No requester_id recorded at creation (e.g. a legacy/edge caller) means
+        no ownership is enforced — matches the untagged-resource convention used
+        elsewhere in this codebase, rather than blocking everyone."""
+        request_id = create_approval_request()
+        app.dependency_overrides[get_current_user] = lambda: _user("anyone")
+        response = self.client.post(f"/api/settings/approvals/{request_id}/decide", json={
+            "decision": "rejected",
+        })
+        self.assertEqual(response.status_code, 200)
+        del _pending_approvals[request_id]
 
 
 class TestApprovalLogs(unittest.TestCase):

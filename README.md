@@ -54,6 +54,7 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 - Semantic search over registry records via data plane API
 - Visibility filtering: end-users see only APPROVED or unregistered resources
 - Integration gating: only APPROVED MCP servers and A2A agents can be selected for agent deployments
+- Skills browser: read-only Skills page (Build section) and Platform Catalog section listing the SKILL records published to the bound registry, with per-record detail (description, status, version, repository/website links)
 
 ### Security and Access Control
 - Cognito user authentication with automatic token refresh

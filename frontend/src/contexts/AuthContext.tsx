@@ -125,6 +125,7 @@ const ALL_SCOPES = new Set<Scope>([
   "tagging:read", "tagging:write",
   "costs:read", "costs:write",
   "mcp:read", "mcp:write", "a2a:read", "a2a:write", "invoke",
+  "registry:read", "registry:write",
 ]);
 const EMPTY_SCOPES = new Set<Scope>();
 

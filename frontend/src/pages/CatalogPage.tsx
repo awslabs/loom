@@ -27,9 +27,10 @@ import { listMemories, refreshMemory, deleteMemory, purgeMemory } from "@/api/me
 import { listMcpServers } from "@/api/mcp";
 import { listA2aAgents } from "@/api/a2a";
 import { listTagPolicies, getRegistryConfig } from "@/api/settings";
+import { listRegistryRecords } from "@/api/registry";
 import { ApiError } from "@/api/client";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
-import type { AgentResponse, MemoryResponse, McpServer, A2aAgent, TagPolicy } from "@/api/types";
+import type { AgentResponse, MemoryResponse, McpServer, A2aAgent, TagPolicy, RegistryRecord } from "@/api/types";
 
 function mcpHealth(status: McpServer["status"]): { label: string; variant: BadgeVariant } {
   switch (status) {
@@ -72,10 +73,12 @@ interface CatalogPageProps {
   canViewMemories?: boolean;
   canViewMcp?: boolean;
   canViewA2a?: boolean;
+  canViewSkills?: boolean;
   groupRestriction?: string;
   userGroups?: string[];
   onNavigateToMcp?: (serverId: number) => void;
   onNavigateToA2a?: (agentId: number) => void;
+  onNavigateToSkill?: (recordId: string) => void;
 }
 
 export function CatalogPage({
@@ -92,10 +95,12 @@ export function CatalogPage({
   canViewMemories = true,
   canViewMcp = true,
   canViewA2a = true,
+  canViewSkills = true,
   groupRestriction,
   userGroups = [],
   onNavigateToMcp,
   onNavigateToA2a,
+  onNavigateToSkill,
 }: CatalogPageProps) {
   const { timezone } = useTimezone();
   // Tag filter state
@@ -172,6 +177,9 @@ export function CatalogPage({
   const [a2aSortDir, setA2aSortDir] = useState<SortDirection>(() => loadSortDirection("catalog-a2a"));
   const [a2aTableCol, setA2aTableCol] = useState<string | null>("name");
   const [a2aTableDir, setA2aTableDir] = useState<SortDirection>("asc");
+  const [skillsSortDir, setSkillsSortDir] = useState<SortDirection>(() => loadSortDirection("catalog-skills"));
+  const [skillsTableCol, setSkillsTableCol] = useState<string | null>("name");
+  const [skillsTableDir, setSkillsTableDir] = useState<SortDirection>("asc");
 
   const handleAgentTableSort = (col: string) => {
     if (agentTableCol === col) {
@@ -203,6 +211,14 @@ export function CatalogPage({
     } else {
       setA2aTableCol(col);
       setA2aTableDir("asc");
+    }
+  };
+  const handleSkillsTableSort = (col: string) => {
+    if (skillsTableCol === col) {
+      setSkillsTableDir(skillsTableDir === "asc" ? "desc" : "asc");
+    } else {
+      setSkillsTableCol(col);
+      setSkillsTableDir("asc");
     }
   };
   const filteredAgents = agents
@@ -256,6 +272,29 @@ export function CatalogPage({
   useEffect(() => {
     void fetchA2aData();
   }, [fetchA2aData]);
+
+  // Skills data (SKILL records of the bound Agent Registry)
+  const [skillRecords, setSkillRecords] = useState<RegistryRecord[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(true);
+
+  const fetchSkillsData = useCallback(async () => {
+    if (!canViewSkills || !registryEnabled) {
+      setSkillsLoading(false);
+      return;
+    }
+    try {
+      const data = await listRegistryRecords({ descriptorType: "SKILL" });
+      setSkillRecords(data);
+    } catch {
+      // silently ignore
+    } finally {
+      setSkillsLoading(false);
+    }
+  }, [canViewSkills, registryEnabled]);
+
+  useEffect(() => {
+    void fetchSkillsData();
+  }, [fetchSkillsData]);
 
   // Memory data
   const [memories, setMemories] = useState<MemoryResponse[]>([]);
@@ -969,6 +1008,95 @@ export function CatalogPage({
                     <TableCell className="text-xs text-muted-foreground">{agent.auth_type === "oauth2" ? "OAuth2" : "None"}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {formatTimestamp(agent.created_at, timezone)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        ))}
+      </section>
+      )}
+
+      {/* Skills Section (SKILL records of the bound Agent Registry) */}
+      {canViewSkills && registryEnabled && (
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <button type="button" className="flex items-center gap-1 text-sm font-medium hover:text-foreground/80" onClick={() => toggleSection("skills")}>
+            {collapsedSections.has("skills") ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            Skills
+          </button>
+          {!collapsedSections.has("skills") && <SortButton direction={skillsSortDir} onClick={() => setSkillsSortDir(toggleSortDirection("catalog-skills", skillsSortDir))} />}
+        </div>
+
+        {!collapsedSections.has("skills") && (skillsLoading ? (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 2 }).map((_, i) => (
+              <Skeleton key={i} className="h-32" />
+            ))}
+          </div>
+        ) : skillRecords.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-8 text-center">
+            No skills published to the Agent Registry.
+          </p>
+        ) : viewMode === "cards" ? (
+          <SortableCardGrid
+            items={skillRecords}
+            getId={(s) => s.record_id}
+            getName={(s) => s.name}
+            storageKey="catalog-skills"
+            sortDirection={skillsSortDir}
+            onSortDirectionChange={(d) => { if (d) { setSkillsSortDir(d); saveSortDirection("catalog-skills", d); } }}
+            renderItem={(skill) => (
+              <Card
+                className={`group relative flex h-full flex-col gap-3.5 py-4 transition-colors hover:bg-accent/50${onNavigateToSkill ? " cursor-pointer" : ""}`}
+                onClick={onNavigateToSkill ? () => onNavigateToSkill(skill.record_id) : undefined}
+              >
+                <CardHeader className="gap-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <CardTitle className="min-w-0 flex-1 truncate font-mono text-sm font-medium tracking-tight" title={skill.name}>
+                      {skill.name}
+                    </CardTitle>
+                    <RegistryStatusBadge status={skill.status} />
+                  </div>
+                </CardHeader>
+                <CardContent className="flex flex-1 flex-col gap-3.5">
+                  <p className="text-xs text-muted-foreground line-clamp-3">{skill.description ?? "No description."}</p>
+                  <div className="mt-auto flex items-center gap-2 border-t pt-3 text-[11px] text-muted-foreground">
+                    <span>Updated {formatTimestamp(skill.updated_at, timezone)}</span>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          />
+        ) : (
+          <div className="rounded-md border overflow-hidden">
+            <Table className="table-fixed">
+              <TableHeader>
+                <TableRow className="bg-card hover:bg-card">
+                  <SortableTableHead column="name" activeColumn={skillsTableCol} direction={skillsTableDir} onSort={handleSkillsTableSort} className="w-[22%]">Name</SortableTableHead>
+                  <SortableTableHead column="description" activeColumn={skillsTableCol} direction={skillsTableDir} onSort={handleSkillsTableSort} className="w-[48%]">Description</SortableTableHead>
+                  <SortableTableHead column="status" activeColumn={skillsTableCol} direction={skillsTableDir} onSort={handleSkillsTableSort} className="w-[14%]">Status</SortableTableHead>
+                  <SortableTableHead column="updated" activeColumn={skillsTableCol} direction={skillsTableDir} onSort={handleSkillsTableSort} className="w-[16%]">Updated</SortableTableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sortRows(skillRecords, skillsTableCol, skillsTableDir, {
+                  name: (s) => s.name,
+                  description: (s) => s.description ?? "",
+                  status: (s) => s.status,
+                  updated: (s) => s.updated_at ?? "",
+                }).map((skill) => (
+                  <TableRow
+                    key={skill.record_id}
+                    className={`bg-input-bg hover:bg-input-bg/80${onNavigateToSkill ? " cursor-pointer" : ""}`}
+                    onClick={onNavigateToSkill ? () => onNavigateToSkill(skill.record_id) : undefined}
+                  >
+                    <TableCell className="font-medium text-sm">{skill.name}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground truncate">{skill.description ?? "—"}</TableCell>
+                    <TableCell><RegistryStatusBadge status={skill.status} /></TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {formatTimestamp(skill.updated_at, timezone)}
                     </TableCell>
                   </TableRow>
                 ))}

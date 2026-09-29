@@ -80,10 +80,6 @@ Resources:
           ScopeDescription: Read security configurations
         - ScopeName: security:write
           ScopeDescription: Write security configurations
-        - ScopeName: settings:read
-          ScopeDescription: Read settings
-        - ScopeName: settings:write
-          ScopeDescription: Write settings
         - ScopeName: tagging:read
           ScopeDescription: View tag policies and profiles
         - ScopeName: tagging:write
@@ -769,8 +765,6 @@ Resources:
         - !Sub "${pResourceServerIdentifier}/memory:write"
         - !Sub "${pResourceServerIdentifier}/security:read"
         - !Sub "${pResourceServerIdentifier}/security:write"
-        - !Sub "${pResourceServerIdentifier}/settings:read"
-        - !Sub "${pResourceServerIdentifier}/settings:write"
         - !Sub "${pResourceServerIdentifier}/tagging:read"
         - !Sub "${pResourceServerIdentifier}/tagging:write"
         - !Sub "${pResourceServerIdentifier}/costs:read"

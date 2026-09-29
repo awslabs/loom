@@ -13,7 +13,7 @@ const MCP_NAMESPACES: { value: McpNamespace; label: string }[] = [
 ];
 
 interface RegistryActionsProps {
-  resourceType: "mcp" | "a2a" | "agent";
+  resourceType: "mcp" | "a2a" | "agent" | "skill";
   resourceId: number;
   registryRecordId: string | null;
   registryStatus: string | null;
@@ -80,6 +80,10 @@ export function RegistryActions({ resourceType, resourceId, registryRecordId, re
   };
 
   if (!registryRecordId && !registryStatus) {
+    // A skill *is* a registry record from the moment it's created (there's
+    // no separate Loom resource to "register" it from, unlike mcp/a2a/agent)
+    // — this branch should never be reached for one.
+    if (resourceType === "skill") return null;
     return (
       <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
         {resourceType === "mcp" && (

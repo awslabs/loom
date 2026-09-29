@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
+import { RegistryActions } from "@/components/RegistryActions";
 import { useTimezone } from "@/contexts/TimezoneContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatTimestamp } from "@/lib/format";
@@ -312,6 +313,16 @@ function SkillDetail({
               </div>
             )}
           </div>
+
+          {canWrite && (
+            <RegistryActions
+              resourceType="skill"
+              resourceId={0}
+              registryRecordId={detail.record_id}
+              registryStatus={detail.status}
+              onAction={load}
+            />
+          )}
 
           <Card>
             <CardContent className="p-4">

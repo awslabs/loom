@@ -67,26 +67,31 @@ interface SkillDefinition {
 }
 
 /** Pull the structured fields + full SKILL.md body back out of a SKILL
- * record's descriptors, for pre-filling the edit form. */
+ * record's descriptors, for pre-filling the edit form.
+ *
+ * Name and description always come from the record's top-level `name`
+ * (displayName) and `description` fields — the same fields the skill card
+ * and detail header display — never from the descriptor JSON's own
+ * name/description, even though Loom's create/update form writes the same
+ * value to both. A record not authored through this form (e.g. published
+ * directly against the AWS API) can have those diverge; sourcing from the
+ * top-level fields keeps the edit form always showing what's actually on
+ * the card, and re-saving self-heals the descriptor JSON to match. */
 function parseSkillDefinition(detail: RegistryRecordDetail): SkillDefinition {
   const def = detail.descriptors?.agentSkillsDefinition as
     | { data?: string; additionalData?: { skillMd?: { data?: string } } }
     | undefined;
-  let name = detail.name;
-  let description = detail.description ?? "";
+  const name = detail.name;
+  const description = detail.description ?? "";
   let license = "";
   let author = "";
   let version = "";
   try {
     if (def?.data) {
       const data = JSON.parse(def.data) as {
-        name?: string;
-        description?: string;
         license?: string;
         metadata?: { author?: string; version?: string };
       };
-      name = data.name ?? name;
-      description = data.description ?? description;
       license = data.license ?? "";
       author = data.metadata?.author ?? "";
       version = data.metadata?.version ?? "";
@@ -283,7 +288,7 @@ function SkillDetail({
 
       {detail && editing && (
         <SkillForm
-          initial={{ ...parseSkillDefinition(detail), name: parseSkillDefinition(detail).name }}
+          initial={parseSkillDefinition(detail)}
           submitLabel="Save Changes"
           onSubmit={handleUpdate}
           onCancel={() => setEditing(false)}

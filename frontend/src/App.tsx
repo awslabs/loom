@@ -188,7 +188,7 @@ function AppContent() {
     if (hasScope("memory:read") || hasScope("memory:write")) return "memory";
     if (hasScope("agent:read") || hasScope("agent:write")) return "builder";
     if (hasScope("admin:read") || hasScope("costs:read")) return "admin";
-    if (hasScope("tagging:read") || hasScope("settings:read")) return "settings";
+    if (hasScope("tagging:read")) return "settings";
     if (hasScope("mcp:read") || hasScope("mcp:write") || hasScope("a2a:read") || hasScope("a2a:write")) return "integrations";
     return "catalog"; // fallback
   }, [hasScope]);
@@ -577,7 +577,7 @@ function AppContent() {
             )}
           </SidebarSection>
           <SidebarSection label={t("nav.sections.system")}>
-            {(effectiveHasScope("settings:read") || effectiveHasScope("tagging:read") || effectiveHasScope("tagging:write")) && (
+            {(effectiveHasScope("tagging:read") || effectiveHasScope("tagging:write")) && (
               <SidebarItem
                 icon={Settings}
                 label={t("nav.settings")}

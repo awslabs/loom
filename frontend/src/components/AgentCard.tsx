@@ -187,7 +187,7 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, deleteS
             className="w-fit"
             title={`No longer in the model catalog — update the agent's model: ${agent.deprecated_model_ids.join(", ")}`}
           >
-            <StatusPill label="Deprecated model" variant="warning" className="w-fit" />
+            <StatusPill label="DEPRECATED MODEL" variant="warning" className="w-fit" />
           </span>
         )}
         {creating && (

@@ -304,7 +304,10 @@ def create_record(
             detail="resource_type must be 'mcp', 'a2a', 'agent', or 'skill'",
         )
 
-    rv = "1.0"
+    # For skills, recordVersion should reflect the skill's own semver (SKILL.md
+    # metadata.version), not a placeholder — the detail/list pages display
+    # this value verbatim as the skill's version tag.
+    rv = request.skill_version if request.resource_type == "skill" and request.skill_version else "1.0"
     result = _call_registry(lambda: client.create_record(
         name=display_name,
         display_name=display_name,
@@ -416,7 +419,7 @@ def update_record(
         record_id=record_id,
         display_name=display_name,
         descriptors=descriptors,
-        record_version="1.0",
+        record_version=request.skill_version if request.skill_version else "1.0",
         description=description,
     ))
     # UpdateRegistryRecord is asynchronous, like CreateRegistryRecord — wait

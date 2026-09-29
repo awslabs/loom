@@ -492,5 +492,30 @@ class TestAgentsRouter(unittest.TestCase):
         self.assertEqual(data[0]["active_session_count"], 0)
 
 
+class TestConfigJsonEnvVar(unittest.TestCase):
+    """Test cases for _config_json_env_var — the CreateAgentRuntime
+    environmentVariables 5000-char-per-value size guard."""
+
+    def test_small_config_passes_through_inline(self) -> None:
+        from app.routers.agents import _config_json_env_var
+
+        with patch("app.routers.agents.bake_config_into_artifact") as mock_bake:
+            result = _config_json_env_var('{"system_prompt": "hi"}', "bucket", "key", "us-east-1")
+
+        mock_bake.assert_not_called()
+        self.assertEqual(result, {"AGENT_CONFIG_JSON": '{"system_prompt": "hi"}'})
+
+    def test_large_config_is_baked_into_artifact(self) -> None:
+        from app.routers.agents import _config_json_env_var
+
+        large_config = '{"system_prompt": "%s"}' % ("a" * 5000)
+        with patch("app.routers.agents.bake_config_into_artifact") as mock_bake:
+            result = _config_json_env_var(large_config, "bucket", "key", "us-east-1")
+
+        mock_bake.assert_called_once_with("bucket", "key", large_config, "us-east-1")
+        self.assertEqual(result, {"AGENT_CONFIG_PATH": "agent_config.json"})
+        self.assertNotIn("AGENT_CONFIG_JSON", result)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -279,8 +279,8 @@ export function AgentDetailPage({
               <CardHeader className="px-[18px]">
                 <CardTitle className="text-[13px] font-semibold">Registry</CardTitle>
               </CardHeader>
-              <CardContent className="flex flex-col gap-2.5 px-[18px]">
-                <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{approvalContext}</p>
+              <CardContent className="flex flex-col gap-2.5 px-[18px] min-w-0">
+                <p className="text-[12.5px] leading-[1.55] text-muted-foreground break-words">{approvalContext}</p>
                 {canManageRegistry && (
                   <RegistryActions
                     resourceType="agent"

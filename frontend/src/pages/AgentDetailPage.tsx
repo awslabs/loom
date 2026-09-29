@@ -12,6 +12,7 @@ import { DeploymentPanel, ModelsCard } from "@/components/DeploymentPanel";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
 import { RegistryActions } from "@/components/RegistryActions";
 import { ExternalIntegrationSection } from "@/components/ExternalIntegrationSection";
+import { AttachedSkillsSection } from "@/components/AttachedSkillsSection";
 import { StatusPill } from "@/components/StatusPill";
 import { statusVariant } from "@/lib/status";
 import { useTimezone } from "@/contexts/TimezoneContext";
@@ -270,6 +271,17 @@ export function AgentDetailPage({
                     <span className="truncate">{value}</span>
                   </div>
                 ))}
+              </CardContent>
+            </Card>
+          )}
+
+          {registryEnabled && (
+            <Card className="gap-2.5 py-4">
+              <CardHeader className="px-[18px]">
+                <CardTitle className="text-[13px] font-semibold">Skills</CardTitle>
+              </CardHeader>
+              <CardContent className="px-[18px]">
+                <AttachedSkillsSection agentId={agent.id} />
               </CardContent>
             </Card>
           )}

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db, SessionLocal
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.agent import Agent
+from app.models.integration import Integration
 from app.models.authorizer_config import AuthorizerConfig
 from app.models.config_entry import ConfigEntry
 from app.models.a2a import A2aAgent as A2aAgentModel, A2aAgentAccess
@@ -498,8 +499,60 @@ def _resolve_tags(
     return resolved, policy_dicts
 
 
-def _build_system_prompt(request: AgentCreateRequest) -> str:
-    """Combine agent_description, behavioral_guidelines, output_expectations into a system prompt."""
+def _get_attached_skill_prompt_text(agent_id: int, db: Session) -> str:
+    """Fetch the SKILL.md content of every enabled 'skill' integration attached
+    to this agent, from the live registry — not cached — so a skill that gets
+    un-approved, edited, or deleted after being attached is reflected on the
+    next redeploy rather than baked in stale at attach time. Skills that are
+    not currently APPROVED are silently skipped, matching the same
+    registry_status == "APPROVED" visibility rule already applied to MCP/A2A
+    records elsewhere in this codebase.
+    """
+    skill_integrations = db.query(Integration).filter(
+        Integration.agent_id == agent_id,
+        Integration.integration_type == "skill",
+        Integration.enabled == True,  # noqa: E712
+    ).all()
+    if not skill_integrations:
+        return ""
+
+    from app.services.registry import get_registry_client
+    client = get_registry_client()
+
+    sections: list[str] = []
+    for integration in skill_integrations:
+        try:
+            config = json.loads(integration.integration_config or "{}")
+        except json.JSONDecodeError:
+            continue
+        record_id = config.get("record_id")
+        if not record_id:
+            continue
+        try:
+            rec = client.get_record(record_id)
+        except Exception as e:
+            logger.warning("Failed to fetch attached skill record %s: %s", record_id, e)
+            continue
+        if not rec or rec.get("status") != "APPROVED":
+            continue
+        skill_md = (
+            rec.get("descriptors", {})
+            .get("agentSkillsDefinition", {})
+            .get("additionalData", {})
+            .get("skillMd", {})
+            .get("data", "")
+        )
+        if skill_md:
+            sections.append(skill_md)
+
+    if not sections:
+        return ""
+    return "## Attached Skills\n\n" + "\n\n---\n\n".join(sections)
+
+
+def _build_system_prompt(request: AgentCreateRequest, skill_prompt_text: str = "") -> str:
+    """Combine agent_description, behavioral_guidelines, output_expectations,
+    and any attached skills' content into a system prompt."""
     parts = []
     if request.agent_description:
         parts.append(request.agent_description)
@@ -517,6 +570,8 @@ def _build_system_prompt(request: AgentCreateRequest) -> str:
             "the `shell` tool (e.g. write a script and run `python3 script.py`) "
             "and read/write files via the `file_operations` tool."
         )
+    if skill_prompt_text:
+        parts.append(skill_prompt_text)
     return "\n\n".join(parts) if parts else "You are a helpful assistant."
 
 
@@ -3618,7 +3673,8 @@ def redeploy_deploy_agent(
     ]
 
     resolved_tags, tag_policy_dicts = _resolve_tags(db, request.tags)
-    system_prompt = _build_system_prompt(request)
+    skill_prompt_text = _get_attached_skill_prompt_text(agent.id, db)
+    system_prompt = _build_system_prompt(request, skill_prompt_text)
     model_max_tokens = next(
         (m["max_tokens"] for m in SUPPORTED_MODELS if m["model_id"] == request.model_id),
         4096,
@@ -3699,7 +3755,8 @@ def redeploy_harness_agent(
 
     # Update agent fields
     resolved_tags, _ = _resolve_tags(db, request.tags)
-    system_prompt = _build_system_prompt(request)
+    skill_prompt_text = _get_attached_skill_prompt_text(agent.id, db)
+    system_prompt = _build_system_prompt(request, skill_prompt_text)
 
     provider = request.provider
     litellm_base_url: str | None = None

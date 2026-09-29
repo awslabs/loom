@@ -20,8 +20,9 @@ import { listMcpServers } from "@/api/mcp";
 import { listA2aAgents } from "@/api/a2a";
 import { useAuth } from "@/contexts/AuthContext";
 import { listMemories } from "@/api/memories";
+import { listRegistryRecords } from "@/api/registry";
 import { ResourceTagFields } from "@/components/ResourceTagFields";
-import type { AgentDeployRequest, AgentHarnessDeployRequest, ModelOption, Provider, ManagedRole, AuthorizerConfigResponse, TagProfile, McpServer, A2aAgent, MemoryResponse, VpcConfig, VpcConfigDetail } from "@/api/types";
+import type { AgentDeployRequest, AgentHarnessDeployRequest, ModelOption, Provider, ManagedRole, AuthorizerConfigResponse, TagProfile, McpServer, A2aAgent, MemoryResponse, RegistryRecord, VpcConfig, VpcConfigDetail } from "@/api/types";
 import { groupModels } from "@/lib/models";
 import { toast } from "sonner";
 
@@ -231,6 +232,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   const [selectedMcpServerIds, setSelectedMcpServerIds] = useState<number[]>([]);
   const [selectedA2aAgentIds, setSelectedA2aAgentIds] = useState<number[]>([]);
   const [selectedMemoryIds, setSelectedMemoryIds] = useState<number[]>([]);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [codeInterpreterEnabled, setCodeInterpreterEnabled] = useState(false);
   const [codeInterpreterRegion, setCodeInterpreterRegion] = useState("us-east-1");
   const [codeInterpreterNetworkMode, setCodeInterpreterNetworkMode] = useState("SANDBOX");
@@ -238,6 +240,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [a2aAgents, setA2aAgents] = useState<A2aAgent[]>([]);
   const [memories, setMemories] = useState<MemoryResponse[]>([]);
+  const [skills, setSkills] = useState<RegistryRecord[]>([]);
 
   // Tag state (populated by ResourceTagFields via profile selection)
   const [tagValues, setTagValues] = useState<Record<string, string>>({});
@@ -273,6 +276,9 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
         listMcpServers().then(setMcpServers).catch(() => {}),
         listA2aAgents().then(setA2aAgents).catch(() => {}),
         listMemories().then(setMemories).catch(() => {}),
+        hasScope("registry:read")
+          ? listRegistryRecords({ status: "APPROVED", descriptorType: "SKILL" }).then(setSkills).catch(() => {})
+          : Promise.resolve(),
       ]).then(() => setDataLoaded(true));
     }
   }, [mode]);
@@ -363,6 +369,12 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
           })
           .filter((id): id is number => id !== undefined);
         setSelectedMemoryIds(ids);
+      }
+      if (Array.isArray(parsed.skills)) {
+        const ids = (parsed.skills as string[])
+          .map((s) => skills.find((sk) => sk.name === s || sk.record_id === s)?.record_id)
+          .filter((id): id is string => id !== undefined);
+        setSelectedSkillIds(ids);
       }
       if (parsed.code_interpreter != null) {
         const ci = typeof parsed.code_interpreter === "object" ? parsed.code_interpreter as Record<string, unknown> : null;
@@ -535,6 +547,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
         authorizer_client_secret: null,
         mcp_servers: selectedMcpServerIds,
         memory_ids: selectedMemoryIds,
+        skill_ids: selectedSkillIds,
         tags: Object.fromEntries(
           Object.entries(tagValues).filter(([, v]) => v.trim() !== "")
         ),
@@ -607,6 +620,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
         memory_ids: selectedMemoryIds,
         mcp_servers: selectedMcpServerIds,
         a2a_agents: selectedA2aAgentIds,
+        skill_ids: selectedSkillIds,
         code_interpreter_enabled: codeInterpreterEnabled,
         code_interpreter_region: codeInterpreterRegion,
         code_interpreter_network_mode: codeInterpreterNetworkMode,
@@ -636,6 +650,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       setSelectedMcpServerIds([]);
       setSelectedA2aAgentIds([]);
       setSelectedMemoryIds([]);
+      setSelectedSkillIds([]);
       setCodeInterpreterEnabled(false);
       setCodeInterpreterRegion("us-east-1");
       setCodeInterpreterNetworkMode("SANDBOX");
@@ -776,6 +791,12 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                         .filter((id: number | undefined): id is number => id !== undefined);
                       setSelectedMemoryIds(ids);
                     }
+                    if (Array.isArray(parsed.skills)) {
+                      const ids = parsed.skills
+                        .map((s: string) => skills.find((sk) => sk.name === s || sk.record_id === s)?.record_id)
+                        .filter((id: string | undefined): id is string => id !== undefined);
+                      setSelectedSkillIds(ids);
+                    }
                     if (parsed.code_interpreter != null) {
                       const ci = typeof parsed.code_interpreter === "object" ? parsed.code_interpreter as Record<string, unknown> : null;
                       if (ci) {
@@ -867,6 +888,12 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                     result.memories = selectedMemoryIds.map((id) => {
                       const mem = memories.find((m) => m.id === id);
                       return mem?.name ?? id;
+                    });
+                  }
+                  if (selectedSkillIds.length > 0) {
+                    result.skills = selectedSkillIds.map((id) => {
+                      const skill = skills.find((s) => s.record_id === id);
+                      return skill?.name ?? id;
                     });
                   }
                   if (codeInterpreterEnabled) {
@@ -1439,6 +1466,41 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                 </div>
               </section>
 
+              {/* Skills (admin-only — registry:read gates visibility of skill names/content) */}
+              {hasScope("registry:read") && (
+              <section className="space-y-3">
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Skills</h4>
+                <div className="space-y-1.5">
+                  {skills.length === 0 ? (
+                    <p className="text-xs text-muted-foreground italic">No approved skills available. Write one on the Skills page first.</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {skills.map((skill) => (
+                        <label key={skill.record_id} className="flex items-center gap-2 text-xs cursor-pointer min-w-0">
+                          <input
+                            type="checkbox"
+                            className="h-3.5 w-3.5 shrink-0"
+                            checked={selectedSkillIds.includes(skill.record_id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedSkillIds((prev) => [...prev, skill.record_id]);
+                              } else {
+                                setSelectedSkillIds((prev) => prev.filter((id) => id !== skill.record_id));
+                              }
+                            }}
+                          />
+                          <span className="font-mono shrink-0">{skill.name}</span>
+                          {skill.description && (
+                            <span className="text-muted-foreground truncate">{skill.description}</span>
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </section>
+              )}
+
               {/* MCP Servers */}
               <section className="space-y-3">
                 <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">MCP Servers{deploymentType === "managed" ? " (Remote MCP Tools)" : ""}</h4>
@@ -1614,6 +1676,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                     setSelectedMcpServerIds([]);
                     setSelectedA2aAgentIds([]);
                     setSelectedMemoryIds([]);
+                    setSelectedSkillIds([]);
                     setCodeInterpreterEnabled(false);
                     setCodeInterpreterRegion("us-east-1");
                     setCodeInterpreterNetworkMode("SANDBOX");

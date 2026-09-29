@@ -69,6 +69,9 @@ frontend/
 │   │   ├── ResourceTagFields.tsx       # Shared tag profile selector + tag resolution
 │   │   ├── DeploymentPanel.tsx # Deployment details panel
 │   │   ├── ExternalIntegrationSection.tsx # External integration info (endpoints, auth, code snippets)
+│   │   ├── AttachedSkillsSection.tsx # Attach/detach APPROVED registry SKILL records to an agent (issue #61)
+│   │   ├── SkillDocument.tsx   # Renders SKILL.md body: IMPORTANT callouts, dash bullets, a 3-col numbered step table — hand-styled to match the Claude Design mockup's type scale, not Tailwind's prose defaults
+│   │   ├── SkillEditor.tsx     # Create/edit SKILL.md content: name/description/license/version fields + a live SkillDocument preview of the body textarea
 │   │   ├── InvokePanel.tsx     # Qualifier select, credential select, model select, prompt input, invoke/cancel
 │   │   ├── LatencySummary.tsx  # Invocation metrics (timing + token usage + cost)
 │   │   ├── SessionTable.tsx    # Clickable session list
@@ -84,7 +87,7 @@ frontend/
 │   │   ├── LoginPage.tsx        # Cognito login + NEW_PASSWORD_REQUIRED challenge
 │   │   ├── McpServersPage.tsx  # MCP server management: list, detail, tools, access
 │   │   ├── A2aAgentsPage.tsx       # A2A agent management with card/access tabs
-│   │   ├── SkillsPage.tsx          # Read-only browser for registry SKILL records (list + detail)
+│   │   ├── SkillsPage.tsx          # Browser + (registry:write) create/edit/delete + submit/approve/reject for registry SKILL records (list + detail; issue #61); Claude Design-driven redesign, card/detail header aligned to AgentCard/Agent-detail conventions, "Registry" governance card (renamed from "Governance")
 │   │   ├── MemoryManagementPage.tsx # Memory persona: memory resource management
 │   │   ├── TaggingPage.tsx         # Tagging persona: tag policy + tag profile CRUD
 │   │   ├── SettingsPage.tsx        # Settings persona: display preferences + cost estimation settings
@@ -318,6 +321,9 @@ Full deployment form with sections:
 
 ### External Integration (READY deployed agents only)
 - `ExternalIntegrationSection` component fetches integration info from `GET /api/agents/{id}/integration` and displays endpoint URLs, auth requirements, and copy-ready code snippets.
+- `AttachedSkillsSection` (issue #61) lists the agent's `integration_type="skill"` integrations, and a `SearchableSelect` picker limited to `APPROVED`-status SKILL records for attaching more. Uses the existing generic `listIntegrations`/`createIntegration`/`deleteIntegration` client (`@/api/integrations`) — this is that client's first consumer in the frontend. Attaching/detaching a skill only takes effect on the agent's next full redeploy, not the quick "Redeploy" button; the section's own doc comment and a toast on attach/detach both call this out.
+- `AgentRegistrationForm.tsx` also has its own Skills checklist (gated on `registry:read`, matching the Memory/MCP/A2A checklists) so skills can be selected at initial create time, not just afterward via `AttachedSkillsSection` — submitted as `skill_ids` on `AgentDeployRequest`/`AgentHarnessDeployRequest`, and included (by name) in the JSON import/export manifest alongside `mcp_servers`/`a2a_agents`/`memories`.
+- `AgentDetailPage.tsx`'s "Registry" rail card fetches the agent's own registry record (`getRegistryRecord`, gated on the same `registry:read`/`canViewSkills` signal) to show the registry's actual `statusReason` (why it was approved/rejected) alongside the existing generic status narrative — previously the card only showed the narrative, never the real reason text the Skills detail page already surfaced for SKILL records.
 - **Endpoint info:** Runtime ARN, protocol badge (HTTP/MCP/A2A), network mode badge (PUBLIC/VPC with icon), per-qualifier invocation URLs and protocol-specific URLs (MCP streamable HTTP, A2A agent card). All URL/ARN fields have copy-to-clipboard buttons.
 - **Auth info (SigV4):** IAM action, resource ARN, execution role, example IAM policy (JSON), boto3 snippet, and AWS CLI snippet in syntax-highlighted copyable code blocks.
 - **Auth info (OAuth2):** Authorizer type badge, OIDC discovery URL, token endpoint, allowed client IDs and scopes as badges, example token request and invocation curl snippets. Client secrets are never displayed — a note directs users to their identity provider administrator.

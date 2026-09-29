@@ -13,7 +13,7 @@ const MCP_NAMESPACES: { value: McpNamespace; label: string }[] = [
 ];
 
 interface RegistryActionsProps {
-  resourceType: "mcp" | "a2a" | "agent";
+  resourceType: "mcp" | "a2a" | "agent" | "skill";
   resourceId: number;
   registryRecordId: string | null;
   registryStatus: string | null;
@@ -80,6 +80,10 @@ export function RegistryActions({ resourceType, resourceId, registryRecordId, re
   };
 
   if (!registryRecordId && !registryStatus) {
+    // A skill *is* a registry record from the moment it's created (there's
+    // no separate Loom resource to "register" it from, unlike mcp/a2a/agent)
+    // — this branch should never be reached for one.
+    if (resourceType === "skill") return null;
     return (
       <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
         {resourceType === "mcp" && (
@@ -164,96 +168,70 @@ export function RegistryActions({ resourceType, resourceId, registryRecordId, re
         </div>
       );
     }
+    const showReasonInput = showApproveInput || showRejectInput;
+    const reason = showApproveInput ? approveReason : rejectReason;
+    const setReason = showApproveInput ? setApproveReason : setRejectReason;
+    const cancel = () => {
+      setShowApproveInput(false);
+      setShowRejectInput(false);
+      setApproveReason("");
+      setRejectReason("");
+    };
     return (
-      <div className="flex flex-wrap items-start gap-1.5 w-full min-w-0" onClick={(e) => e.stopPropagation()}>
-        {!showApproveInput ? (
+      <div className="flex flex-col gap-1 w-full min-w-0" onClick={(e) => e.stopPropagation()}>
+        {showReasonInput && (
+          <input
+            type="text"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Reason..."
+            className="h-6 text-xs border rounded px-1.5 bg-input-bg w-full"
+            autoFocus
+          />
+        )}
+        <div className="flex items-center gap-1 flex-wrap">
           <Button
             size="sm"
             variant="outline"
             className="h-6 text-xs"
-            disabled={loading}
-            onClick={() => { setShowApproveInput(true); setShowRejectInput(false); }}
+            disabled={loading || (showApproveInput && !approveReason.trim())}
+            onClick={() => {
+              if (!showApproveInput) {
+                setShowApproveInput(true);
+                setShowRejectInput(false);
+                return;
+              }
+              setApproving(true);
+              void handleAction(() => registryApi.approveRecord(registryRecordId, approveReason.trim()), "Record approved")
+                .then((ok) => { if (!ok) setApproving(false); });
+            }}
           >
-            Approve
+            {showApproveInput ? "Confirm" : "Approve"}
           </Button>
-        ) : (
-          <div className="flex flex-col gap-1.5 w-full min-w-0">
-            <input
-              type="text"
-              value={approveReason}
-              onChange={(e) => setApproveReason(e.target.value)}
-              placeholder="Reason..."
-              className="h-6 text-xs border rounded px-1.5 bg-input-bg w-full min-w-0"
-            />
-            <div className="flex items-center gap-1.5">
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-6 text-xs"
-                disabled={loading || !approveReason.trim()}
-                onClick={() => {
-                  setApproving(true);
-                  void handleAction(() => registryApi.approveRecord(registryRecordId, approveReason.trim()), "Record approved")
-                    .then((ok) => { if (!ok) setApproving(false); });
-                }}
-              >
-                Confirm
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-6 text-xs"
-                onClick={() => { setShowApproveInput(false); setApproveReason(""); }}
-              >
-                Cancel
-              </Button>
-            </div>
-          </div>
-        )}
-        {!showRejectInput ? (
           <Button
             size="sm"
             variant="outline"
             className="h-6 text-xs text-destructive"
-            disabled={loading}
-            onClick={() => { setShowRejectInput(true); setShowApproveInput(false); }}
+            disabled={loading || (showRejectInput && !rejectReason.trim())}
+            onClick={() => {
+              if (!showRejectInput) {
+                setShowRejectInput(true);
+                setShowApproveInput(false);
+                return;
+              }
+              setRejecting(true);
+              void handleAction(() => registryApi.rejectRecord(registryRecordId, rejectReason.trim()), "Record rejected")
+                .then((ok) => { if (!ok) setRejecting(false); });
+            }}
           >
-            Reject
+            {showRejectInput ? "Confirm" : "Reject"}
           </Button>
-        ) : (
-          <div className="flex flex-col gap-1.5 w-full min-w-0">
-            <input
-              type="text"
-              value={rejectReason}
-              onChange={(e) => setRejectReason(e.target.value)}
-              placeholder="Reason..."
-              className="h-6 text-xs border rounded px-1.5 bg-input-bg w-full min-w-0"
-            />
-            <div className="flex items-center gap-1.5">
-              <Button
-                size="sm"
-                variant="destructive"
-                className="h-6 text-xs"
-                disabled={loading || !rejectReason.trim()}
-                onClick={() => {
-                  setRejecting(true);
-                  void handleAction(() => registryApi.rejectRecord(registryRecordId, rejectReason.trim()), "Record rejected")
-                    .then((ok) => { if (!ok) setRejecting(false); });
-                }}
-              >
-                Confirm
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-6 text-xs"
-                onClick={() => { setShowRejectInput(false); setRejectReason(""); }}
-              >
-                Cancel
-              </Button>
-            </div>
-          </div>
-        )}
+          {showReasonInput && (
+            <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={cancel}>
+              Cancel
+            </Button>
+          )}
+        </div>
       </div>
     );
   }

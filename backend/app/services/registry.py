@@ -164,16 +164,24 @@ class RegistryClient:
         )
 
     def wait_for_record(self, record_id: str, poll_interval: int = 5) -> dict[str, Any]:
-        """Poll until the record leaves the CREATING state."""
+        """Poll until the record leaves an in-progress state (CREATING or
+        UPDATING — both CreateRegistryRecord and UpdateRegistryRecord are
+        asynchronous). Without waiting for UPDATING to clear too, a caller
+        that reads the record immediately after an update can observe the
+        transient UPDATING status, which RegistryStatusBadge has no case for
+        and falls back to rendering as "UNREGISTERED" instead of the
+        record's real (DRAFT/APPROVED/etc.) status.
+        """
         if not self._require_registry():
             return {}
+        in_progress = {"CREATING", "UPDATING"}
         while True:
             rec = self.get_record(record_id)
             status = rec.get("status", "")
-            if status != "CREATING":
+            if status not in in_progress:
                 logger.info("Record %s reached status %s", record_id, status)
                 return rec
-            logger.debug("Record %s still CREATING; polling in %ds", record_id, poll_interval)
+            logger.debug("Record %s still %s; polling in %ds", record_id, status, poll_interval)
             time.sleep(poll_interval)
 
     def list_records(self) -> dict[str, Any]:
@@ -238,7 +246,7 @@ class RegistryClient:
         kwargs: dict[str, Any] = dict(
             registryId=self.registry_id,
             recordId=record_id,
-            displayName=display_name,
+            displayName={"optionalValue": display_name},
             descriptors=update_descriptors,
             recordVersion=record_version,
         )
@@ -371,6 +379,45 @@ class RegistryClient:
             "a2aAgentCard": {
                 "dataSchemaVersion": "0.3",
                 "data": json.dumps(agent_card),
+            }
+        }
+
+    @staticmethod
+    def build_skill_descriptors(
+        name: str,
+        description: str,
+        skill_license: str,
+        metadata_author: str,
+        metadata_version: str,
+        skill_md: str,
+    ) -> dict[str, Any]:
+        """Build SKILL-type descriptors.
+
+        Confirmed by direct trial against a live AWS Agent Registry (see
+        tmp/issues/061-add-skill-management-capabilities.md): `data` must be
+        *exactly* {name, description, license, metadata: {author, version}} —
+        no other top-level keys (e.g. repository/websiteUrl) — or AWS rejects
+        it with "does not match any supported version". dataSchemaVersion
+        must be omitted entirely and left for AWS to auto-assign; passing any
+        explicit value (even a plausible-looking one) is rejected with
+        "Schema version 'X' is not supported for descriptor type
+        'agent_skills'". The full SKILL.md body goes in
+        additionalData.skillMd.data as a raw string, not JSON-wrapped.
+        """
+        data = {
+            "name": name,
+            "description": description,
+            "license": skill_license,
+            "metadata": {"author": metadata_author, "version": metadata_version},
+        }
+        return {
+            "agentSkillsDefinition": {
+                "data": json.dumps(data),
+                "additionalData": {
+                    "skillMd": {
+                        "data": skill_md,
+                    },
+                },
             }
         }
 

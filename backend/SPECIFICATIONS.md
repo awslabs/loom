@@ -1124,6 +1124,7 @@ Handles agent artifact build and runtime lifecycle:
 
 - Builds agent artifacts by cross-compiling pip dependencies for ARM64 (`manylinux2014_aarch64`).
 - Creates, updates, and deletes AgentCore runtimes and endpoints.
+- `create_runtime()` and `update_runtime()` always set `platformVersion="V2"` in the boto3 call params, so every runtime Loom creates or updates lands on AgentCore Runtime v2 (snapshot-restore cold starts, paged memory) with no caller-supplied flag. Requires `boto3>=1.43.95` — earlier versions' `bedrock-agentcore-control` service model doesn't expose `platformVersion` on `CreateAgentRuntime`/`UpdateAgentRuntime`.
 - `update_runtime()` accepts optional `description`, `env_vars`, `role_arn`, `authorizer_config`, and `region` parameters. Description updates are propagated from the `PATCH /api/agents/{id}` endpoint.
 - Updates agent runtime authorizer configuration (e.g., adding client IDs to `allowedClients`).
 - Validates configuration values for secrets, stores/updates/deletes secrets in AWS Secrets Manager.

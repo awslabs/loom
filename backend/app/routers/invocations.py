@@ -997,6 +997,7 @@ async def invoke_harness_agent_stream(
     dynamic_tools: list[dict[str, Any]] | None = None,
     user_access_token: str | None = None,
     delegation_mode: str = "m2m",
+    usage_warnings: list[str] | None = None
 ) -> AsyncGenerator[str, None]:
     """Invoke a harness-deployed agent and yield SSE events.
 
@@ -1116,6 +1117,8 @@ async def invoke_harness_agent_stream(
         harness_token_summary = _extract_token_summary(access_token, "user", token_source)
         if harness_token_summary:
             harness_start_data["user_token"] = harness_token_summary
+        if usage_warnings: 
+            harness_start_data["usage_warnings"] = usage_warnings
     yield format_sse_event("session_start", harness_start_data)
 
     if delegation_mode == "obo" and not user_access_token:
@@ -1764,6 +1767,7 @@ async def invoke_agent_endpoint(
             dynamic_harness_tools,
             user_access_token=user_access_token,
             delegation_mode=delegation_mode,
+            usage_warnings=decision.warnings,
         )
     else:
         stream_gen = invoke_agent_stream(
@@ -1775,6 +1779,7 @@ async def invoke_agent_endpoint(
             supports_elicitation=has_elicitation_connector,
             user_access_token=user_access_token,
             delegation_mode=delegation_mode,
+            usage_warnings=decision.warnings,
         )
 
     return StreamingResponse(

@@ -264,8 +264,16 @@ def _invoke_bedrock_mantle(
     payload_bytes = json.dumps(body).encode("utf-8")
     headers = _sign_mantle_request("POST", url, target.region, payload_bytes)
 
+    # Bandit B310 flags any urlopen() call since it can't verify the scheme
+    # statically — assert the invariant explicitly rather than trusting the
+    # construction above: this must always be the fixed https bedrock-mantle
+    # endpoint for this region, never an arbitrary/user-influenced URL.
+    expected_prefix = f"https://bedrock-mantle.{target.region}.api.aws/"
+    if not url.startswith(expected_prefix):
+        raise ValueError(f"Refusing to invoke unexpected bedrock-mantle URL: {url!r}")
+
     request = urllib.request.Request(url, data=payload_bytes, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=60) as resp:  # noqa: S310 - internal AWS endpoint, SigV4-signed
+    with urllib.request.urlopen(request, timeout=60) as resp:  # nosec B310  # noqa: S310
         data = json.loads(resp.read())
 
     if target.api == "messages":

@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.services.deployment import (
+    bake_config_into_artifact,
     build_agent_artifact,
     create_runtime,
     create_runtime_endpoint,
@@ -579,6 +580,39 @@ class TestStoreLargeConfig(unittest.TestCase):
             ContentType="text/plain",
         )
         self.assertEqual(result, "s3://my-bucket/my-agent/config/large-config")
+
+
+class TestBakeConfigIntoArtifact(unittest.TestCase):
+    """Test cases for bake_config_into_artifact function."""
+
+    @patch("boto3.client")
+    def test_bakes_config_file_into_existing_zip(self, mock_boto_client: MagicMock) -> None:
+        """Downloads the artifact zip, adds agent_config.json, re-uploads it."""
+        import io
+        import zipfile
+
+        original = io.BytesIO()
+        with zipfile.ZipFile(original, "w") as zf:
+            zf.writestr("src/handler.py", "# handler")
+        original.seek(0)
+
+        mock_client = MagicMock()
+        mock_client.get_object.return_value = {"Body": io.BytesIO(original.getvalue())}
+        mock_boto_client.return_value = mock_client
+
+        bake_config_into_artifact("my-bucket", "loom-artifacts/agent.zip", '{"system_prompt": "hi"}', "us-east-1")
+
+        mock_client.get_object.assert_called_once_with(Bucket="my-bucket", Key="loom-artifacts/agent.zip")
+        mock_client.put_object.assert_called_once()
+        put_kwargs = mock_client.put_object.call_args.kwargs
+        self.assertEqual(put_kwargs["Bucket"], "my-bucket")
+        self.assertEqual(put_kwargs["Key"], "loom-artifacts/agent.zip")
+
+        with zipfile.ZipFile(io.BytesIO(put_kwargs["Body"])) as zf:
+            names = zf.namelist()
+            self.assertIn("src/handler.py", names)
+            self.assertIn("agent_config.json", names)
+            self.assertEqual(zf.read("agent_config.json").decode(), '{"system_prompt": "hi"}')
 
 
 class TestFixConsoleScriptShebangs(unittest.TestCase):

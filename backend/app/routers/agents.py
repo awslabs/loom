@@ -226,6 +226,7 @@ class AgentResponse(BaseModel):
     authorizer_config: dict | None = None
     model_id: str | None = None
     allowed_model_ids: list[str] = []
+    deprecated_model_ids: list[str] = []
     provider: str = "bedrock"
     base_url: str | None = None
     deployed_at: str | None = None
@@ -342,6 +343,21 @@ def compute_active_session_count(agent_id: int, db: Session) -> int:
     return count
 
 
+def _get_current_model_id(agent: Agent) -> str | None:
+    """Read the agent's currently-configured default model_id straight from
+    its AGENT_CONFIG_JSON config entry — there's no dedicated column for it
+    (unlike allowed_model_ids). Used to grandfather an already-assigned
+    model through PATCH validation even if it's since been dropped from
+    the catalog (#64 follow-up)."""
+    for entry in agent.config_entries:
+        if entry.key == "AGENT_CONFIG_JSON":
+            try:
+                return json.loads(entry.value).get("model_id")
+            except (json.JSONDecodeError, TypeError):
+                return None
+    return None
+
+
 def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     """Build an AgentResponse from an Agent ORM object."""
     model_id = None
@@ -439,10 +455,22 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     if not allowed_models and model_id:
         allowed_models = [model_id]
 
+    # Flag model IDs no longer in the current catalog (dropped by a
+    # models.json refresh, #64 follow-up) so the UI can surface "this agent
+    # needs to be updated" without blocking the agent itself — grandfathered
+    # models keep working, they're just no longer assignable to new agents
+    # (see the matching PATCH /{agent_id} validation below).
+    valid_model_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
+    candidate_ids = list(allowed_models)
+    if model_id and model_id not in candidate_ids:
+        candidate_ids.append(model_id)
+    deprecated_model_ids = sorted(mid for mid in candidate_ids if mid not in valid_model_ids)
+
     result = AgentResponse(
         **agent_dict,
         model_id=model_id,
         allowed_model_ids=allowed_models,
+        deprecated_model_ids=deprecated_model_ids,
         provider=provider,
         base_url=base_url,
         active_session_count=compute_active_session_count(agent.id, db),
@@ -4117,7 +4145,13 @@ def patch_agent(
                 logger.warning("Failed to propagate description to AgentCore for agent %s", agent_id, exc_info=True)
     if "model_id" in request.model_fields_set and request.model_id is not None:
         valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
-        if request.model_id not in valid_ids:
+        # Grandfather the agent's current model in — a model dropped from
+        # the catalog by a models.json refresh stays assignable to agents
+        # that already have it (it still works; it's just no longer
+        # offered for new selections), so a no-op PATCH doesn't 400 (#64
+        # follow-up). Switching to a *different* invalid model is still
+        # rejected.
+        if request.model_id not in valid_ids and request.model_id != _get_current_model_id(agent):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid model ID: {request.model_id}",
@@ -4133,7 +4167,11 @@ def patch_agent(
                 break
     if "allowed_model_ids" in request.model_fields_set and request.allowed_model_ids is not None:
         valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
-        invalid = [m for m in request.allowed_model_ids if m not in valid_ids]
+        # Same grandfathering as model_id above: an already-assigned model
+        # can be kept (or dropped) even if it's no longer in the catalog;
+        # only *adding* a model not in either set is rejected.
+        already_assigned = set(agent.get_allowed_model_ids())
+        invalid = [m for m in request.allowed_model_ids if m not in valid_ids and m not in already_assigned]
         if invalid:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

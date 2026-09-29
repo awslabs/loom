@@ -87,7 +87,18 @@ export function ModelsCard({
     setDraft((prev) => (prev.includes(modelId) ? prev.filter((id) => id !== modelId) : [...prev, modelId]));
   };
 
-  const shownModels = editing ? allModels : allModels.filter((m) => allowedIds.includes(m.model_id) || m.model_id === agent.model_id);
+  // Deprecated ids (dropped from the catalog by a models.json refresh, see
+  // #64) have no entry in allModels — synthesize a placeholder so they
+  // still render as a chip instead of silently vanishing.
+  const deprecatedIds = new Set(agent.deprecated_model_ids ?? []);
+  const knownIds = new Set(allModels.map((m) => m.model_id));
+  const assignedIds = [...allowedIds, ...(agent.model_id ? [agent.model_id] : [])];
+  const missingIds = [...new Set(assignedIds.filter((id) => !knownIds.has(id)))];
+  const deprecatedEntries: ModelOption[] = missingIds.map((id) => ({ model_id: id, display_name: id, group: "Deprecated" }));
+
+  const shownModels = editing
+    ? [...allModels, ...deprecatedEntries]
+    : [...allModels.filter((m) => allowedIds.includes(m.model_id) || m.model_id === agent.model_id), ...deprecatedEntries];
   const grouped = groupModels(shownModels);
 
   return (
@@ -113,11 +124,15 @@ export function ModelsCard({
                     {models.map((m) => {
                       const isDefault = m.model_id === defaultDraft;
                       const isChecked = draft.includes(m.model_id);
+                      const isDeprecated = deprecatedIds.has(m.model_id);
                       return (
                         <label
                           key={m.model_id}
+                          title={isDeprecated ? "No longer in the model catalog — still works, but consider removing it" : undefined}
                           className={`flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 font-mono text-[11.5px] ${
-                            isDefault ? "border border-primary/30 bg-primary/[0.07] text-primary" : isChecked ? "border bg-muted" : "border border-dashed text-muted-foreground"
+                            isDeprecated
+                              ? "border border-warning/40 bg-warning-bg text-warning"
+                              : isDefault ? "border border-primary/30 bg-primary/[0.07] text-primary" : isChecked ? "border bg-muted" : "border border-dashed text-muted-foreground"
                           }`}
                         >
                           <input type="checkbox" className="h-3 w-3 shrink-0" checked={isChecked} disabled={isDefault} onChange={() => toggle(m.model_id)} />
@@ -155,16 +170,21 @@ export function ModelsCard({
                 <div className="flex flex-wrap gap-1.5">
                   {models.map((m) => {
                     const isDefault = m.model_id === agent.model_id;
+                    const isDeprecated = deprecatedIds.has(m.model_id);
                     return (
                       <span
                         key={m.model_id}
+                        title={isDeprecated ? "No longer in the model catalog — still works, but consider updating this agent's model" : undefined}
                         className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-mono text-[11.5px] ${
-                          isDefault ? "border border-primary/30 bg-primary/[0.07] text-primary" : "border bg-muted text-foreground"
+                          isDeprecated
+                            ? "border border-warning/40 bg-warning-bg text-warning"
+                            : isDefault ? "border border-primary/30 bg-primary/[0.07] text-primary" : "border bg-muted text-foreground"
                         }`}
                       >
-                        {isDefault && <span className="h-1 w-1 rounded-full bg-primary" />}
+                        {isDefault && !isDeprecated && <span className="h-1 w-1 rounded-full bg-primary" />}
                         {m.display_name}
                         {isDefault && <span className="text-[9.5px] tracking-wide">DEFAULT</span>}
+                        {isDeprecated && <span className="text-[9.5px] tracking-wide uppercase">deprecated</span>}
                       </span>
                     );
                   })}

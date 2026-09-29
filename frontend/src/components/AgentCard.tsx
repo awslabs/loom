@@ -182,6 +182,14 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, deleteS
         {agent.status && agent.status !== "READY" && (
           <StatusPill label={agent.status} variant={statusVariant(agent.status)} className="w-fit" />
         )}
+        {agent.deprecated_model_ids.length > 0 && (
+          <span
+            className="w-fit"
+            title={`No longer in the model catalog — update the agent's model: ${agent.deprecated_model_ids.join(", ")}`}
+          >
+            <StatusPill label="Deprecated model" variant="warning" className="w-fit" />
+          </span>
+        )}
         {creating && (
           <div className="flex items-center gap-1.5 text-muted-foreground">
             <Loader2 className="h-3 w-3 animate-spin" />

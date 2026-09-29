@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.main import app
 from app.db import Base, get_db
+from app.dependencies.auth import UserInfo, get_current_user
 from app.models.agent import Agent
 from app.models.mcp import McpServer, McpTool
 from app.models.a2a import A2aAgent
@@ -119,6 +120,20 @@ class TestRegistryRouter(unittest.TestCase):
         self.session.commit()
         self.session.refresh(agent)
         return agent
+
+    def _override_admin_user(self) -> None:
+        """Explicitly override get_current_user for tests that need real scope
+        enforcement verified, rather than relying on the local-dev auth-bypass
+        conftest fixture (which can be defeated by an active-IdP row left over
+        in a real local loom.db from prior manual `make run` usage, outside
+        pytest's in-memory test DB). Cleanup is guaranteed via addCleanup so
+        this never leaks into other tests in this file.
+        """
+        app.dependency_overrides[get_current_user] = lambda: UserInfo(
+            sub="admin", username="admin", groups=["t-admin", "g-admins-super"],
+            scopes={"registry:read", "registry:write"},
+        )
+        self.addCleanup(app.dependency_overrides.pop, get_current_user, None)
 
     def _create_a2a_agent(self, **overrides) -> A2aAgent:
         agent = A2aAgent(
@@ -420,6 +435,146 @@ class TestRegistryRouter(unittest.TestCase):
             "resource_id": 1,
         })
         self.assertEqual(response.status_code, 400)
+
+    # ----- SKILL CREATE/UPDATE (issue #61) -----
+    @patch("app.routers.registry.get_registry_client")
+    def test_create_record_skill(self, mock_get_client):
+        """Skills have no linked Loom DB resource — descriptors are built
+        directly from the submitted content, not derived from a server/agent
+        row, unlike mcp/a2a/agent."""
+        self._override_admin_user()
+        mock_client = MagicMock()
+        mock_client.create_record.return_value = {"recordId": "rec-skill"}
+        mock_client.wait_for_record.return_value = {
+            **SAMPLE_REGISTRY_RECORD,
+            "recordId": "rec-skill",
+            "recordType": "SKILL",
+            "name": "security-scan",
+            "status": "DRAFT",
+        }
+        mock_client.build_skill_descriptors = MagicMock(return_value={"agentSkillsDefinition": {"data": "{}"}})
+        mock_get_client.return_value = mock_client
+
+        response = self.client.post("/api/registry/records", json={
+            "resource_type": "skill",
+            "skill_name": "security-scan",
+            "skill_description": "Scans for security issues",
+            "skill_license": "MIT",
+            "skill_version": "1.0.0",
+            "skill_md": "---\nname: security-scan\n---\n\n# Security Scan\n",
+        })
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["record_id"], "rec-skill")
+        self.assertEqual(data["descriptor_type"], "SKILL")
+
+        mock_client.build_skill_descriptors.assert_called_once()
+        call_kwargs = mock_client.build_skill_descriptors.call_args.kwargs
+        self.assertEqual(call_kwargs["name"], "security-scan")
+        self.assertEqual(call_kwargs["description"], "Scans for security issues")
+        self.assertEqual(call_kwargs["skill_license"], "MIT")
+        self.assertEqual(call_kwargs["metadata_version"], "1.0.0")
+        self.assertIn("# Security Scan", call_kwargs["skill_md"])
+        # Author must be the current Loom user, never a caller-supplied value —
+        # RegistryRecordCreateRequest has no author field for exactly this reason.
+        self.assertTrue(call_kwargs["metadata_author"])
+
+        create_call_kwargs = mock_client.create_record.call_args.kwargs
+        self.assertEqual(create_call_kwargs["record_type"], "SKILL")
+
+    def test_create_record_skill_missing_fields(self):
+        self._override_admin_user()
+        response = self.client.post("/api/registry/records", json={
+            "resource_type": "skill",
+            "skill_name": "incomplete-skill",
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("skill_description", response.json()["detail"])
+
+    def test_build_skill_descriptors_shape(self):
+        """Confirmed by direct trial against a live AWS Agent Registry
+        (tmp/issues/061-add-skill-management-capabilities.md): `data` must be
+        *exactly* {name, description, license, metadata: {author, version}} —
+        no other top-level keys — and dataSchemaVersion must be omitted
+        entirely, or AWS rejects the record. This test pins that shape so a
+        future edit doesn't silently regress it."""
+        descriptors = RegistryClient.build_skill_descriptors(
+            name="security-scan",
+            description="Scans for security issues",
+            skill_license="MIT",
+            metadata_author="demo-admin",
+            metadata_version="1.0.0",
+            skill_md="---\nname: security-scan\n---\n\n# Security Scan\n",
+        )
+        skill_def = descriptors["agentSkillsDefinition"]
+        self.assertNotIn("dataSchemaVersion", skill_def)
+        data = json.loads(skill_def["data"])
+        self.assertEqual(set(data.keys()), {"name", "description", "license", "metadata"})
+        self.assertEqual(data["metadata"], {"author": "demo-admin", "version": "1.0.0"})
+        self.assertEqual(skill_def["additionalData"]["skillMd"]["data"], "---\nname: security-scan\n---\n\n# Security Scan\n")
+        self.assertNotIn("dataSchemaVersion", skill_def["additionalData"]["skillMd"])
+
+    @patch("app.routers.registry.get_registry_client")
+    def test_update_record_skill(self, mock_get_client):
+        """A SKILL record has no linked Loom resource, so update_record's
+        normal 'find the linked mcp/a2a/agent row' path can't apply — it
+        must fall through to re-submitted content instead of 404ing."""
+        self._override_admin_user()
+        mock_client = MagicMock()
+        mock_client.get_record.side_effect = [
+            {
+                "recordId": "rec-skill",
+                "recordType": "SKILL",
+                "descriptors": {
+                    "agentSkillsDefinition": {
+                        "data": json.dumps({
+                            "name": "security-scan", "description": "old desc",
+                            "license": "MIT", "metadata": {"author": "original-author", "version": "1.0.0"},
+                        }),
+                    },
+                },
+            },
+            {**SAMPLE_REGISTRY_RECORD, "recordId": "rec-skill", "recordType": "SKILL", "status": "DRAFT"},
+        ]
+        mock_client.build_skill_descriptors = MagicMock(return_value={"agentSkillsDefinition": {"data": "{}"}})
+        mock_get_client.return_value = mock_client
+
+        response = self.client.put("/api/registry/records/rec-skill", json={
+            "skill_name": "security-scan",
+            "skill_description": "updated description",
+            "skill_license": "MIT",
+            "skill_version": "1.1.0",
+            "skill_md": "updated body",
+        })
+        self.assertEqual(response.status_code, 200)
+
+        call_kwargs = mock_client.build_skill_descriptors.call_args.kwargs
+        # Author is preserved from the existing record, not reassigned to whoever submitted the edit.
+        self.assertEqual(call_kwargs["metadata_author"], "original-author")
+        self.assertEqual(call_kwargs["metadata_version"], "1.1.0")
+
+    def test_update_record_skill_missing_fields(self):
+        self._override_admin_user()
+        with patch("app.routers.registry.get_registry_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.get_record.return_value = {"recordId": "rec-skill", "recordType": "SKILL", "descriptors": {}}
+            mock_get_client.return_value = mock_client
+
+            response = self.client.put("/api/registry/records/rec-skill", json={"skill_name": "only-a-name"})
+            self.assertEqual(response.status_code, 400)
+
+    def test_update_record_no_linked_resource_non_skill_returns_404(self):
+        """A record that isn't linked to a Loom resource AND isn't a SKILL
+        type either (e.g. an orphaned MCP record) must still 404, preserving
+        the pre-existing behavior this branch is added alongside."""
+        self._override_admin_user()
+        with patch("app.routers.registry.get_registry_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.get_record.return_value = {"recordId": "rec-orphan", "recordType": "MCP", "descriptors": {}}
+            mock_get_client.return_value = mock_client
+
+            response = self.client.put("/api/registry/records/rec-orphan", json={})
+            self.assertEqual(response.status_code, 404)
 
     @patch("app.routers.registry.get_registry_client")
     def test_create_record_mcp_not_found(self, mock_get_client):

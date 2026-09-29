@@ -238,7 +238,7 @@ class RegistryClient:
         kwargs: dict[str, Any] = dict(
             registryId=self.registry_id,
             recordId=record_id,
-            displayName=display_name,
+            displayName={"optionalValue": display_name},
             descriptors=update_descriptors,
             recordVersion=record_version,
         )

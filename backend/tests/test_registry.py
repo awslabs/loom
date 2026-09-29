@@ -949,6 +949,32 @@ class TestRegistryService(unittest.TestCase):
         self.assertNotIn("provider", card)
         self.assertNotIn("_meta", card)
 
+    def test_update_record_wraps_display_name_in_optional_value(self):
+        """Regression test: UpdateRegistryRecord's displayName parameter is a
+        structure ({"optionalValue": <str>}), not a plain string, unlike
+        CreateRegistryRecord where displayName is a plain string. Passing a
+        raw string here fails with botocore's client-side parameter
+        validation ("Invalid type for parameter displayName ... valid types:
+        <class 'dict'>") before the request is even sent — caught live while
+        editing a real skill record, since every test exercising update_record
+        elsewhere in this file mocks RegistryClient itself and never reaches
+        this method's real body."""
+        client = RegistryClient(registry_id="test-registry", region="us-east-1")
+        client.control = MagicMock()
+        client.control.update_registry_record.return_value = {}
+
+        client.update_record(
+            record_id="rec-123",
+            display_name="Security Scan",
+            descriptors={"agentSkillsDefinition": {"data": "{}"}},
+            record_version="1.0",
+            description="A skill",
+        )
+
+        call_kwargs = client.control.update_registry_record.call_args.kwargs
+        self.assertEqual(call_kwargs["displayName"], {"optionalValue": "Security Scan"})
+        self.assertEqual(call_kwargs["description"], {"optionalValue": "A skill"})
+
     def test_client_without_registry_id(self):
         from app.services.registry import RegistryClient
         client = RegistryClient(registry_id="", region="us-east-1")

@@ -119,13 +119,15 @@ make cognito.set-passwords     # Set permanent passwords for demo users
 - `t-user` — User UI with limited navigation
 
 **Resource Groups** (determine access to resources):
-- `g-admins-super` — All 21 scopes (catalog:r/w, agent:r/w, memory:r/w, security:r/w, settings:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, registry:r/w, invoke)
+- `g-admins-super` — All 21 scopes (catalog:r/w, agent:r/w, memory:r/w, security:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, registry:r/w, admin:r/w, invoke)
 - `g-admins-demo` — Read-only to all pages + read/write to demo group resources + costs:write
-- `g-admins-security` — security:read/write, settings:read
-- `g-admins-memory` — memory:read/write, settings:read
-- `g-admins-mcp` — mcp:read/write, settings:read
-- `g-admins-a2a` — a2a:read/write, settings:read
+- `g-admins-security` — security:read/write
+- `g-admins-memory` — memory:read/write
+- `g-admins-mcp` — mcp:read/write
+- `g-admins-a2a` — a2a:read/write
 - `g-users-demo`, `g-users-test`, `g-users-strategics` — invoke + read access to resources in their group
+
+Global/deployment-wide configuration (site settings, registry config, LiteLLM proxy config, enabled models, VPC configs) requires `admin:read`/`admin:write`, held only by `g-admins-super` — no domain-scoped admin group can read or write configuration that applies to the whole deployment rather than to their own domain or group.
 
 Users are assigned both a type group and one or more resource groups. Resource filtering uses `loom:group` tag matching.
 

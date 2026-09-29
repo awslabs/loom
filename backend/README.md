@@ -88,8 +88,8 @@ The backend uses a fine-grained scope model for access control:
 | `memory:write` | Create, update, and delete memory resources |
 | `security:read` | View roles, authorizers, and credentials |
 | `security:write` | Manage roles, authorizers, and credentials |
-| `settings:read` | View site settings |
-| `settings:write` | Manage site settings |
+| `admin:read` | View admin dashboard, audit data, and global deployment configuration (site settings, registry, LiteLLM proxy, enabled models, VPC configs) |
+| `admin:write` | Manage global deployment configuration (site settings, registry, LiteLLM proxy, enabled models, VPC configs) |
 | `tagging:read` | View tag policies and profiles |
 | `tagging:write` | Manage tag policies and profiles |
 | `costs:read` | View cost dashboard and estimates |
@@ -111,14 +111,16 @@ Scopes are derived from Cognito group membership via `GROUP_SCOPES`. The system 
 - `t-user` — No scopes directly, but determines UI layout
 
 **Resource Groups** (access control):
-- `g-admins-super` — All 21 scopes (catalog:r/w, agent:r/w, memory:r/w, security:r/w, settings:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, registry:r/w, invoke)
-- `g-admins-demo` — Read/write to most pages (`catalog:read`, `agent:read/write`, `memory:read/write`, `security:read`, `settings:read/write`, `tagging:read`, `costs:read/write`, `mcp:read/write`, `a2a:read/write`) + `invoke`. Write operations restricted to `loom:group=demo` resources.
-- `g-admins-security` — `security:read`, `security:write`, `settings:read`
-- `g-admins-memory` — `memory:read`, `memory:write`, `settings:read`
-- `g-admins-mcp` — `mcp:read`, `mcp:write`, `settings:read`
-- `g-admins-a2a` — `a2a:read`, `a2a:write`, `settings:read`
-- `g-admins-registry` — `mcp:read`, `a2a:read`, `registry:read`, `registry:write`, `settings:read`, `settings:write`, `tagging:read`
+- `g-admins-super` — All 21 scopes (catalog:r/w, agent:r/w, memory:r/w, security:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, registry:r/w, admin:r/w, invoke)
+- `g-admins-demo` — Read/write to most pages (`catalog:read`, `agent:read/write`, `memory:read/write`, `security:read`, `tagging:read`, `costs:read/write`, `mcp:read/write`, `a2a:read/write`) + `invoke`. Write operations restricted to `loom:group=demo` resources.
+- `g-admins-security` — `security:read`, `security:write`, `tagging:read`
+- `g-admins-memory` — `memory:read`, `memory:write`, `tagging:read`
+- `g-admins-mcp` — `mcp:read`, `mcp:write`, `tagging:read`
+- `g-admins-a2a` — `a2a:read`, `a2a:write`, `tagging:read`
+- `g-admins-registry` — `mcp:read`, `a2a:read`, `registry:read`, `registry:write`, `tagging:read`
 - `g-users-demo`, `g-users-test`, `g-users-strategics` — `invoke` + read access to resources tagged with matching group
+
+Global/deployment-wide settings (`/api/settings/site`, `/registry`, `/litellm-proxy`, `/models`, `/vpc-configs` writes) require `admin:read`/`admin:write`, held only by `g-admins-super` — no domain-scoped admin group (security/memory/mcp/a2a/registry/demo) can read or write configuration that applies to the whole deployment. `GET /api/settings/vpc-configs` and `GET /api/settings/vpc-configs/{id}/detail` require any `t-admin` group (used to populate the VPC picker in the agent deploy form) but are denied to `t-user`.
 
 ### Resource Filtering by Group Tag
 
@@ -401,7 +403,7 @@ Runtime costs are recomputed from `client_duration_ms` at view time using curren
 | `POST` | `/api/settings/identity-providers/discover` | Run OIDC discovery against a well-known URL |
 | `POST` | `/api/settings/identity-providers/{id}/test-discovery` | Test discovery for an existing provider |
 
-Supports Microsoft Entra ID, Okta, Auth0, and Generic OIDC providers. Includes OIDC discovery for auto-populating endpoints, configurable group claim mapping (external IdP groups to Loom groups), and generic JWT validation against any JWKS endpoint. Cognito remains the default when no external IdP is active. Scope enforcement: `settings:read` for GET, `settings:write` for POST/PUT/DELETE.
+Supports Microsoft Entra ID, Okta, Auth0, and Generic OIDC providers. Includes OIDC discovery for auto-populating endpoints, configurable group claim mapping (external IdP groups to Loom groups), and generic JWT validation against any JWKS endpoint. Cognito remains the default when no external IdP is active. Scope enforcement: `security:read` for GET, `security:write` for POST/PUT/DELETE.
 
 ### Memory Resources
 

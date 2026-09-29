@@ -135,10 +135,10 @@ Detailed specifications for each component are maintained in their respective di
 The Cognito User Pool is managed via CloudFormation (`shared/iac/cognito.yaml`) and includes:
 
 - **Password policy:** Minimum 12 characters, uppercase, lowercase, numbers required; symbols not required.
-- **Resource server scopes (21 total):** `invoke`, `catalog:read`, `catalog:write`, `agent:read`, `agent:write`, `memory:read`, `memory:write`, `security:read`, `security:write`, `settings:read`, `settings:write`, `tagging:read`, `tagging:write`, `costs:read`, `costs:write`, `mcp:read`, `mcp:write`, `a2a:read`, `a2a:write`, `registry:read`, `registry:write`.
+- **Resource server scopes (21 total):** `invoke`, `catalog:read`, `catalog:write`, `agent:read`, `agent:write`, `memory:read`, `memory:write`, `security:read`, `security:write`, `tagging:read`, `tagging:write`, `costs:read`, `costs:write`, `mcp:read`, `mcp:write`, `a2a:read`, `a2a:write`, `registry:read`, `registry:write`, `admin:read`, `admin:write`.
 - **Two-dimensional group architecture:**
   - **Type groups** (UI view): `t-admin` (admin UI with all pages), `t-user` (user UI with Catalog, Agents, Memory, Costs only)
-  - **Admin groups** (t-admin users, single group): `g-admins-super` (all scopes), `g-admins-demo` (read/write to most pages including MCP and A2A + demo group resources), `g-admins-security` (security:read/write, settings:read, tagging:read/write), `g-admins-memory` (memory:read/write, settings:read, tagging:read/write), `g-admins-mcp` (mcp:read/write, settings:read, tagging:read/write), `g-admins-a2a` (a2a:read/write, settings:read, tagging:read/write), `g-admins-registry` (mcp:read, a2a:read, registry:read/write, settings:read/write, tagging:read)
+  - **Admin groups** (t-admin users, single group): `g-admins-super` (all scopes, including `admin:read`/`admin:write` for global deployment configuration), `g-admins-demo` (read/write to most pages including MCP and A2A + demo group resources), `g-admins-security` (security:read/write, tagging:read/write), `g-admins-memory` (memory:read/write, tagging:read/write), `g-admins-mcp` (mcp:read/write, tagging:read/write), `g-admins-a2a` (a2a:read/write, tagging:read/write), `g-admins-registry` (mcp:read, a2a:read, registry:read/write, tagging:read). None of the domain-scoped admin groups hold `admin:read`/`admin:write` — global settings (site config, registry config, LiteLLM proxy, enabled models, VPC configs) require `g-admins-super`.
   - **User groups** (t-user users, can have multiple): `g-users-demo`, `g-users-test`, `g-users-strategics` (each grants: catalog:read, agent:read, memory:read, costs:read, costs:write, invoke)
 - **Users:** `admin` (t-admin + g-admins-super), `demo-admin` (t-admin + g-admins-demo), `security-admin` (t-admin + g-admins-security), `integration-admin` (t-admin + g-admins-memory + g-admins-mcp + g-admins-a2a), `registry-admin` (t-admin + g-admins-registry), `demo-user` (t-user + g-users-demo) — each assigned to both type and group via `UserPoolUserToGroupAttachment`.
 - **Clients:**
@@ -153,12 +153,12 @@ The frontend enforces scope-based access control derived from Cognito group memb
 | Group | Scopes | Sidebar Access | Write Access |
 |-------|--------|----------------|--------------|
 | `g-admins-super` | All 21 scopes | All pages (including Analytics) | All actions |
-| `g-admins-demo` | catalog:read, agent:read, agent:write, memory:read, memory:write, security:read, settings:read, settings:write, tagging:read, costs:read, costs:write, mcp:read, mcp:write, a2a:read, a2a:write, invoke | All admin pages | Read/write restricted to demo group resources only |
-| `g-admins-security` | security:read, security:write, settings:read, tagging:read, tagging:write | Security, Settings, Tagging | Security + tag policy/profile management |
-| `g-admins-memory` | memory:read, memory:write, settings:read, tagging:read, tagging:write | Memory, Settings, Tagging | Memory + tag policy/profile management |
-| `g-admins-mcp` | mcp:read, mcp:write, settings:read, tagging:read, tagging:write | MCP Servers, Settings, Tagging | MCP + tag policy/profile management |
-| `g-admins-a2a` | a2a:read, a2a:write, settings:read, tagging:read, tagging:write | A2A Agents, Settings, Tagging | A2A + tag policy/profile management |
-| `g-admins-registry` | mcp:read, a2a:read, registry:read, registry:write, settings:read, settings:write, tagging:read | Registry, Settings, Tagging | Registry governance + settings management |
+| `g-admins-demo` | catalog:read, agent:read, agent:write, memory:read, memory:write, security:read, tagging:read, costs:read, costs:write, mcp:read, mcp:write, a2a:read, a2a:write, invoke | All admin pages (Settings' Tagging tab only — global-config sub-pages require `admin:read`/`admin:write`) | Read/write restricted to demo group resources only; no access to global site/registry/LiteLLM-proxy/enabled-models/VPC settings |
+| `g-admins-security` | security:read, security:write, tagging:read, tagging:write | Security, Settings (Tagging tab only) | Security + tag policy/profile management |
+| `g-admins-memory` | memory:read, memory:write, tagging:read, tagging:write | Memory, Settings (Tagging tab only) | Memory + tag policy/profile management |
+| `g-admins-mcp` | mcp:read, mcp:write, tagging:read, tagging:write | MCP Servers, Settings (Tagging tab only) | MCP + tag policy/profile management |
+| `g-admins-a2a` | a2a:read, a2a:write, tagging:read, tagging:write | A2A Agents, Settings (Tagging tab only) | A2A + tag policy/profile management |
+| `g-admins-registry` | mcp:read, a2a:read, registry:read, registry:write, tagging:read | Registry, Settings (Tagging tab only) | Registry governance + tag policy management |
 | `g-users-*` | catalog:read, agent:read, memory:read, costs:read, costs:write, invoke | Catalog, Agents, Memory, Costs | No write access; costs:write for cost settings only |
 
 - **Sidebar visibility:** Each sidebar item is shown only when the user has the corresponding `*:read` or `*:write` scope. The Platform Catalog is always visible. Type groups determine the overall UI view (t-admin sees all admin pages, t-user sees only Catalog/Agents/Memory/Costs).
@@ -214,7 +214,7 @@ Model selectors in the UI are searchable by both display name and model ID, with
 
 ### Admin-Enabled Models
 
-Administrators can restrict which models are available for agent deployment and runtime selection via the Settings page ("Enabled Models" section). The `enabled_model_ids` site setting stores a JSON array of allowed model IDs. When the list is empty (default), all models are available. The `GET /api/agents/models` endpoint filters the full model catalog by this setting before returning results. The `GET /api/settings/models` and `PUT /api/settings/models` endpoints manage the configuration (requires `settings:read` / `settings:write` scopes).
+Administrators can restrict which models are available for agent deployment and runtime selection via the Settings page ("Enabled Models" section). The `enabled_model_ids` site setting stores a JSON array of allowed model IDs. When the list is empty (default), all models are available. The `GET /api/agents/models` endpoint filters the full model catalog by this setting before returning results. The `GET /api/settings/models` and `PUT /api/settings/models` endpoints manage the configuration (requires `admin:read` / `admin:write` scopes).
 
 ### Alternate Providers (LiteLLM Proxy)
 

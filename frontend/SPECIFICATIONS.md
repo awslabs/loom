@@ -69,6 +69,7 @@ frontend/
 │   │   ├── ResourceTagFields.tsx       # Shared tag profile selector + tag resolution
 │   │   ├── DeploymentPanel.tsx # Deployment details panel
 │   │   ├── ExternalIntegrationSection.tsx # External integration info (endpoints, auth, code snippets)
+│   │   ├── AttachedSkillsSection.tsx # Attach/detach APPROVED registry SKILL records to an agent (issue #61)
 │   │   ├── InvokePanel.tsx     # Qualifier select, credential select, model select, prompt input, invoke/cancel
 │   │   ├── LatencySummary.tsx  # Invocation metrics (timing + token usage + cost)
 │   │   ├── SessionTable.tsx    # Clickable session list
@@ -84,7 +85,7 @@ frontend/
 │   │   ├── LoginPage.tsx        # Cognito login + NEW_PASSWORD_REQUIRED challenge
 │   │   ├── McpServersPage.tsx  # MCP server management: list, detail, tools, access
 │   │   ├── A2aAgentsPage.tsx       # A2A agent management with card/access tabs
-│   │   ├── SkillsPage.tsx          # Read-only browser for registry SKILL records (list + detail)
+│   │   ├── SkillsPage.tsx          # Browser + (registry:write) create/edit/delete for registry SKILL records (list + detail; issue #61)
 │   │   ├── MemoryManagementPage.tsx # Memory persona: memory resource management
 │   │   ├── TaggingPage.tsx         # Tagging persona: tag policy + tag profile CRUD
 │   │   ├── SettingsPage.tsx        # Settings persona: display preferences + cost estimation settings
@@ -318,6 +319,7 @@ Full deployment form with sections:
 
 ### External Integration (READY deployed agents only)
 - `ExternalIntegrationSection` component fetches integration info from `GET /api/agents/{id}/integration` and displays endpoint URLs, auth requirements, and copy-ready code snippets.
+- `AttachedSkillsSection` (issue #61) lists the agent's `integration_type="skill"` integrations, and a `SearchableSelect` picker limited to `APPROVED`-status SKILL records for attaching more. Uses the existing generic `listIntegrations`/`createIntegration`/`deleteIntegration` client (`@/api/integrations`) — this is that client's first consumer in the frontend. Attaching/detaching a skill only takes effect on the agent's next full redeploy, not the quick "Redeploy" button; the section's own doc comment and a toast on attach/detach both call this out.
 - **Endpoint info:** Runtime ARN, protocol badge (HTTP/MCP/A2A), network mode badge (PUBLIC/VPC with icon), per-qualifier invocation URLs and protocol-specific URLs (MCP streamable HTTP, A2A agent card). All URL/ARN fields have copy-to-clipboard buttons.
 - **Auth info (SigV4):** IAM action, resource ARN, execution role, example IAM policy (JSON), boto3 snippet, and AWS CLI snippet in syntax-highlighted copyable code blocks.
 - **Auth info (OAuth2):** Authorizer type badge, OIDC discovery URL, token endpoint, allowed client IDs and scopes as badges, example token request and invocation curl snippets. Client secrets are never displayed — a note directs users to their identity provider administrator.

@@ -15,7 +15,7 @@ import { useTheme, THEME_LABELS, type Theme } from "@/contexts/ThemeContext";
 import { Button } from "@/components/ui/button";
 import { StatusPill } from "@/components/StatusPill";
 import { SettingsCard, SettingsRow } from "@/components/SettingsRow";
-import { listSiteSettings, updateSiteSetting, getRegistryConfig, updateRegistryConfig, getEnabledModels, updateEnabledModels, getLitellmProxyConfig, updateLitellmProxyConfig, refreshLitellmModels } from "@/api/settings";
+import { listSiteSettings, updateSiteSetting, getRegistryConfig, updateRegistryConfig, getEnabledModels, updateEnabledModels, getLitellmProxyConfig, updateLitellmProxyConfig, refreshLitellmModels, refreshModelsJson, type ModelsJsonRefreshResult } from "@/api/settings";
 import { groupModels } from "@/lib/models";
 import type { ModelOption, AgentResponse } from "@/api/types";
 import { VpcConfigPanel } from "@/components/VpcConfigPanel";
@@ -65,6 +65,11 @@ export function SettingsPage({ canViewTagging = false, canEditTagging = false, u
   const [modelKind, setModelKind] = useState<"chat" | "embedding" | "all">("chat");
 
   const [cpuIdleDiscount, setCpuIdleDiscount] = useState("75");
+  const [modelsLookbackMonths, setModelsLookbackMonths] = useState("6");
+  const [modelsLookbackSaved, setModelsLookbackSaved] = useState(false);
+  const [catalogRefreshing, setCatalogRefreshing] = useState(false);
+  const [catalogRefreshResult, setCatalogRefreshResult] = useState<ModelsJsonRefreshResult | null>(null);
+  const [catalogRefreshError, setCatalogRefreshError] = useState("");
   const [cpuIdleSaved, setCpuIdleSaved] = useState(false);
 
   const [registryArn, setRegistryArn] = useState("");
@@ -96,6 +101,8 @@ export function SettingsPage({ canViewTagging = false, canEditTagging = false, u
       const settings = await listSiteSettings();
       const discount = settings.find((s) => s.key === "cpu_io_wait_discount");
       if (discount) setCpuIdleDiscount(discount.value);
+      const lookback = settings.find((s) => s.key === "models_json_lookback_months");
+      if (lookback) setModelsLookbackMonths(lookback.value);
     } catch {
       // ignore
     }
@@ -214,6 +221,33 @@ export function SettingsPage({ canViewTagging = false, canEditTagging = false, u
       setTimeout(() => setCpuIdleSaved(false), 2000);
     } catch {
       // ignore
+    }
+  };
+
+  const saveModelsLookbackMonths = async (value: string) => {
+    const num = Math.max(1, parseInt(value, 10) || 6);
+    setModelsLookbackMonths(String(num));
+    try {
+      await updateSiteSetting("models_json_lookback_months", String(num));
+      setModelsLookbackSaved(true);
+      setTimeout(() => setModelsLookbackSaved(false), 2000);
+    } catch {
+      // ignore
+    }
+  };
+
+  const refreshModelCatalog = async () => {
+    setCatalogRefreshing(true);
+    setCatalogRefreshError("");
+    setCatalogRefreshResult(null);
+    try {
+      const result = await refreshModelsJson();
+      setCatalogRefreshResult(result);
+      await loadModelsConfig();
+    } catch (err: unknown) {
+      setCatalogRefreshError(err instanceof Error ? err.message : "Failed to refresh model catalog");
+    } finally {
+      setCatalogRefreshing(false);
     }
   };
 
@@ -614,6 +648,55 @@ export function SettingsPage({ canViewTagging = false, canEditTagging = false, u
                 </div>
               </div>
             )}
+
+            <SettingsCard
+              title="Bedrock model catalog"
+              description="Regenerate etc/models.json from the curated Bedrock model catalog, keeping only models launched within the lookback window below (see issue #64)."
+            >
+              <div className="flex flex-wrap items-center gap-3 px-[18px] py-4">
+                <SettingsRow label="Lookback (months)" helper="Models older than this, by launch date, are excluded" align="start">
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      min={1}
+                      className="h-7 w-20 text-xs"
+                      value={modelsLookbackMonths}
+                      onChange={(e) => setModelsLookbackMonths(e.target.value)}
+                      onBlur={(e) => void saveModelsLookbackMonths(e.target.value)}
+                    />
+                    {modelsLookbackSaved && <span className="text-[11px] text-success">Saved</span>}
+                  </div>
+                </SettingsRow>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="ml-auto h-7 text-xs"
+                  disabled={catalogRefreshing}
+                  onClick={() => void refreshModelCatalog()}
+                >
+                  {catalogRefreshing ? "Refreshing…" : "Refresh now"}
+                </Button>
+              </div>
+              {catalogRefreshError && (
+                <div className="border-t px-[18px] py-2.5 text-[12px] text-destructive">{catalogRefreshError}</div>
+              )}
+              {catalogRefreshResult && (
+                <div className="flex flex-col gap-1 border-t px-[18px] py-2.5 text-[11.5px] text-muted-foreground">
+                  <span>
+                    Included {catalogRefreshResult.included.length} model{catalogRefreshResult.included.length === 1 ? "" : "s"} launched on or after {catalogRefreshResult.cutoff} ({catalogRefreshResult.lookback_months}-month lookback).
+                  </span>
+                  {catalogRefreshResult.excluded_stale.length > 0 && (
+                    <span>Excluded, launched before cutoff: {catalogRefreshResult.excluded_stale.join(", ")}</span>
+                  )}
+                  {catalogRefreshResult.excluded_incomplete.length > 0 && (
+                    <span>Excluded, missing verified pricing: {catalogRefreshResult.excluded_incomplete.join(", ")}</span>
+                  )}
+                  {catalogRefreshResult.excluded_unavailable.length > 0 && (
+                    <span>Excluded, not live in this region: {catalogRefreshResult.excluded_unavailable.join(", ")}</span>
+                  )}
+                </div>
+              )}
+            </SettingsCard>
           </div>
         );
       })()}

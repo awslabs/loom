@@ -587,6 +587,10 @@ make migrate-db           # Migrate SQLite → PostgreSQL
 make fix-sequences        # Repair PostgreSQL sequences after migration
 make reset-db             # Reset database
 
+# Model catalog
+make refresh-models       # Regenerate etc/models.json from etc/bedrock_model_catalog.json
+                           # (LOOKBACK_MONTHS=N, REGION=... to override defaults)
+
 # Backend infrastructure (RDS, EC2, ECS)
 make rds                  # Deploy RDS PostgreSQL stack
 make ec2                  # Deploy EC2 bastion stack

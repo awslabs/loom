@@ -27,9 +27,14 @@ MCP_NAMESPACES = ("aws.agentcore", "remote.mcp", "npm", "custom")
 
 
 class RegistryRecordCreateRequest(BaseModel):
-    resource_type: str = Field(..., description="Resource type: 'mcp', 'a2a', or 'agent'")
-    resource_id: int = Field(..., description="ID of the MCP server, A2A agent, or agent")
+    resource_type: str = Field(..., description="Resource type: 'mcp', 'a2a', 'agent', or 'skill'")
+    resource_id: int | None = Field(None, description="ID of the MCP server, A2A agent, or agent (not used for 'skill')")
     namespace: str | None = Field(None, description="Namespace prefix for MCP servers")
+    skill_name: str | None = Field(None, description="Skill name (required for resource_type='skill')")
+    skill_description: str | None = Field(None, description="Skill description (required for resource_type='skill')")
+    skill_license: str | None = Field(None, description="Skill license, e.g. 'MIT' (required for resource_type='skill')")
+    skill_version: str | None = Field(None, description="Skill version, e.g. '1.0.0' (required for resource_type='skill')")
+    skill_md: str | None = Field(None, description="Full SKILL.md markdown body (required for resource_type='skill')")
 
 
 class RegistryRecordResponse(BaseModel):
@@ -257,10 +262,35 @@ def create_record(
         descriptor_type = "A2A"
         resource = agent_record
 
+    elif request.resource_type == "skill":
+        missing = [
+            f for f in ("skill_name", "skill_description", "skill_license", "skill_version", "skill_md")
+            if not getattr(request, f)
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"resource_type='skill' requires: {', '.join(missing)}",
+            )
+        # Skills aren't Loom-owned/deployed resources — there's no DB row to
+        # link registry_record_id/registry_status back onto, unlike mcp/a2a/agent.
+        descriptors = client.build_skill_descriptors(
+            name=request.skill_name,
+            description=request.skill_description,
+            skill_license=request.skill_license,
+            metadata_author=user.username or user.sub,
+            metadata_version=request.skill_version,
+            skill_md=request.skill_md,
+        )
+        display_name = request.skill_name
+        description = request.skill_description
+        descriptor_type = "SKILL"
+        resource = None
+
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="resource_type must be 'mcp', 'a2a', or 'agent'",
+            detail="resource_type must be 'mcp', 'a2a', 'agent', or 'skill'",
         )
 
     rv = "1.0"
@@ -276,10 +306,11 @@ def create_record(
     record_id = result.get("recordId", "")
     if record_id:
         rec = _call_registry(lambda: client.wait_for_record(record_id))
-        resource.registry_record_id = record_id
-        resource.registry_status = rec.get("status", "DRAFT")
-        db.commit()
-        db.refresh(resource)
+        if resource is not None:
+            resource.registry_record_id = record_id
+            resource.registry_status = rec.get("status", "DRAFT")
+            db.commit()
+            db.refresh(resource)
         return _record_to_detail_response(rec)
 
     return _record_to_detail_response(result)
@@ -287,6 +318,23 @@ def create_record(
 
 class RegistryRecordUpdateRequest(BaseModel):
     namespace: str | None = Field(None, description="Namespace prefix for MCP servers")
+    skill_name: str | None = Field(None, description="Updated skill name (for SKILL records)")
+    skill_description: str | None = Field(None, description="Updated skill description (for SKILL records)")
+    skill_license: str | None = Field(None, description="Updated skill license (for SKILL records)")
+    skill_version: str | None = Field(None, description="Updated skill version (for SKILL records)")
+    skill_md: str | None = Field(None, description="Updated SKILL.md markdown body (for SKILL records)")
+
+
+def _existing_skill_author(rec: dict) -> str:
+    """Pull the original author out of an existing SKILL record's descriptor
+    data, so editing a skill never silently reassigns authorship to whoever
+    happens to submit the edit."""
+    import json as _json
+    try:
+        data_str = rec.get("descriptors", {}).get("agentSkillsDefinition", {}).get("data", "{}")
+        return _json.loads(data_str).get("metadata", {}).get("author", "")
+    except (AttributeError, ValueError):
+        return ""
 
 
 @router.put("/records/{record_id}", response_model=RegistryRecordDetailResponse)
@@ -296,7 +344,9 @@ def update_record(
     user: UserInfo = Depends(require_scopes("registry:write")),
     db: Session = Depends(get_db),
 ) -> RegistryRecordDetailResponse:
-    """Update a registry record by re-building descriptors from the linked Loom resource."""
+    """Update a registry record by re-building descriptors from the linked Loom
+    resource (mcp/a2a/agent), or from re-submitted content for a skill, which
+    has no linked Loom resource to derive descriptors from."""
     client = get_registry_client()
 
     server = db.query(McpServer).filter(McpServer.registry_record_id == record_id).first()
@@ -324,10 +374,32 @@ def update_record(
                 display_name = agent.name or agent.runtime_id
                 description = agent.description
             else:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"No Loom resource found linked to registry record {record_id}",
+                existing = _call_registry(lambda: client.get_record(record_id))
+                if not existing or _from_record_type(existing.get("recordType", "")) != "SKILL":
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"No Loom resource found linked to registry record {record_id}",
+                    )
+                missing = [
+                    f for f in ("skill_name", "skill_description", "skill_license", "skill_version", "skill_md")
+                    if not getattr(request, f)
+                ]
+                if missing:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Updating a SKILL record requires: {', '.join(missing)}",
+                    )
+                author = _existing_skill_author(existing) or (user.username or user.sub)
+                descriptors = client.build_skill_descriptors(
+                    name=request.skill_name,
+                    description=request.skill_description,
+                    skill_license=request.skill_license,
+                    metadata_author=author,
+                    metadata_version=request.skill_version,
+                    skill_md=request.skill_md,
                 )
+                display_name = request.skill_name
+                description = request.skill_description
 
     result = _call_registry(lambda: client.update_record(
         record_id=record_id,

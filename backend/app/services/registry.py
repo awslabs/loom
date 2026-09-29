@@ -375,6 +375,45 @@ class RegistryClient:
         }
 
     @staticmethod
+    def build_skill_descriptors(
+        name: str,
+        description: str,
+        skill_license: str,
+        metadata_author: str,
+        metadata_version: str,
+        skill_md: str,
+    ) -> dict[str, Any]:
+        """Build SKILL-type descriptors.
+
+        Confirmed by direct trial against a live AWS Agent Registry (see
+        tmp/issues/061-add-skill-management-capabilities.md): `data` must be
+        *exactly* {name, description, license, metadata: {author, version}} —
+        no other top-level keys (e.g. repository/websiteUrl) — or AWS rejects
+        it with "does not match any supported version". dataSchemaVersion
+        must be omitted entirely and left for AWS to auto-assign; passing any
+        explicit value (even a plausible-looking one) is rejected with
+        "Schema version 'X' is not supported for descriptor type
+        'agent_skills'". The full SKILL.md body goes in
+        additionalData.skillMd.data as a raw string, not JSON-wrapped.
+        """
+        data = {
+            "name": name,
+            "description": description,
+            "license": skill_license,
+            "metadata": {"author": metadata_author, "version": metadata_version},
+        }
+        return {
+            "agentSkillsDefinition": {
+                "data": json.dumps(data),
+                "additionalData": {
+                    "skillMd": {
+                        "data": skill_md,
+                    },
+                },
+            }
+        }
+
+    @staticmethod
     def build_a2a_descriptors(agent: A2aAgent) -> dict[str, Any]:
         """Build A2A-type descriptors conforming to the A2A AgentCard spec."""
         raw = agent.agent_card_raw or "{}"

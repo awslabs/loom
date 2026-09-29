@@ -57,6 +57,12 @@ from app.services.credential import (
     delete_credential_provider,
 )
 from app.services.model_catalog import get_bedrock_models, get_litellm_models_live, get_merged_models
+from app.services.bedrock_invocation import (
+    BEDROCK_RUNTIME,
+    UnsupportedModelEndpointError,
+    assert_model_supports_endpoint,
+    invoke_model as invoke_bedrock_model,
+)
 from app.services.harness import (
     create_harness as create_harness_api,
     update_harness as update_harness_api,
@@ -582,6 +588,58 @@ def get_model_pricing(
 ) -> list[dict]:
     """Return models with pricing data, enriched with live availability and pricing when available."""
     return get_merged_models(DEFAULT_REGION)
+
+
+class ModelInvokeTestRequest(BaseModel):
+    """Request body for a one-off serverless inference test call."""
+    model_id: str = Field(..., description="Catalog model_id to invoke")
+    prompt: str = Field(..., description="User message to send")
+    system_prompt: str | None = Field(None, description="Optional system prompt")
+    max_tokens: int | None = Field(None, description="Optional max output tokens")
+    endpoint: str | None = Field(
+        None, description="Force 'bedrock-runtime' or 'bedrock-mantle'; defaults to the model's preferred endpoint"
+    )
+
+
+class ModelInvokeTestResponse(BaseModel):
+    """Response for a one-off serverless inference test call."""
+    model_id: str
+    endpoint: str
+    api: str
+    content: str
+
+
+@router.post("/models/invoke-test", response_model=ModelInvokeTestResponse)
+def invoke_model_test(
+    request: ModelInvokeTestRequest,
+    user: UserInfo = Depends(require_scopes("agent:write")),
+) -> ModelInvokeTestResponse:
+    """Run a single serverless inference call against any catalog model,
+    regardless of whether it's served on bedrock-runtime or bedrock-mantle
+    (#64 R1) — lets a user verify a model works before wiring it into an
+    agent or harness."""
+    try:
+        result = invoke_bedrock_model(
+            model_id=request.model_id,
+            catalog=SUPPORTED_MODELS,
+            messages=[{"role": "user", "content": request.prompt}],
+            region=DEFAULT_REGION,
+            max_tokens=request.max_tokens,
+            system_prompt=request.system_prompt,
+            preferred_endpoint=request.endpoint,
+        )
+    except UnsupportedModelEndpointError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.exception("Model invoke-test failed for %s", request.model_id)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Model invocation failed: {e}")
+
+    return ModelInvokeTestResponse(
+        model_id=request.model_id,
+        endpoint=result["endpoint"],
+        api=result["api"],
+        content=result["content"],
+    )
 
 
 @router.get("/providers")
@@ -1923,6 +1981,15 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Field 'api_key' is required for provider '{harness_provider}'"
         )
+
+    if harness_provider == "bedrock":
+        # AgentCore Harness only reaches models via the bedrock-runtime
+        # endpoint — reject bedrock-mantle-only models (e.g. Gemma 4) up
+        # front instead of letting CreateHarness fail opaquely (#64 R1).
+        try:
+            assert_model_supports_endpoint(request.model_id, SUPPORTED_MODELS, BEDROCK_RUNTIME)
+        except UnsupportedModelEndpointError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     runtime_name_pattern = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,47}$")
     if not runtime_name_pattern.match(request.name):
@@ -3674,6 +3741,12 @@ def redeploy_harness_agent(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Agent has no harness_id — cannot update. Delete and redeploy instead.",
         )
+
+    if (request.provider or "bedrock").lower() == "bedrock" and request.model_id:
+        try:
+            assert_model_supports_endpoint(request.model_id, SUPPORTED_MODELS, BEDROCK_RUNTIME)
+        except UnsupportedModelEndpointError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     region = os.getenv("AWS_REGION", DEFAULT_REGION)
     account_id = os.getenv("AWS_ACCOUNT_ID", "") or agent.account_id

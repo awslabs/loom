@@ -498,6 +498,7 @@ async def invoke_agent_stream(
     supports_elicitation: bool = False,
     user_access_token: str | None = None,
     delegation_mode: str = "m2m",
+    usage_warnings: list[str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Invoke the agent and yield SSE events as the response streams.
@@ -548,6 +549,9 @@ async def invoke_agent_stream(
     }
     if token_source:
         session_start_data["token_source"] = token_source
+    if usage_warnings:
+        session_start_data["usage_warnings"] = usage_warnings
+        
     if access_token:
         session_start_data["has_token"] = True
         token_summary = _extract_token_summary(access_token, "user", token_source)
@@ -1420,7 +1424,6 @@ async def invoke_agent_endpoint(
                 )
 
     # Validate runtime model_id if provided
-        # Validate runtime model_id if provided
     runtime_model_id: str | None = None
     if request_body.model_id:
         allowed = agent.get_allowed_model_ids()

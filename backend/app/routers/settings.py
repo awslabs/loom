@@ -281,7 +281,7 @@ class SiteSettingResponse(BaseModel):
 
 @router.get("/site", response_model=list[SiteSettingResponse])
 def list_site_settings(
-    user: UserInfo = Depends(require_scopes("settings:read")),
+    user: UserInfo = Depends(require_scopes("admin:read")),
     db: Session = Depends(get_db),
 ) -> list[SiteSettingResponse]:
     """List all site settings, including defaults for unset keys."""
@@ -303,7 +303,7 @@ def list_site_settings(
 def update_site_setting(
     key: str,
     request: SiteSettingRequest,
-    user: UserInfo = Depends(require_scopes("settings:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> SiteSettingResponse:
     """Create or update a site setting."""
@@ -331,7 +331,7 @@ class RegistryConfigResponse(BaseModel):
 
 @router.get("/registry", response_model=RegistryConfigResponse)
 def get_registry_config(
-    user: UserInfo = Depends(require_scopes("settings:read")),
+    user: UserInfo = Depends(require_scopes("admin:read")),
     db: Session = Depends(get_db),
 ) -> RegistryConfigResponse:
     """Get the current registry configuration."""
@@ -353,7 +353,7 @@ class RegistryConfigRequest(BaseModel):
 @router.put("/registry", response_model=RegistryConfigResponse)
 def update_registry_config(
     request: RegistryConfigRequest,
-    user: UserInfo = Depends(require_scopes("settings:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> RegistryConfigResponse:
     """Update the registry configuration. Validates the ARN before saving."""
@@ -406,7 +406,7 @@ class LitellmProxyConfigResponse(BaseModel):
 
 @router.get("/litellm-proxy", response_model=LitellmProxyConfigResponse)
 def get_litellm_proxy_config(
-    user: UserInfo = Depends(require_scopes("settings:read")),
+    user: UserInfo = Depends(require_scopes("admin:read")),
     db: Session = Depends(get_db),
 ) -> LitellmProxyConfigResponse:
     """Get the current LiteLLM proxy configuration (URLs only; key is write-only).
@@ -440,7 +440,7 @@ class LitellmProxyConfigRequest(BaseModel):
 @router.put("/litellm-proxy", response_model=LitellmProxyConfigResponse)
 def update_litellm_proxy_config(
     request: LitellmProxyConfigRequest,
-    user: UserInfo = Depends(require_scopes("settings:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> LitellmProxyConfigResponse:
     """Update the LiteLLM proxy configuration. Omitting master_key leaves the stored key untouched."""
@@ -550,7 +550,7 @@ class EnabledModelsResponse(BaseModel):
 
 @router.get("/models", response_model=EnabledModelsResponse)
 def get_enabled_models(
-    user: UserInfo = Depends(require_scopes("settings:read")),
+    user: UserInfo = Depends(require_scopes("admin:read")),
     db: Session = Depends(get_db),
 ) -> EnabledModelsResponse:
     """Get the list of admin-enabled model IDs along with the full model catalog."""
@@ -563,7 +563,7 @@ def get_enabled_models(
 @router.put("/models", response_model=EnabledModelsResponse)
 def update_enabled_models(
     request: EnabledModelsRequest,
-    user: UserInfo = Depends(require_scopes("settings:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> EnabledModelsResponse:
     """Update the set of admin-enabled models."""
@@ -594,7 +594,7 @@ def update_enabled_models(
 
 @router.post("/litellm-proxy/refresh", response_model=EnabledModelsResponse)
 def refresh_litellm_models(
-    user: UserInfo = Depends(require_scopes("settings:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> EnabledModelsResponse:
     """Force a live re-fetch of the LiteLLM proxy's model catalog, bypassing
@@ -637,7 +637,9 @@ def list_vpc_configs(
     user: UserInfo = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[VpcConfigResponse]:
-    """List all VPC configurations. Requires authentication (used in agent deploy form)."""
+    """List all VPC configurations. Admin-only (used in agent deploy form)."""
+    if "t-admin" not in user.groups:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     configs = db.query(VpcConfig).order_by(VpcConfig.name).all()
     return [VpcConfigResponse(**c.to_dict()) for c in configs]
 
@@ -645,7 +647,7 @@ def list_vpc_configs(
 @router.post("/vpc-configs", response_model=VpcConfigResponse, status_code=status.HTTP_201_CREATED)
 def create_vpc_config(
     request: VpcConfigRequest,
-    user: UserInfo = Depends(require_scopes("settings:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> VpcConfigResponse:
     """Create a new VPC configuration."""
@@ -672,7 +674,7 @@ def create_vpc_config(
 def update_vpc_config(
     config_id: int,
     request: VpcConfigRequest,
-    user: UserInfo = Depends(require_scopes("settings:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> VpcConfigResponse:
     """Update an existing VPC configuration."""
@@ -785,9 +787,12 @@ def get_vpc_config_detail(
     user: UserInfo = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> VpcConfigDetailResponse:
-    """Return a VPC configuration enriched with live EC2 subnet and security group metadata."""
+    """Return a VPC configuration enriched with live EC2 subnet and security group metadata. Admin-only."""
     import boto3
     import os
+
+    if "t-admin" not in user.groups:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
 
     config = db.query(VpcConfig).filter(VpcConfig.id == config_id).first()
     if not config:
@@ -847,7 +852,7 @@ def get_vpc_config_detail(
 @router.delete("/vpc-configs/{config_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_vpc_config(
     config_id: int,
-    user: UserInfo = Depends(require_scopes("settings:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> None:
     """Delete a VPC configuration."""

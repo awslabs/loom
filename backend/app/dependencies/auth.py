@@ -51,7 +51,7 @@ GROUP_SCOPES: dict[str, list[str]] = {
     "g-admins-super": [
         "catalog:read", "catalog:write", "agent:read", "agent:write",
         "memory:read", "memory:write", "security:read", "security:write",
-        "settings:read", "settings:write", "tagging:read", "tagging:write",
+        "tagging:read", "tagging:write",
         "costs:read", "costs:write",
         "mcp:read", "mcp:write", "a2a:read", "a2a:write",
         "registry:read", "registry:write",
@@ -59,25 +59,25 @@ GROUP_SCOPES: dict[str, list[str]] = {
     ],
     "g-admins-demo": [
         "catalog:read", "agent:read", "agent:write", "memory:read", "memory:write",
-        "security:read", "settings:read", "settings:write", "tagging:read", "costs:read", "costs:write",
+        "security:read", "tagging:read", "costs:read", "costs:write",
         "mcp:read", "mcp:write", "a2a:read", "a2a:write",
         "registry:read", "registry:write",
         "invoke",
     ],
     "g-admins-security": [
-        "security:read", "security:write", "settings:read", "settings:write", "tagging:read",
+        "security:read", "security:write", "tagging:read",
     ],
     "g-admins-memory": [
-        "memory:read", "memory:write", "settings:read", "settings:write", "tagging:read",
+        "memory:read", "memory:write", "tagging:read",
     ],
     "g-admins-mcp": [
-        "mcp:read", "mcp:write", "settings:read", "settings:write", "tagging:read",
+        "mcp:read", "mcp:write", "tagging:read",
     ],
     "g-admins-a2a": [
-        "a2a:read", "a2a:write", "settings:read", "settings:write", "tagging:read",
+        "a2a:read", "a2a:write", "tagging:read",
     ],
     "g-admins-registry": [
-        "mcp:read", "a2a:read", "registry:read", "registry:write", "settings:read", "settings:write", "tagging:read",
+        "mcp:read", "a2a:read", "registry:read", "registry:write", "tagging:read",
     ],
 
     # User groups (t-user users - can have multiple)
@@ -103,8 +103,6 @@ oauth2_scheme = OAuth2AuthorizationCodeBearer(
         "memory:write": "Write memory",
         "security:read": "Read security",
         "security:write": "Write security",
-        "settings:read": "Read settings",
-        "settings:write": "Write settings",
         "tagging:read": "View tag policies and profiles",
         "tagging:write": "Manage tag policies and profiles",
         "costs:read": "View cost data",

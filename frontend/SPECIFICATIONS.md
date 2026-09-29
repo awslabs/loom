@@ -1098,7 +1098,34 @@ The Settings page's "Enabled Models" section (§ 9) is split into a Bedrock bloc
 
 ---
 
-## 18. Future Work
+## 18. Bedrock Model Catalog UI (issue #64)
+
+Backend design (dual-endpoint model invocation, curated-catalog-driven `models.json` refresh, deprecated-model grandfathering) is documented in [`backend/SPECIFICATIONS.md` § 37](../backend/SPECIFICATIONS.md) (Phase 37 and its follow-up). This section covers the frontend surface.
+
+### 18.1 Recency Sort (`lib/models.ts`)
+
+`groupModels()` now sorts each vendor group newest-first via `sortModelsByRecency()`, which extracts the first version-shaped number out of a model's `display_name` (e.g. "Claude Opus 4.8" → `4.8`) as a recency proxy, falling back to alphabetical for ties and for names with no version (e.g. "Nova Lite"). Applies everywhere `groupModels()`/`groupModelsByProvider()` is used — the Settings page's model browser and every model picker (Invoke, Chat, Deploy, Allowed Models) — since Bedrock doesn't expose a release date on any model-list API.
+
+### 18.2 Settings Page — Model Catalog Refresh (§ 9 addendum)
+
+A new "Bedrock model catalog" card sits alongside the existing "Enabled models" card:
+
+- **Lookback (months)** input, backed by the `models_json_lookback_months` site setting (default 6) via the existing generic `GET/PUT /api/settings/site/{key}` endpoints — no dedicated API needed.
+- **Refresh now** button calls `POST /api/settings/models/refresh` (`refreshModelsJson()` in `api/settings.ts`) and displays the returned summary (cutoff date, included count, and the specific model IDs excluded for being stale, missing verified pricing, or not live in the region), then reloads the enabled-models catalog so the picker reflects the new file immediately.
+
+### 18.3 Deprecated Models — Grandfathering UI
+
+An agent's `model_id`/`allowed_model_ids` can outlive the catalog (a `models.json` refresh dropped it) without breaking the agent — see the backend grandfathering design. The frontend surfaces this rather than hiding it:
+
+- **`AgentCard`**: takes an optional `models: ModelOption[]` prop (fetched once by the parent page — `CatalogPage`, `AgentListPage` — not per-card) to resolve `agent.model_id` to a display name. Added as a "Default model" field in the existing Runtime/Network/Memory/MCP detail grid, full-width on its own row. When `agent.deprecated_model_ids` is non-empty, a `StatusPill` reading "DEPRECATED MODEL" (or "DEPRECATED MODELS" if more than one) sits next to it, with a tooltip listing the specific IDs.
+- **`DeploymentPanel`'s `ModelsCard`** ("Allowed models" panel):
+  - Display mode: a deprecated model has no entry in the live catalog fetch (`fetchModels()`), so it's synthesized as a placeholder `ModelOption` (`{model_id, display_name: model_id, group: "Deprecated"}`) rather than silently vanishing from the chip list, rendered with warning styling and a tooltip.
+  - Edit mode: rebuilt to group the full catalog by vendor as checkbox rows (name + `model_id`, per-group enabled count) — matching the Settings page's model browser — instead of a flat wrap of chips. Deprecated models are pulled out of their vendor group entirely into their own warning-styled "Deprecated — no longer in the model catalog" section, each row showing "uncheck to update" (or "set a new default to uncheck" if it's the agent's current default), so they're easy to find and remove rather than blending into the vendor list.
+- **Types**: `AgentResponse` gains `deprecated_model_ids: string[]` (computed server-side against the same catalog the PATCH endpoint validates against).
+
+---
+
+## 19. Future Work
 
 - **VPC network mode** support
 - **Operate Tab** — aggregate dashboard with summary cards, per-agent latency charts

@@ -1,5 +1,5 @@
 import { apiFetch } from "./client";
-import type { RegistryRecord, RegistryRecordDetail, RegistryRecordCreateRequest, RegistrySearchResult } from "./types";
+import type { RegistryRecord, RegistryRecordDetail, RegistryRecordCreateRequest, RegistryRecordSkillUpdateRequest, RegistrySearchResult } from "./types";
 
 export function listRegistryRecords(params?: { status?: string; descriptorType?: string }): Promise<RegistryRecord[]> {
   const searchParams = new URLSearchParams();
@@ -16,6 +16,13 @@ export function getRegistryRecord(recordId: string): Promise<RegistryRecordDetai
 export function createRegistryRecord(request: RegistryRecordCreateRequest): Promise<RegistryRecordDetail> {
   return apiFetch<RegistryRecordDetail>("/api/registry/records", {
     method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export function updateSkillRecord(recordId: string, request: RegistryRecordSkillUpdateRequest): Promise<RegistryRecordDetail> {
+  return apiFetch<RegistryRecordDetail>(`/api/registry/records/${encodeURIComponent(recordId)}`, {
+    method: "PUT",
     body: JSON.stringify(request),
   });
 }

@@ -1109,9 +1109,22 @@ export interface RegistryRecordDetail extends RegistryRecord {
 export type McpNamespace = "aws.agentcore" | "remote.mcp" | "npm" | "custom";
 
 export interface RegistryRecordCreateRequest {
-  resource_type: "mcp" | "a2a" | "agent";
-  resource_id: number;
+  resource_type: "mcp" | "a2a" | "agent" | "skill";
+  resource_id?: number;
   namespace?: McpNamespace;
+  skill_name?: string;
+  skill_description?: string;
+  skill_license?: string;
+  skill_version?: string;
+  skill_md?: string;
+}
+
+export interface RegistryRecordSkillUpdateRequest {
+  skill_name: string;
+  skill_description: string;
+  skill_license: string;
+  skill_version: string;
+  skill_md: string;
 }
 
 export interface RegistrySearchResult {

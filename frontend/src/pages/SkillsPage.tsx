@@ -1,22 +1,35 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, ExternalLink, Loader2, Puzzle, RefreshCw } from "lucide-react";
+import { ArrowLeft, ExternalLink, Loader2, Pencil, Plus, Puzzle, RefreshCw, Trash2 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import { toast } from "sonner";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
 import { useTimezone } from "@/contexts/TimezoneContext";
+import { useAuth } from "@/contexts/AuthContext";
 import { formatTimestamp } from "@/lib/format";
-import { listRegistryRecords, getRegistryRecord } from "@/api/registry";
+import {
+  listRegistryRecords,
+  getRegistryRecord,
+  createRegistryRecord,
+  updateSkillRecord,
+  deleteRegistryRecord,
+} from "@/api/registry";
 import { getRegistryConfig } from "@/api/settings";
 import type { RegistryRecord, RegistryRecordDetail } from "@/api/types";
 
 /** Agent Skills surface: the SKILL-typed records of the bound Agent Registry.
  *
  * Skills are the reuse unit of the registry — an agent is someone's
- * application, a skill is a capability another team can adopt. This page is a
- * read-only view served live from the bound AWS Agent Registry; record
- * lifecycle (submit, approve, reject) stays with the registry admin flows.
+ * application, a skill is a capability another team can adopt. Browsing is
+ * served live from the bound AWS Agent Registry; admins with registry:write
+ * can also author/edit/delete SKILL records directly from this page (record
+ * approval lifecycle — submit/approve/reject — still stays with the registry
+ * admin flows elsewhere).
  */
 
 interface SkillLinks {
@@ -27,7 +40,12 @@ interface SkillLinks {
 /** Pull the optional repository/website links out of the SKILL descriptor.
  * The `agentSkillsDefinition` descriptor carries a JSON `data` payload whose
  * schema belongs to the publisher, so parse defensively and surface only the
- * two well-known link fields. */
+ * two well-known link fields. Note: AWS's server-side validation for this
+ * descriptor only accepts data shaped exactly like {name, description,
+ * license, metadata} (confirmed by direct trial — see issue #61), so a
+ * repository/websiteUrl link can never actually appear on a record created
+ * through this page's own form below; this remains solely for records
+ * authored by other, non-Loom publishers that might use a different shape. */
 function parseSkillLinks(detail: RegistryRecordDetail): SkillLinks {
   try {
     const def = detail.descriptors?.agentSkillsDefinition as { data?: string } | undefined;
@@ -37,6 +55,46 @@ function parseSkillLinks(detail: RegistryRecordDetail): SkillLinks {
   } catch {
     return {};
   }
+}
+
+interface SkillDefinition {
+  name: string;
+  description: string;
+  license: string;
+  author: string;
+  version: string;
+  skillMd: string;
+}
+
+/** Pull the structured fields + full SKILL.md body back out of a SKILL
+ * record's descriptors, for pre-filling the edit form. */
+function parseSkillDefinition(detail: RegistryRecordDetail): SkillDefinition {
+  const def = detail.descriptors?.agentSkillsDefinition as
+    | { data?: string; additionalData?: { skillMd?: { data?: string } } }
+    | undefined;
+  let name = detail.name;
+  let description = detail.description ?? "";
+  let license = "";
+  let author = "";
+  let version = "";
+  try {
+    if (def?.data) {
+      const data = JSON.parse(def.data) as {
+        name?: string;
+        description?: string;
+        license?: string;
+        metadata?: { author?: string; version?: string };
+      };
+      name = data.name ?? name;
+      description = data.description ?? description;
+      license = data.license ?? "";
+      author = data.metadata?.author ?? "";
+      version = data.metadata?.version ?? "";
+    }
+  } catch {
+    // fall through with whatever defaults were set above
+  }
+  return { name, description, license, author, version, skillMd: def?.additionalData?.skillMd?.data ?? "" };
 }
 
 function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {
@@ -61,18 +119,154 @@ function ExternalLinkRow({ url }: { url: string }) {
   );
 }
 
-function SkillDetail({ recordId, onBack }: { recordId: string; onBack: () => void }) {
+interface SkillFormValues {
+  name: string;
+  description: string;
+  license: string;
+  version: string;
+  skillMd: string;
+}
+
+const DEFAULT_SKILL_VERSION = "1.0.0";
+const EMPTY_SKILL_FORM: SkillFormValues = { name: "", description: "", license: "MIT", version: DEFAULT_SKILL_VERSION, skillMd: "" };
+
+/** Create/edit form for a SKILL record. Author is never an input here — it's
+ * always the current Loom user on create, and preserved from the existing
+ * record on edit (both enforced server-side, not just in this form). */
+function SkillForm({
+  initial,
+  submitLabel,
+  onSubmit,
+  onCancel,
+}: {
+  initial: SkillFormValues;
+  submitLabel: string;
+  onSubmit: (values: SkillFormValues) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [values, setValues] = useState<SkillFormValues>(initial);
+  const [submitting, setSubmitting] = useState(false);
+
+  const set = <K extends keyof SkillFormValues>(key: K, value: SkillFormValues[K]) =>
+    setValues((v) => ({ ...v, [key]: value }));
+
+  const canSubmit = values.name.trim() && values.description.trim() && values.license.trim() && values.version.trim() && values.skillMd.trim();
+
+  const handleSubmit = async () => {
+    setSubmitting(true);
+    try {
+      await onSubmit(values);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardContent className="p-4 space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="skill-name" className="text-xs">Name</Label>
+            <Input id="skill-name" value={values.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. security-scan" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="skill-license" className="text-xs">License</Label>
+            <Input id="skill-license" value={values.license} onChange={(e) => set("license", e.target.value)} placeholder="e.g. MIT" />
+          </div>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="skill-description" className="text-xs">Description</Label>
+          <Textarea
+            id="skill-description"
+            value={values.description}
+            onChange={(e) => set("description", e.target.value)}
+            rows={2}
+            placeholder="What this skill does and when an agent should use it"
+          />
+        </div>
+        <div className="space-y-1.5 max-w-[200px]">
+          <Label htmlFor="skill-version" className="text-xs">Version</Label>
+          <Input id="skill-version" value={values.version} onChange={(e) => set("version", e.target.value)} placeholder={DEFAULT_SKILL_VERSION} />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="skill-md" className="text-xs">SKILL.md body</Label>
+          <Textarea
+            id="skill-md"
+            value={values.skillMd}
+            onChange={(e) => set("skillMd", e.target.value)}
+            rows={12}
+            className="font-mono text-xs"
+            placeholder={"---\nname: security-scan\ndescription: ...\n---\n\n# Security Scan\n\n..."}
+          />
+        </div>
+        <div className="flex items-center gap-2 pt-1">
+          <Button size="sm" disabled={!canSubmit || submitting} onClick={() => void handleSubmit()} className="gap-1.5">
+            {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+            {submitLabel}
+          </Button>
+          <Button size="sm" variant="outline" disabled={submitting} onClick={onCancel}>Cancel</Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SkillDetail({
+  recordId,
+  canWrite,
+  onBack,
+  onDeleted,
+}: {
+  recordId: string;
+  canWrite: boolean;
+  onBack: () => void;
+  onDeleted: () => void;
+}) {
   const { timezone } = useTimezone();
   const [detail, setDetail] = useState<RegistryRecordDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     getRegistryRecord(recordId)
       .then(setDetail)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load skill detail"));
   }, [recordId]);
 
+  useEffect(() => { load(); }, [load]);
+
   const links = detail ? parseSkillLinks(detail) : {};
+
+  const handleUpdate = async (values: SkillFormValues) => {
+    try {
+      await updateSkillRecord(recordId, {
+        skill_name: values.name,
+        skill_description: values.description,
+        skill_license: values.license,
+        skill_version: values.version,
+        skill_md: values.skillMd,
+      });
+      toast.success("Skill updated");
+      setEditing(false);
+      load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to update skill");
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!window.confirm(`Delete skill "${detail?.name ?? recordId}"? This cannot be undone.`)) return;
+    setDeleting(true);
+    try {
+      await deleteRegistryRecord(recordId);
+      toast.success("Skill deleted");
+      onDeleted();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to delete skill");
+      setDeleting(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -87,12 +281,31 @@ function SkillDetail({ recordId, onBack }: { recordId: string; onBack: () => voi
         </div>
       )}
 
-      {detail && (
+      {detail && editing && (
+        <SkillForm
+          initial={{ ...parseSkillDefinition(detail), name: parseSkillDefinition(detail).name }}
+          submitLabel="Save Changes"
+          onSubmit={handleUpdate}
+          onCancel={() => setEditing(false)}
+        />
+      )}
+
+      {detail && !editing && (
         <>
           <div className="flex items-center gap-3 flex-wrap">
             <Puzzle className="h-6 w-6 text-muted-foreground" aria-hidden />
             <h1 className="text-2xl font-semibold">{detail.name}</h1>
             <RegistryStatusBadge status={detail.status} />
+            {canWrite && (
+              <div className="ml-auto flex items-center gap-2">
+                <Button size="sm" variant="outline" onClick={() => setEditing(true)} className="gap-1.5">
+                  <Pencil className="h-3 w-3" /> Edit
+                </Button>
+                <Button size="sm" variant="outline" disabled={deleting} onClick={() => void handleDelete()} className="gap-1.5 text-destructive hover:text-destructive">
+                  {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />} Delete
+                </Button>
+              </div>
+            )}
           </div>
 
           <Card>
@@ -128,11 +341,14 @@ interface SkillsPageProps {
 
 export function SkillsPage({ initialSelectedId }: SkillsPageProps) {
   const { timezone } = useTimezone();
+  const { user, hasScope } = useAuth();
+  const canWrite = hasScope("registry:write");
   const [registryEnabled, setRegistryEnabled] = useState<boolean | null>(null);
   const [skills, setSkills] = useState<RegistryRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId ?? null);
+  const [creating, setCreating] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -155,8 +371,33 @@ export function SkillsPage({ initialSelectedId }: SkillsPageProps) {
 
   useEffect(() => { void load(); }, [load]);
 
+  const handleCreate = async (values: SkillFormValues) => {
+    try {
+      await createRegistryRecord({
+        resource_type: "skill",
+        skill_name: values.name,
+        skill_description: values.description,
+        skill_license: values.license,
+        skill_version: values.version,
+        skill_md: values.skillMd,
+      });
+      toast.success("Skill created");
+      setCreating(false);
+      void load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to create skill");
+    }
+  };
+
   if (selectedId) {
-    return <SkillDetail recordId={selectedId} onBack={() => setSelectedId(null)} />;
+    return (
+      <SkillDetail
+        recordId={selectedId}
+        canWrite={canWrite}
+        onBack={() => setSelectedId(null)}
+        onDeleted={() => { setSelectedId(null); void load(); }}
+      />
+    );
   }
 
   return (
@@ -168,10 +409,32 @@ export function SkillsPage({ initialSelectedId }: SkillsPageProps) {
             Reusable agent capabilities published to the Agent Registry.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void load()} className="gap-1.5">
-          <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} /> Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          {canWrite && registryEnabled && !creating && (
+            <Button size="sm" onClick={() => setCreating(true)} className="gap-1.5">
+              <Plus className="h-3 w-3" /> New Skill
+            </Button>
+          )}
+          <Button variant="outline" size="sm" onClick={() => void load()} className="gap-1.5">
+            <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </Button>
+        </div>
       </div>
+
+      {creating && (
+        <SkillForm
+          initial={{ ...EMPTY_SKILL_FORM }}
+          submitLabel="Create Skill"
+          onSubmit={handleCreate}
+          onCancel={() => setCreating(false)}
+        />
+      )}
+
+      {user && creating && (
+        <p className="text-[11px] text-muted-foreground">
+          Authored as <code>{user.username}</code>.
+        </p>
+      )}
 
       {loading && (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -197,14 +460,16 @@ export function SkillsPage({ initialSelectedId }: SkillsPageProps) {
         </Card>
       )}
 
-      {!loading && !error && registryEnabled === true && skills.length === 0 && (
+      {!loading && !error && registryEnabled === true && skills.length === 0 && !creating && (
         <Card>
           <CardContent className="py-12">
             <div className="flex flex-col items-center gap-3 text-center">
               <Puzzle className="h-8 w-8 text-muted-foreground/40" aria-hidden />
               <div className="text-sm font-medium">No skills in the registry</div>
               <p className="max-w-md text-xs text-muted-foreground">
-                SKILL records published to the bound Agent Registry will appear here.
+                {canWrite
+                  ? "Create one above, or SKILL records published elsewhere will appear here."
+                  : "SKILL records published to the bound Agent Registry will appear here."}
               </p>
             </div>
           </CardContent>

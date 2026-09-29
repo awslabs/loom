@@ -27,6 +27,14 @@ migrate-db:
 fix-sequences:
 	source .venv/bin/activate && python scripts/fix_sequences.py
 
+# Bedrock model catalog (etc/models.json) — run at each major release
+# (see #64 R2); pass LOOKBACK_MONTHS=N to override the default 6-month
+# window, or REGION to cross-check live availability in a specific region.
+refresh-models:
+	source .venv/bin/activate && python scripts/refresh_models_json.py \
+		--lookback-months $${LOOKBACK_MONTHS:-6} \
+		--region $${REGION:-$${AWS_REGION:-us-east-1}}
+
 # AgentCore credential providers
 agentcore.credentials.list:
 	aws bedrock-agentcore-control list-oauth2-credential-providers \

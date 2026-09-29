@@ -29,6 +29,10 @@ SITE_SETTING_DEFAULTS: dict[str, str] = {
     "enabled_model_ids": "[]",
     "loom_registry_id": "",
     "litellm_proxy_base_url": "",
+    # How far back (in months) to look, by Bedrock model launch date, when
+    # regenerating etc/models.json from etc/bedrock_model_catalog.json
+    # (#64 R2). Admin-configurable via GET/PUT /api/settings/site/{key}.
+    "models_json_lookback_months": "6",
 }
 
 
@@ -606,6 +610,52 @@ def refresh_litellm_models(
     clear_litellm_cache()
     enabled = get_enabled_model_ids(db)
     return EnabledModelsResponse(model_ids=enabled, all_models=get_merged_models(DEFAULT_REGION))
+
+
+class ModelsJsonRefreshRequest(BaseModel):
+    """Optional per-call override for the admin-configured lookback."""
+    lookback_months: int | None = Field(
+        None, ge=1, description="Override the models_json_lookback_months site setting for this run"
+    )
+
+
+class ModelsJsonRefreshResponse(BaseModel):
+    """Summary of a models.json regeneration run."""
+    cutoff: str
+    lookback_months: int
+    included: list[str]
+    excluded_stale: list[str]
+    excluded_incomplete: list[str]
+    excluded_unavailable: list[str]
+
+
+@router.post("/models/refresh", response_model=ModelsJsonRefreshResponse)
+def refresh_models_json_endpoint(
+    request: ModelsJsonRefreshRequest = ModelsJsonRefreshRequest(),
+    user: UserInfo = Depends(require_scopes("admin:write")),
+    db: Session = Depends(get_db),
+) -> ModelsJsonRefreshResponse:
+    """Regenerate `etc/models.json` from the curated Bedrock model catalog
+    on demand (#64 R2) — the same filtering `make refresh-models` runs at
+    each major release, triggerable by an administrator between releases.
+    Uses the `models_json_lookback_months` site setting unless overridden
+    in the request body."""
+    from app.routers.agents import DEFAULT_REGION
+    from app.services.model_catalog_refresh import reload_supported_models, refresh_models_json
+
+    lookback_months = request.lookback_months or int(get_site_setting(db, "models_json_lookback_months"))
+
+    summary = refresh_models_json(lookback_months=lookback_months, region=DEFAULT_REGION)
+    reload_supported_models()
+
+    return ModelsJsonRefreshResponse(
+        cutoff=summary["cutoff"],
+        lookback_months=lookback_months,
+        included=summary["included"],
+        excluded_stale=summary["excluded_stale"],
+        excluded_incomplete=summary["excluded_incomplete"],
+        excluded_unavailable=summary["excluded_unavailable"],
+    )
 
 
 # ---------------------------------------------------------------------------

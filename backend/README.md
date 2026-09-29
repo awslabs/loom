@@ -325,6 +325,7 @@ Write-only audit tables populated by the frontend. `audit_login` records user lo
 | `GET` | `/api/agents/models/litellm` | List models reported live by the connected LiteLLM proxy, if any (fetched on demand, not part of `/models`) |
 | `GET` | `/api/agents/providers` | List supported LLM providers (`bedrock`, `litellm`), each with a live `available` flag |
 | `GET` | `/api/agents/models/pricing` | List models with pricing metadata |
+| `POST` | `/api/agents/models/invoke-test` | Run a one-off serverless inference call against any catalog model, on whichever Bedrock endpoint (`bedrock-runtime` or `bedrock-mantle`) it requires |
 | `GET` | `/api/agents/defaults` | Get configurable defaults (idle timeout, max lifetime) |
 | `GET` | `/api/agents/{agent_id}/integration` | Get external integration info (endpoints, auth, code snippets) |
 
@@ -384,6 +385,7 @@ Runtime costs are recomputed from `client_duration_ms` at view time using curren
 | `PUT` | `/api/settings/site/{key}` | Create or update a site setting |
 | `GET`/`PUT` | `/api/settings/litellm-proxy` | Get/update the LiteLLM proxy connection (`enabled`, `base_url`, `discovery_base_url`, write-only `master_key`) |
 | `POST` | `/api/settings/litellm-proxy/refresh` | Force a live re-fetch of the LiteLLM proxy's model catalog, bypassing the cache |
+| `POST` | `/api/settings/models/refresh` | Regenerate `etc/models.json` from the curated Bedrock model catalog, filtered by the `models_json_lookback_months` site setting (or an override in the request body) |
 
 ### Authentication
 
@@ -586,6 +588,10 @@ make run                  # Start dev server
 make migrate-db           # Migrate SQLite → PostgreSQL
 make fix-sequences        # Repair PostgreSQL sequences after migration
 make reset-db             # Reset database
+
+# Model catalog
+make refresh-models       # Regenerate etc/models.json from etc/bedrock_model_catalog.json
+                           # (LOOKBACK_MONTHS=N, REGION=... to override defaults)
 
 # Backend infrastructure (RDS, EC2, ECS)
 make rds                  # Deploy RDS PostgreSQL stack

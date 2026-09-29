@@ -26,6 +26,8 @@ export interface AgentResponse {
   authorizer_config: { type?: string; name?: string; pool_id?: string; discovery_url?: string; allowed_audience?: string[]; allowed_clients?: string[]; allowed_scopes?: string[] } | null;
   model_id: string | null;
   allowed_model_ids: string[];
+  /** model_id/allowed_model_ids entries no longer in the current model catalog — still work (grandfathered), just no longer assignable to new agents. See issue #64. */
+  deprecated_model_ids: string[];
   deployed_at: string | null;
   tags: Record<string, string>;
   cost_summary: {

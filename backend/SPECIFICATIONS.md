@@ -131,7 +131,8 @@ backend/
 ├── etc/
 │   ├── environment.sh           # Sources account-specific file + shared outputs
 │   ├── environment.sh.example   # Example environment configuration template
-│   ├── models.json              # Supported model catalog (model_id, display_name, group, pricing)
+│   ├── models.json              # Supported model catalog (model_id, display_name, group, pricing, endpoints, apis) — generated, see scripts/refresh_models_json.py
+│   ├── bedrock_model_catalog.json # Curated superset of known Bedrock models (adds launch_date; source of truth for models.json)
 │   └── runtime_pricing.json     # AgentCore Runtime pricing constants (CPU, memory, defaults)
 ├── iac/
 │   ├── rds.yaml                 # RDS PostgreSQL with optional RDS Proxy
@@ -559,6 +560,7 @@ The `/api/auth/config` endpoint returns only the pool ID and region. The user cl
 | `GET` | `/api/agents/models/litellm` | List models reported by the configured LiteLLM proxy's live catalog (`model_catalog.get_litellm_models_live()`). Fetched on demand by the frontend when the LiteLLM provider is selected, not eagerly alongside `/models`. Returns an empty list if no proxy is configured/reachable. |
 | `GET` | `/api/agents/providers` | List the supported LLM provider registry (`backend/etc/providers.json`), each entry annotated with a live `available: bool` (LiteLLM is available only when a proxy connection is configured and enabled). |
 | `GET` | `/api/agents/models/pricing` | List models with pricing metadata (input/output price per 1K tokens). |
+| `POST` | `/api/agents/models/invoke-test` | Run a one-off serverless inference call against any catalog `model_id`, on whichever endpoint (`bedrock-runtime` or `bedrock-mantle`) it supports (`bedrock_invocation.invoke_model()`) — validates a model works before wiring it into an agent or harness (#64 R1). |
 | `GET` | `/api/agents/defaults` | Get configurable defaults (idle timeout, max lifetime). |
 | `PATCH` | `/api/agents/{agent_id}` | Update editable agent fields (description, model_id, allowed_model_ids). Description changes propagated to AgentCore. |
 | `PUT` | `/api/agents/{agent_id}/config` | Update agent configuration entries. |
@@ -1053,6 +1055,7 @@ The `has_token` and `token_source` fields in `session_start` indicate whether an
 | `PUT` | `/api/settings/site/{key}` | Create or update a site setting. |
 | `GET` | `/api/settings/models` | Get admin-enabled model IDs and the full merged model catalog (`model_catalog.get_merged_models()` — static + live Bedrock + live LiteLLM). |
 | `PUT` | `/api/settings/models` | Update the set of admin-enabled models. Validates model IDs against the merged catalog (`get_merged_models()`), so dynamically-discovered Bedrock and LiteLLM models can be enabled too, not just the curated static list. |
+| `POST` | `/api/settings/models/refresh` | Regenerate `etc/models.json` from `etc/bedrock_model_catalog.json` on demand (`model_catalog_refresh.refresh_models_json()`), then reload `SUPPORTED_MODELS` in-process (#64 R2). Uses the `models_json_lookback_months` site setting (default 6) unless an override is given in the request body. Returns the cutoff date and the included/excluded model IDs. |
 | `GET` | `/api/settings/registry` | Get current registry configuration (ARN, ID, enabled status). |
 | `PUT` | `/api/settings/registry` | Update registry configuration. Validates ARN format before saving. Empty ARN disables. |
 | `GET` | `/api/settings/litellm-proxy` | Get the current LiteLLM proxy configuration (`enabled`, `base_url`, `discovery_base_url`, `has_master_key`). Reflects env-seeded defaults when no Settings-page override has been saved. Never returns the master key. |
@@ -1157,6 +1160,29 @@ AgentCore Harness API wrapper for managed agent deployments:
 - `invoke_harness_stream(harness_arn, session_id, prompt, region, model_id, system_prompt, tools, allowed_tools, max_iterations, timeout_seconds, max_tokens, actor_id, access_token, user_access_token, provider="bedrock", litellm_api_key_arn=None, litellm_api_base=None) -> Generator[dict]` — invokes a harness and yields translated events. When `access_token` is provided, configures the `bedrock-agentcore` client with `UNSIGNED` SigV4 and injects `Authorization: Bearer <token>` via a boto3 `before-send` event hook for JWT auth. When `user_access_token` is provided, injects it as `X-Loom-User-Access-Token` header for OBO token exchange flows. Translates Converse API streaming format (`messageStart`, `contentBlockStart`, `contentBlockDelta`, `contentBlockStop`, `messageStop`, `metadata`) into `{"type": "text", "content": str}`, `{"type": "structured", "content": {"tool_use": {"name": str}}}`, and `{"type": "metadata", "content": dict}` events. Accumulates token counts from metadata events.
 - `resume_harness_stream(harness_arn, session_id, tool_result, region, ..., user_access_token) -> Generator[dict]` — re-invokes a harness with a `toolResult` to resume after an inline function call. Supports the same `user_access_token` header injection for OBO flows.
 - `_build_model_config(provider, model_id, max_tokens=None, litellm_api_key_arn=None, litellm_api_base=None) -> dict` — internal helper selecting the `model` payload shape for `CreateHarness`/`UpdateHarness`/`InvokeHarness` based on `provider`.
+
+AgentCore Harness only reaches models via the `bedrock-runtime` endpoint. `app.routers.agents._deploy_harness()` and `redeploy_harness_agent()` call `bedrock_invocation.assert_model_supports_endpoint(model_id, SUPPORTED_MODELS, BEDROCK_RUNTIME)` before `create_harness`/`update_harness` and reject `bedrock-mantle`-only models (e.g. Gemma 4) with a 400 rather than letting `CreateHarness`/`UpdateHarness` fail opaquely (#64 R1). Models missing from the curated catalog (dynamically-discovered LiteLLM/live-Bedrock models) are not validated — nothing to check against.
+
+### `services/bedrock_invocation.py`
+
+Resolves and performs serverless inference against Bedrock models on either the `bedrock-runtime` or `bedrock-mantle` endpoint (#64 R1). Each `models.json`/`bedrock_model_catalog.json` entry declares which endpoint(s) and API(s) its `model_id` supports via `endpoints` (list of `"bedrock-runtime"`/`"bedrock-mantle"`) and `apis` (dict of endpoint → list of `"converse"`/`"invoke"`/`"messages"`/`"chat_completions"`/`"responses"`), plus an optional `endpoint_model_ids` override for models whose ID differs per endpoint (e.g. `openai.gpt-oss-120b-1:0` on `bedrock-runtime` vs. `openai.gpt-oss-120b` on `bedrock-mantle`).
+
+- `resolve_model_target(model_id, catalog, region, preferred_endpoint=None, preferred_api=None) -> ModelInvocationTarget` — picks the endpoint/API/model-ID to invoke with. Catalog entries predating this metadata fall back to `bedrock-runtime` + `converse`.
+- `assert_model_supports_endpoint(model_id, catalog, endpoint="bedrock-runtime")` — raises `UnsupportedModelEndpointError` unless `model_id` supports `endpoint`; used by the harness deploy/redeploy validation above.
+- `invoke_model(model_id, catalog, messages, region, max_tokens=None, system_prompt=None, preferred_endpoint=None, preferred_api=None) -> dict` — runs a single-turn inference call and returns `{"content", "endpoint", "api", "model_id", "raw"}`. On `bedrock-runtime` this uses the standard `boto3.client("bedrock-runtime")` (Converse API, or `InvokeModel` with the Anthropic Messages body for the `messages`/`invoke` APIs). `bedrock-mantle` isn't a registered boto3 service model, so the request is built and SigV4-signed directly (`botocore.auth.SigV4Auth` against service `"bedrock"`) and sent via `urllib.request` to `https://bedrock-mantle.{region}.api.aws{path}` — `/anthropic/v1/messages` for the native Messages API, `/openai/v1/chat/completions` or `/openai/v1/responses` for the OpenAI-compatible APIs.
+- Exposed via `POST /api/agents/models/invoke-test` (see API Endpoints below) so a user can validate any catalog model works, on whichever endpoint it requires, before wiring it into an agent or harness.
+
+### `services/model_catalog_refresh.py`
+
+Regenerates `etc/models.json` from the curated `etc/bedrock_model_catalog.json` superset (#64 R2). `bedrock_model_catalog.json` carries every known model — including ones too old, or too new/unpriced, to serve by default — plus a `launch_date` field that `models.json` (which lacks it) doesn't need at runtime. Filtering rules:
+
+1. **Recency** — a model is included only if `launch_date` falls within `lookback_months` (default 6) of today. A `null` `launch_date` (unknown) is always included rather than guessed away.
+2. **Completeness** — a model is included only if it has non-null `max_tokens` and both per-1k-token prices. Bedrock publishes no pricing API, so this is manually curated; incomplete entries are excluded, not zero-filled, until an engineer fills them in.
+3. Optionally cross-checked against live `ListFoundationModels`/`ListInferenceProfiles` availability in a target region — best-effort, any failure (missing credentials, network) is logged and skipped rather than failing the run.
+
+- `refresh_models_json(catalog_path, output_path, lookback_months=6, region="us-east-1", skip_live_check=False, reference_date=None, dry_run=False) -> dict` — does the filtering; returns `{"included", "excluded_stale", "excluded_incomplete", "excluded_unavailable", "cutoff"}` (each a list of `model_id`s except `cutoff`, an ISO date string).
+- `reload_supported_models()` — re-reads `etc/models.json` and pushes it into `app.routers.agents.SUPPORTED_MODELS`, since that module-level list is otherwise only loaded once at import.
+- Used by `scripts/refresh_models_json.py` (CLI — run via `make refresh-models` at each major release; accepts `LOOKBACK_MONTHS`/`REGION` env overrides) and `POST /api/settings/models/refresh` (on-demand admin trigger, reads the `models_json_lookback_months` site setting unless overridden in the request body).
 
 ### `services/credential.py`
 

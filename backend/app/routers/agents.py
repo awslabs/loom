@@ -60,6 +60,12 @@ from app.services.credential import (
     delete_credential_provider,
 )
 from app.services.model_catalog import get_bedrock_models, get_litellm_models_live, get_merged_models
+from app.services.bedrock_invocation import (
+    BEDROCK_RUNTIME,
+    UnsupportedModelEndpointError,
+    assert_model_supports_endpoint,
+    invoke_model as invoke_bedrock_model,
+)
 from app.services.harness import (
     create_harness as create_harness_api,
     update_harness as update_harness_api,
@@ -224,6 +230,7 @@ class AgentResponse(BaseModel):
     authorizer_config: dict | None = None
     model_id: str | None = None
     allowed_model_ids: list[str] = []
+    deprecated_model_ids: list[str] = []
     provider: str = "bedrock"
     base_url: str | None = None
     deployed_at: str | None = None
@@ -340,6 +347,21 @@ def compute_active_session_count(agent_id: int, db: Session) -> int:
     return count
 
 
+def _get_current_model_id(agent: Agent) -> str | None:
+    """Read the agent's currently-configured default model_id straight from
+    its AGENT_CONFIG_JSON config entry — there's no dedicated column for it
+    (unlike allowed_model_ids). Used to grandfather an already-assigned
+    model through PATCH validation even if it's since been dropped from
+    the catalog (#64 follow-up)."""
+    for entry in agent.config_entries:
+        if entry.key == "AGENT_CONFIG_JSON":
+            try:
+                return json.loads(entry.value).get("model_id")
+            except (json.JSONDecodeError, TypeError):
+                return None
+    return None
+
+
 def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     """Build an AgentResponse from an Agent ORM object."""
     model_id = None
@@ -437,10 +459,22 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     if not allowed_models and model_id:
         allowed_models = [model_id]
 
+    # Flag model IDs no longer in the current catalog (dropped by a
+    # models.json refresh, #64 follow-up) so the UI can surface "this agent
+    # needs to be updated" without blocking the agent itself — grandfathered
+    # models keep working, they're just no longer assignable to new agents
+    # (see the matching PATCH /{agent_id} validation below).
+    valid_model_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
+    candidate_ids = list(allowed_models)
+    if model_id and model_id not in candidate_ids:
+        candidate_ids.append(model_id)
+    deprecated_model_ids = sorted(mid for mid in candidate_ids if mid not in valid_model_ids)
+
     result = AgentResponse(
         **agent_dict,
         model_id=model_id,
         allowed_model_ids=allowed_models,
+        deprecated_model_ids=deprecated_model_ids,
         provider=provider,
         base_url=base_url,
         active_session_count=compute_active_session_count(agent.id, db),
@@ -713,6 +747,58 @@ def get_model_pricing(
 ) -> list[dict]:
     """Return models with pricing data, enriched with live availability and pricing when available."""
     return get_merged_models(DEFAULT_REGION)
+
+
+class ModelInvokeTestRequest(BaseModel):
+    """Request body for a one-off serverless inference test call."""
+    model_id: str = Field(..., description="Catalog model_id to invoke")
+    prompt: str = Field(..., description="User message to send")
+    system_prompt: str | None = Field(None, description="Optional system prompt")
+    max_tokens: int | None = Field(None, description="Optional max output tokens")
+    endpoint: str | None = Field(
+        None, description="Force 'bedrock-runtime' or 'bedrock-mantle'; defaults to the model's preferred endpoint"
+    )
+
+
+class ModelInvokeTestResponse(BaseModel):
+    """Response for a one-off serverless inference test call."""
+    model_id: str
+    endpoint: str
+    api: str
+    content: str
+
+
+@router.post("/models/invoke-test", response_model=ModelInvokeTestResponse)
+def invoke_model_test(
+    request: ModelInvokeTestRequest,
+    user: UserInfo = Depends(require_scopes("agent:write")),
+) -> ModelInvokeTestResponse:
+    """Run a single serverless inference call against any catalog model,
+    regardless of whether it's served on bedrock-runtime or bedrock-mantle
+    (#64 R1) — lets a user verify a model works before wiring it into an
+    agent or harness."""
+    try:
+        result = invoke_bedrock_model(
+            model_id=request.model_id,
+            catalog=SUPPORTED_MODELS,
+            messages=[{"role": "user", "content": request.prompt}],
+            region=DEFAULT_REGION,
+            max_tokens=request.max_tokens,
+            system_prompt=request.system_prompt,
+            preferred_endpoint=request.endpoint,
+        )
+    except UnsupportedModelEndpointError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.exception("Model invoke-test failed for %s", request.model_id)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Model invocation failed: {e}")
+
+    return ModelInvokeTestResponse(
+        model_id=request.model_id,
+        endpoint=result["endpoint"],
+        api=result["api"],
+        content=result["content"],
+    )
 
 
 @router.get("/providers")
@@ -2072,6 +2158,15 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Field 'api_key' is required for provider '{harness_provider}'"
         )
+
+    if harness_provider == "bedrock":
+        # AgentCore Harness only reaches models via the bedrock-runtime
+        # endpoint — reject bedrock-mantle-only models (e.g. Gemma 4) up
+        # front instead of letting CreateHarness fail opaquely (#64 R1).
+        try:
+            assert_model_supports_endpoint(request.model_id, SUPPORTED_MODELS, BEDROCK_RUNTIME)
+        except UnsupportedModelEndpointError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     runtime_name_pattern = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,47}$")
     if not runtime_name_pattern.match(request.name):
@@ -3857,6 +3952,12 @@ def redeploy_harness_agent(
             detail="Agent has no harness_id — cannot update. Delete and redeploy instead.",
         )
 
+    if (request.provider or "bedrock").lower() == "bedrock" and request.model_id:
+        try:
+            assert_model_supports_endpoint(request.model_id, SUPPORTED_MODELS, BEDROCK_RUNTIME)
+        except UnsupportedModelEndpointError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     region = os.getenv("AWS_REGION", DEFAULT_REGION)
     account_id = os.getenv("AWS_ACCOUNT_ID", "") or agent.account_id
 
@@ -4253,7 +4354,13 @@ def patch_agent(
                 logger.warning("Failed to propagate description to AgentCore for agent %s", agent_id, exc_info=True)
     if "model_id" in request.model_fields_set and request.model_id is not None:
         valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
-        if request.model_id not in valid_ids:
+        # Grandfather the agent's current model in — a model dropped from
+        # the catalog by a models.json refresh stays assignable to agents
+        # that already have it (it still works; it's just no longer
+        # offered for new selections), so a no-op PATCH doesn't 400 (#64
+        # follow-up). Switching to a *different* invalid model is still
+        # rejected.
+        if request.model_id not in valid_ids and request.model_id != _get_current_model_id(agent):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid model ID: {request.model_id}",
@@ -4269,7 +4376,11 @@ def patch_agent(
                 break
     if "allowed_model_ids" in request.model_fields_set and request.allowed_model_ids is not None:
         valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
-        invalid = [m for m in request.allowed_model_ids if m not in valid_ids]
+        # Same grandfathering as model_id above: an already-assigned model
+        # can be kept (or dropped) even if it's no longer in the catalog;
+        # only *adding* a model not in either set is rejected.
+        already_assigned = set(agent.get_allowed_model_ids())
+        invalid = [m for m in request.allowed_model_ids if m not in valid_ids and m not in already_assigned]
         if invalid:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

@@ -28,9 +28,10 @@ import { listMcpServers } from "@/api/mcp";
 import { listA2aAgents } from "@/api/a2a";
 import { listTagPolicies, getRegistryConfig } from "@/api/settings";
 import { listRegistryRecords } from "@/api/registry";
+import { fetchModels } from "@/api/agents";
 import { ApiError } from "@/api/client";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
-import type { AgentResponse, MemoryResponse, McpServer, A2aAgent, TagPolicy, RegistryRecord } from "@/api/types";
+import type { AgentResponse, MemoryResponse, McpServer, A2aAgent, TagPolicy, RegistryRecord, ModelOption } from "@/api/types";
 
 function mcpHealth(status: McpServer["status"]): { label: string; variant: BadgeVariant } {
   switch (status) {
@@ -105,6 +106,7 @@ export function CatalogPage({
   const { timezone } = useTimezone();
   // Tag filter state
   const [registryEnabled, setRegistryEnabled] = useState(false);
+  const [models, setModels] = useState<ModelOption[]>([]);
   const [tagPolicies, setTagPolicies] = useState<TagPolicy[]>([]);
   const [tagFilters, setTagFilters] = useState<Record<string, string[]>>(() => {
     try { return JSON.parse(localStorage.getItem("loom:tagFilters:catalog") || "{}") as Record<string, string[]>; } catch { return {}; }
@@ -118,6 +120,7 @@ export function CatalogPage({
 
   useEffect(() => {
     getRegistryConfig().then((c) => setRegistryEnabled(c.enabled)).catch(() => {});
+    fetchModels().then(setModels).catch(() => {});
   }, []);
 
   const showOnCardPolicies = tagPolicies.filter(tp => tp.show_on_card);
@@ -595,6 +598,7 @@ export function CatalogPage({
                     userGroups={userGroups}
                     registryEnabled={registryEnabled}
                     maxCost={maxAgentCost}
+                    models={models}
                   />
                 )}
               />

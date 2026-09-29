@@ -1,25 +1,478 @@
 [
-  {"model_id": "anthropic.claude-opus-4-7", "display_name": "Claude Opus 4.7", "group": "Anthropic", "provider": "bedrock", "max_tokens": 16384, "input_price_per_1k_tokens": 0.005, "output_price_per_1k_tokens": 0.025, "pricing_as_of": "2025-06-01"},
-  {"model_id": "us.anthropic.claude-opus-4-6-v1", "display_name": "Claude Opus 4.6", "group": "Anthropic", "provider": "bedrock", "max_tokens": 16384, "input_price_per_1k_tokens": 0.005, "output_price_per_1k_tokens": 0.025, "pricing_as_of": "2025-06-01"},
-  {"model_id": "us.anthropic.claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6", "group": "Anthropic", "provider": "bedrock", "max_tokens": 16384, "input_price_per_1k_tokens": 0.003, "output_price_per_1k_tokens": 0.015, "pricing_as_of": "2025-06-01"},
-  {"model_id": "us.anthropic.claude-opus-4-5-20251101-v1:0", "display_name": "Claude Opus 4.5", "group": "Anthropic", "provider": "bedrock", "max_tokens": 16384, "input_price_per_1k_tokens": 0.005, "output_price_per_1k_tokens": 0.025, "pricing_as_of": "2025-06-01"},
-  {"model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "display_name": "Claude Sonnet 4.5", "group": "Anthropic", "provider": "bedrock", "max_tokens": 16384, "input_price_per_1k_tokens": 0.003, "output_price_per_1k_tokens": 0.015, "pricing_as_of": "2025-06-01"},
-  {"model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0", "display_name": "Claude Haiku 4.5", "group": "Anthropic", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.0008, "output_price_per_1k_tokens": 0.004, "pricing_as_of": "2025-06-01"},
-  {"model_id": "deepseek.v3.2", "display_name": "DeepSeek v3.2", "group": "DeepSeek", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.00062, "output_price_per_1k_tokens": 0.00185, "pricing_as_of": "2025-06-01"},
-  {"model_id": "deepseek.r1-v1:0", "display_name": "DeepSeek-R1", "group": "DeepSeek", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.00135, "output_price_per_1k_tokens": 0.0054, "pricing_as_of": "2025-06-01"},
-  {"model_id": "google.gemma-3-12b-it", "display_name": "Gemma 3 12B IT", "group": "Google", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.00009, "output_price_per_1k_tokens": 0.00029, "pricing_as_of": "2025-06-01"},
-  {"model_id": "google.gemma-3-27b-it", "display_name": "Gemma 3 27B PT", "group": "Google", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.00023, "output_price_per_1k_tokens": 0.00038, "pricing_as_of": "2025-06-01"},
-  {"model_id": "google.gemma-3-4b-it", "display_name": "Gemma 3 4B IT", "group": "Google", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.00004, "output_price_per_1k_tokens": 0.00008, "pricing_as_of": "2025-06-01"},
-  {"model_id": "meta.llama4-maverick-17b-instruct-v1:0", "display_name": "Llama 4 Maverick 17B Instruct", "group": "Meta", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.00024, "output_price_per_1k_tokens": 0.00097, "pricing_as_of": "2025-06-01"},
-  {"model_id": "meta.llama4-scout-17b-instruct-v1:0", "display_name": "Llama 4 Scout 17B Instruct", "group": "Meta", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.00017, "output_price_per_1k_tokens": 0.00066, "pricing_as_of": "2025-06-01"},
-  {"model_id": "meta.llama3-3-70b-instruct-v1:0", "display_name": "Llama 3.3 70B Instruct", "group": "Meta", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.00072, "output_price_per_1k_tokens": 0.00072, "pricing_as_of": "2025-06-01"},
-  {"model_id": "minimax.minimax-m2.5", "display_name": "MiniMax M2.5", "group": "MiniMax", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.0003, "output_price_per_1k_tokens": 0.0012, "pricing_as_of": "2025-06-01"},
-  {"model_id": "minimax.minimax-m2.1", "display_name": "MiniMax M2.1", "group": "MiniMax", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.0003, "output_price_per_1k_tokens": 0.0012, "pricing_as_of": "2025-06-01"},
-  {"model_id": "minimax.minimax-m2", "display_name": "MiniMax M2", "group": "MiniMax", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.0003, "output_price_per_1k_tokens": 0.0012, "pricing_as_of": "2025-06-01"},
-  {"model_id": "moonshotai.kimi-k2.5", "display_name": "Kimi K2.5", "group": "Moonshot AI", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.0006, "output_price_per_1k_tokens": 0.003, "pricing_as_of": "2025-06-01"},
-  {"model_id": "moonshot.kimi-k2-thinking", "display_name": "Kimi K2 Thinking", "group": "Moonshot AI", "provider": "bedrock", "max_tokens": 8192, "input_price_per_1k_tokens": 0.0006, "output_price_per_1k_tokens": 0.0025, "pricing_as_of": "2025-06-01"},
-  {"model_id": "us.amazon.nova-2-lite-v1:0", "display_name": "Nova 2 Lite", "group": "Amazon", "provider": "bedrock", "max_tokens": 5120, "input_price_per_1k_tokens": 0.00006, "output_price_per_1k_tokens": 0.00024, "pricing_as_of": "2025-06-01"},
-  {"model_id": "us.amazon.nova-pro-v1:0", "display_name": "Nova Pro", "group": "Amazon", "provider": "bedrock", "max_tokens": 5120, "input_price_per_1k_tokens": 0.0008, "output_price_per_1k_tokens": 0.0032, "pricing_as_of": "2025-06-01"},
-  {"model_id": "us.amazon.nova-lite-v1:0", "display_name": "Nova Lite", "group": "Amazon", "provider": "bedrock", "max_tokens": 5120, "input_price_per_1k_tokens": 0.00006, "output_price_per_1k_tokens": 0.00024, "pricing_as_of": "2025-06-01"},
-  {"model_id": "us.amazon.nova-micro-v1:0", "display_name": "Nova Micro", "group": "Amazon", "provider": "bedrock", "max_tokens": 5120, "input_price_per_1k_tokens": 0.000035, "output_price_per_1k_tokens": 0.00014, "pricing_as_of": "2025-06-01"}
+  {
+    "model_id": "us.amazon.nova-lite-v1:0",
+    "display_name": "Nova Lite",
+    "group": "Amazon",
+    "provider": "bedrock",
+    "max_tokens": 5120,
+    "input_price_per_1k_tokens": 6e-05,
+    "output_price_per_1k_tokens": 0.00024,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke"
+      ]
+    }
+  },
+  {
+    "model_id": "us.amazon.nova-micro-v1:0",
+    "display_name": "Nova Micro",
+    "group": "Amazon",
+    "provider": "bedrock",
+    "max_tokens": 5120,
+    "input_price_per_1k_tokens": 3.5e-05,
+    "output_price_per_1k_tokens": 0.00014,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke"
+      ]
+    }
+  },
+  {
+    "model_id": "us.amazon.nova-pro-v1:0",
+    "display_name": "Nova Pro",
+    "group": "Amazon",
+    "provider": "bedrock",
+    "max_tokens": 5120,
+    "input_price_per_1k_tokens": 0.0008,
+    "output_price_per_1k_tokens": 0.0032,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke"
+      ]
+    }
+  },
+  {
+    "model_id": "us.anthropic.claude-fable-5-1",
+    "display_name": "Claude Fable 5.1",
+    "group": "Anthropic",
+    "provider": "bedrock",
+    "max_tokens": 131072,
+    "input_price_per_1k_tokens": 0.01,
+    "output_price_per_1k_tokens": 0.05,
+    "pricing_as_of": "2026-09-29",
+    "launch_date": "2026-09-01",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "messages"
+      ],
+      "bedrock-mantle": [
+        "messages"
+      ]
+    }
+  },
+  {
+    "model_id": "us.anthropic.claude-opus-4-6-v1",
+    "display_name": "Claude Opus 4.6",
+    "group": "Anthropic",
+    "provider": "bedrock",
+    "max_tokens": 16384,
+    "input_price_per_1k_tokens": 0.005,
+    "output_price_per_1k_tokens": 0.025,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "messages"
+      ],
+      "bedrock-mantle": [
+        "messages"
+      ]
+    }
+  },
+  {
+    "model_id": "anthropic.claude-opus-4-7",
+    "display_name": "Claude Opus 4.7",
+    "group": "Anthropic",
+    "provider": "bedrock",
+    "max_tokens": 16384,
+    "input_price_per_1k_tokens": 0.005,
+    "output_price_per_1k_tokens": 0.025,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "messages"
+      ],
+      "bedrock-mantle": [
+        "messages"
+      ]
+    }
+  },
+  {
+    "model_id": "us.anthropic.claude-opus-4-8",
+    "display_name": "Claude Opus 4.8",
+    "group": "Anthropic",
+    "provider": "bedrock",
+    "max_tokens": 131072,
+    "input_price_per_1k_tokens": 0.005,
+    "output_price_per_1k_tokens": 0.025,
+    "pricing_as_of": "2026-09-29",
+    "launch_date": "2026-05-28",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "messages"
+      ],
+      "bedrock-mantle": [
+        "messages"
+      ]
+    }
+  },
+  {
+    "model_id": "us.anthropic.claude-opus-5",
+    "display_name": "Claude Opus 5",
+    "group": "Anthropic",
+    "provider": "bedrock",
+    "max_tokens": 131072,
+    "input_price_per_1k_tokens": 0.005,
+    "output_price_per_1k_tokens": 0.025,
+    "pricing_as_of": "2026-09-29",
+    "launch_date": "2026-07-24",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "messages"
+      ],
+      "bedrock-mantle": [
+        "messages"
+      ]
+    }
+  },
+  {
+    "model_id": "us.anthropic.claude-opus-5-5",
+    "display_name": "Claude Opus 5.5",
+    "group": "Anthropic",
+    "provider": "bedrock",
+    "max_tokens": 131072,
+    "input_price_per_1k_tokens": 0.004,
+    "output_price_per_1k_tokens": 0.02,
+    "pricing_as_of": "2026-09-29",
+    "launch_date": "2026-09-22",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "messages"
+      ],
+      "bedrock-mantle": [
+        "messages"
+      ]
+    }
+  },
+  {
+    "model_id": "us.anthropic.claude-sonnet-4-6",
+    "display_name": "Claude Sonnet 4.6",
+    "group": "Anthropic",
+    "provider": "bedrock",
+    "max_tokens": 16384,
+    "input_price_per_1k_tokens": 0.003,
+    "output_price_per_1k_tokens": 0.015,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "messages"
+      ],
+      "bedrock-mantle": [
+        "messages"
+      ]
+    }
+  },
+  {
+    "model_id": "us.anthropic.claude-sonnet-5",
+    "display_name": "Claude Sonnet 5",
+    "group": "Anthropic",
+    "provider": "bedrock",
+    "max_tokens": 131072,
+    "input_price_per_1k_tokens": 0.002,
+    "output_price_per_1k_tokens": 0.01,
+    "pricing_as_of": "2026-09-29",
+    "launch_date": "2026-06-30",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "messages"
+      ],
+      "bedrock-mantle": [
+        "messages"
+      ]
+    }
+  },
+  {
+    "model_id": "deepseek.r1-v1:0",
+    "display_name": "DeepSeek-R1",
+    "group": "DeepSeek",
+    "provider": "bedrock",
+    "max_tokens": 8192,
+    "input_price_per_1k_tokens": 0.00135,
+    "output_price_per_1k_tokens": 0.0054,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke"
+      ]
+    }
+  },
+  {
+    "model_id": "google.gemma-3-12b-it",
+    "display_name": "Gemma 3 12B IT",
+    "group": "Google",
+    "provider": "bedrock",
+    "max_tokens": 8192,
+    "input_price_per_1k_tokens": 9e-05,
+    "output_price_per_1k_tokens": 0.00029,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke"
+      ]
+    }
+  },
+  {
+    "model_id": "google.gemma-3-27b-it",
+    "display_name": "Gemma 3 27B PT",
+    "group": "Google",
+    "provider": "bedrock",
+    "max_tokens": 8192,
+    "input_price_per_1k_tokens": 0.00023,
+    "output_price_per_1k_tokens": 0.00038,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke"
+      ]
+    }
+  },
+  {
+    "model_id": "google.gemma-3-4b-it",
+    "display_name": "Gemma 3 4B IT",
+    "group": "Google",
+    "provider": "bedrock",
+    "max_tokens": 8192,
+    "input_price_per_1k_tokens": 4e-05,
+    "output_price_per_1k_tokens": 8e-05,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke"
+      ]
+    }
+  },
+  {
+    "model_id": "meta.llama3-3-70b-instruct-v1:0",
+    "display_name": "Llama 3.3 70B Instruct",
+    "group": "Meta",
+    "provider": "bedrock",
+    "max_tokens": 8192,
+    "input_price_per_1k_tokens": 0.00072,
+    "output_price_per_1k_tokens": 0.00072,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke"
+      ]
+    }
+  },
+  {
+    "model_id": "minimax.minimax-m2",
+    "display_name": "MiniMax M2",
+    "group": "MiniMax",
+    "provider": "bedrock",
+    "max_tokens": 8192,
+    "input_price_per_1k_tokens": 0.0003,
+    "output_price_per_1k_tokens": 0.0012,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "chat_completions"
+      ],
+      "bedrock-mantle": [
+        "chat_completions"
+      ]
+    }
+  },
+  {
+    "model_id": "minimax.minimax-m2.1",
+    "display_name": "MiniMax M2.1",
+    "group": "MiniMax",
+    "provider": "bedrock",
+    "max_tokens": 8192,
+    "input_price_per_1k_tokens": 0.0003,
+    "output_price_per_1k_tokens": 0.0012,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "chat_completions"
+      ],
+      "bedrock-mantle": [
+        "chat_completions"
+      ]
+    }
+  },
+  {
+    "model_id": "moonshot.kimi-k2-thinking",
+    "display_name": "Kimi K2 Thinking",
+    "group": "Moonshot AI",
+    "provider": "bedrock",
+    "max_tokens": 8192,
+    "input_price_per_1k_tokens": 0.0006,
+    "output_price_per_1k_tokens": 0.0025,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "responses",
+        "chat_completions",
+        "converse",
+        "invoke"
+      ]
+    }
+  },
+  {
+    "model_id": "moonshotai.kimi-k2.5",
+    "display_name": "Kimi K2.5",
+    "group": "Moonshot AI",
+    "provider": "bedrock",
+    "max_tokens": 8192,
+    "input_price_per_1k_tokens": 0.0006,
+    "output_price_per_1k_tokens": 0.003,
+    "pricing_as_of": "2025-06-01",
+    "launch_date": null,
+    "endpoints": [
+      "bedrock-runtime"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "responses",
+        "chat_completions",
+        "converse",
+        "invoke"
+      ]
+    }
+  },
+  {
+    "model_id": "global.moonshotai.kimi-k3",
+    "display_name": "Kimi K3",
+    "group": "Moonshot AI",
+    "provider": "bedrock",
+    "max_tokens": 8192,
+    "input_price_per_1k_tokens": 0.003,
+    "output_price_per_1k_tokens": 0.015,
+    "pricing_as_of": "2026-09-29",
+    "launch_date": "2026-09-18",
+    "endpoints": [
+      "bedrock-runtime"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "responses",
+        "chat_completions",
+        "converse",
+        "invoke"
+      ]
+    }
+  }
 ]

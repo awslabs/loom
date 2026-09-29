@@ -110,6 +110,40 @@ class TestHarnessDeployment(unittest.TestCase):
         self.assertEqual(agent.deployment_status, "failed")
         self.assertEqual(agent.status, "FAILED")
 
+    def test_deploy_harness_rejects_mantle_only_model(self):
+        """#64 R1: AgentCore Harness only reaches models via bedrock-runtime
+        — a model that's bedrock-mantle-only in the catalog must be
+        rejected up front with a clear 400, not passed through to
+        CreateHarness."""
+        import app.routers.agents as agents_module
+
+        mantle_only_entry = {
+            "model_id": "google.gemma-4-31b",
+            "display_name": "Gemma 4 31B",
+            "endpoints": ["bedrock-mantle"],
+            "apis": {"bedrock-mantle": ["chat_completions"]},
+        }
+        original_models = agents_module.SUPPORTED_MODELS
+        agents_module.SUPPORTED_MODELS = original_models + [mantle_only_entry]
+        try:
+            response = self.client.post(
+                "/api/agents",
+                json={
+                    "source": "harness",
+                    "name": "mantle_only_agent",
+                    "model_id": "google.gemma-4-31b",
+                    "role_arn": "arn:aws:iam::123456789012:role/test-role",
+                },
+            )
+        finally:
+            agents_module.SUPPORTED_MODELS = original_models
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("bedrock-mantle", response.json()["detail"])
+
+        agent = self.session.query(Agent).filter(Agent.name == "mantle_only_agent").first()
+        self.assertIsNone(agent)
+
     def test_deploy_harness_missing_name(self):
         response = self.client.post(
             "/api/agents",

@@ -27,8 +27,9 @@ import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatTimestamp } from "@/lib/format";
 import { statusVariant } from "@/lib/status";
 import { listTagPolicies, getRegistryConfig } from "@/api/settings";
+import { fetchModels } from "@/api/agents";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
-import type { AgentDeployRequest, AgentHarnessDeployRequest, AgentResponse, TagPolicy } from "@/api/types";
+import type { AgentDeployRequest, AgentHarnessDeployRequest, AgentResponse, ModelOption, TagPolicy } from "@/api/types";
 
 type BuilderTab = "register" | "deploy";
 
@@ -81,10 +82,12 @@ export function AgentListPage({
   });
 
   const [registryEnabled, setRegistryEnabled] = useState(false);
+  const [models, setModels] = useState<ModelOption[]>([]);
 
   useEffect(() => {
     void listTagPolicies().then(setTagPolicies).catch(() => {});
     getRegistryConfig().then((c) => setRegistryEnabled(c.enabled)).catch(() => {});
+    fetchModels().then(setModels).catch(() => {});
   }, []);
 
 
@@ -352,6 +355,7 @@ export function AgentListPage({
                     userGroups={userGroups}
                     registryEnabled={registryEnabled}
                     maxCost={maxAgentCost}
+                    models={models}
                   />
                 )}
               />

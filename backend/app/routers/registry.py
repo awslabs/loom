@@ -12,6 +12,7 @@ from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.a2a import A2aAgent
 from app.models.agent import Agent
+from app.models.integration import Integration
 from app.models.mcp import McpServer, McpTool
 from app.services.registry import get_registry_client
 
@@ -45,12 +46,21 @@ class RegistryRecordResponse(BaseModel):
     description: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    record_version: str | None = None
 
 
 class RegistryRecordDetailResponse(RegistryRecordResponse):
     descriptors: dict = {}
-    record_version: str | None = None
     status_reason: str | None = None
+
+
+class SkillDependent(BaseModel):
+    agent_id: int
+    agent_name: str
+
+
+class SkillDependentsResponse(BaseModel):
+    dependents: list[SkillDependent]
 
 
 class StatusReasonRequest(BaseModel):
@@ -148,6 +158,7 @@ def _record_to_response(rec: dict) -> RegistryRecordResponse:
         description=rec.get("description"),
         created_at=_to_str(rec.get("createdAt")),
         updated_at=_to_str(rec.get("updatedAt")),
+        record_version=rec.get("recordVersion"),
     )
 
 
@@ -495,6 +506,44 @@ def delete_record(
         db.commit()
 
     return {"deleted": True, "record_id": record_id}
+
+
+@router.get("/records/{record_id}/dependents", response_model=SkillDependentsResponse)
+def get_skill_dependents(
+    record_id: str,
+    user: UserInfo = Depends(require_scopes("registry:read")),
+    db: Session = Depends(get_db),
+) -> SkillDependentsResponse:
+    """List agents with a 'skill' integration attached to this registry record.
+
+    Skills have no Loom-owned resource row of their own, so this is a reverse
+    lookup across every agent's Integration rows — the only place a
+    record_id -> agent relationship is recorded for a skill (see
+    AttachedSkillsSection.tsx / _get_attached_skill_prompt_text in
+    routers/agents.py, issue #61). AWS's registry API has no concept of this
+    relationship at all.
+    """
+    import json as _json
+
+    integrations = db.query(Integration).filter(
+        Integration.integration_type == "skill",
+        Integration.enabled == True,  # noqa: E712
+    ).all()
+    agent_ids: list[int] = []
+    for integration in integrations:
+        try:
+            config = _json.loads(integration.integration_config or "{}")
+        except _json.JSONDecodeError:
+            continue
+        if config.get("record_id") == record_id:
+            agent_ids.append(integration.agent_id)
+    if not agent_ids:
+        return SkillDependentsResponse(dependents=[])
+
+    agents = db.query(Agent).filter(Agent.id.in_(agent_ids)).all()
+    return SkillDependentsResponse(dependents=[
+        SkillDependent(agent_id=a.id, agent_name=a.name or a.runtime_id) for a in agents
+    ])
 
 
 @router.get("/search", response_model=SearchResponse)

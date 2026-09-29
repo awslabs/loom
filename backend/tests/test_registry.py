@@ -577,6 +577,48 @@ class TestRegistryRouter(unittest.TestCase):
             response = self.client.put("/api/registry/records/rec-orphan", json={})
             self.assertEqual(response.status_code, 404)
 
+    # ----- SKILL DEPENDENTS (issue #61 follow-up) -----
+    def test_skill_dependents_lists_agents_with_matching_integration(self):
+        from app.models.integration import Integration
+        self._override_admin_user()
+        agent_a = self._create_agent(name="agent-with-skill")
+        agent_b = self._create_agent(arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/other", runtime_id="other-runtime", name="agent-without-skill")
+        self.session.add(Integration(
+            agent_id=agent_a.id, integration_type="skill",
+            integration_config=json.dumps({"record_id": "rec-skill"}), enabled=True,
+        ))
+        self.session.add(Integration(
+            agent_id=agent_b.id, integration_type="skill",
+            integration_config=json.dumps({"record_id": "rec-other-skill"}), enabled=True,
+        ))
+        self.session.commit()
+
+        response = self.client.get("/api/registry/records/rec-skill/dependents")
+        self.assertEqual(response.status_code, 200)
+        dependents = response.json()["dependents"]
+        self.assertEqual(len(dependents), 1)
+        self.assertEqual(dependents[0]["agent_name"], "agent-with-skill")
+
+    def test_skill_dependents_excludes_disabled_integrations(self):
+        from app.models.integration import Integration
+        self._override_admin_user()
+        agent = self._create_agent()
+        self.session.add(Integration(
+            agent_id=agent.id, integration_type="skill",
+            integration_config=json.dumps({"record_id": "rec-skill"}), enabled=False,
+        ))
+        self.session.commit()
+
+        response = self.client.get("/api/registry/records/rec-skill/dependents")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["dependents"], [])
+
+    def test_skill_dependents_empty_for_unattached_skill(self):
+        self._override_admin_user()
+        response = self.client.get("/api/registry/records/rec-nobody-uses-me/dependents")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["dependents"], [])
+
     @patch("app.routers.registry.get_registry_client")
     def test_create_record_mcp_not_found(self, mock_get_client):
         mock_get_client.return_value = MagicMock()

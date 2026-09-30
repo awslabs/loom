@@ -20,6 +20,8 @@ class UsageLimit(Base):
     enabled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    cached_usage = Column(Float, nullable=True)
+    cached_usage_updated_at = Column(DateTime, nullable=True)
 
     def get_scope(self) -> dict:
         # Should never actually be empty since scope is NOT NULL, but keep the
@@ -46,4 +48,6 @@ class UsageLimit(Base):
             "enabled": self.enabled,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "cached_usage": self.cached_usage,
+            "cached_usage_updated_at": self.cached_usage_updated_at.isoformat() if self.cached_usage_updated_at else None,
         }

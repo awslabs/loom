@@ -132,7 +132,7 @@ def _current_usage(db: Session, limit: UsageLimit, window_start: datetime) -> fl
 
 def check_usage_limits(db: Session, username: str, groups: list[str], model_id: str) -> UsageDecision:
     
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
     decision = UsageDecision()
 
     for limit in _matching_limits(db, username, groups, model_id):

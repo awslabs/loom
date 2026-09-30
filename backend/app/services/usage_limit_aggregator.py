@@ -27,7 +27,7 @@ def _refresh_once() -> int:
     refreshed = 0
     try:
         limits = db.query(UsageLimit).filter(UsageLimit.enabled == True).all()  # noqa: E712
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         for limit in limits:
             window_start = _window_start(limit.window, now)
             limit.cached_usage = _current_usage(db, limit, window_start)

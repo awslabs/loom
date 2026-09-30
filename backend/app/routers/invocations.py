@@ -1117,8 +1117,8 @@ async def invoke_harness_agent_stream(
         harness_token_summary = _extract_token_summary(access_token, "user", token_source)
         if harness_token_summary:
             harness_start_data["user_token"] = harness_token_summary
-        if usage_warnings: 
-            harness_start_data["usage_warnings"] = usage_warnings
+    if usage_warnings: 
+        harness_start_data["usage_warnings"] = usage_warnings
     yield format_sse_event("session_start", harness_start_data)
 
     if delegation_mode == "obo" and not user_access_token:

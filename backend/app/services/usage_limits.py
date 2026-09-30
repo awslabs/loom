@@ -137,7 +137,16 @@ def check_usage_limits(db: Session, username: str, groups: list[str], model_id: 
 
     for limit in _matching_limits(db, username, groups, model_id):
         window_start = _window_start(limit.window, now)
-        usage = _current_usage(db, limit, window_start)
+        # Cache-first: use the aggregator's precomputed value when it's
+        # fresh (refreshed at or after this window started). Otherwise —
+        # aggregator hasn't run yet, or we've crossed a window boundary
+        # since the last refresh — fall back to a live computation rather
+        # than trust a stale number or silently treat usage as zero.
+        if limit.cached_usage is not None and limit.cached_usage_updated_at \
+                and limit.cached_usage_updated_at >= window_start:
+            usage = limit.cached_usage
+        else:
+            usage = _current_usage(db, limit, window_start)
 
         if usage < limit.threshold:
             continue

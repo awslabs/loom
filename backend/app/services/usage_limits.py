@@ -63,11 +63,14 @@ def _limit_matches_scope(limit: UsageLimit, username: str, groups: list[str]) ->
 
 
 def _limit_matches_target(target: dict, model_id: str | None) -> bool:
-    if not model_id:
-        return False
     target_type = target.get("type", "all")
     if target_type == "all":
         return True
+    # Only a model/family-specific target needs to know which model was
+    # actually used -- an unresolvable model_id can't disqualify an "all"
+    # target, but it must disqualify these more specific ones.
+    if not model_id:
+        return False
     if target_type == "model":
         return _normalize_model_id(target.get("model_id", "")) == _normalize_model_id(model_id)
     if target_type == "family":

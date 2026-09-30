@@ -645,5 +645,60 @@ class TestInvocationsRouter(unittest.TestCase):
         self.assertEqual(response.json()["live_status"], "active")
 
 
+    def test_invoke_agent_blocked_by_usage_limit_returns_429(self):
+        """A usage limit already at/over threshold for the invoking user
+        must return 429 and must not create an Invocation row — the two
+        things the issue's own testing checklist calls out explicitly."""
+        from app.models.usage_limit import UsageLimit
+        import json
+
+        limit = UsageLimit(
+            name="Local Dev Block",
+            scope=json.dumps({"type": "user", "username": "local-dev"}),
+            target=json.dumps({"type": "all"}),
+            measure="tokens",
+            threshold=1,
+            window="daily",
+            enforcement="block",
+        )
+        self.session.add(limit)
+        self.session.commit()
+
+        existing_session = InvocationSession(
+            agent_id=self.agent.id, session_id="pre-exhaust-session",
+            qualifier="DEFAULT", status="pending",
+            created_at=datetime.utcnow(), user_id="local-dev",
+        )
+        self.session.add(existing_session)
+        self.session.commit()
+
+        prior_inv = Invocation(
+            session_id="pre-exhaust-session", invocation_id="prior",
+            status="complete", prompt_text="t",
+            model_id="anthropic.claude-sonnet-4-6",
+            input_tokens=100, output_tokens=0,
+            created_at=datetime.utcnow(),
+        )
+        self.session.add(prior_inv)
+        self.session.commit()
+
+        invocation_count_before = self.session.query(Invocation).count()
+
+        response = self.client.post(
+            f"/api/agents/{self.agent.id}/invoke",
+            json={"prompt": "This should be blocked", "qualifier": "DEFAULT"}
+        )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("Local Dev Block", response.json()["detail"])
+
+        invocation_count_after = self.session.query(Invocation).count()
+        self.assertEqual(
+            invocation_count_before, invocation_count_after,
+            "A blocked invoke must not create a new Invocation row",
+        )
+    
+
+
 if __name__ == "__main__":
     unittest.main()

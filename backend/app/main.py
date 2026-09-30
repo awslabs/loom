@@ -4,10 +4,13 @@ Loom Backend API
 FastAPI application for the Loom Agent Builder Playground.
 Provides endpoints for agent registration, invocation, and log retrieval.
 """
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+from app.services.usage_poller import start_usage_poller
+from app.services.usage_limit_aggregator import start_usage_limit_aggregator
 
 # Delegate TLS verification to the OS trust store when enabled (e.g. behind a
 # corporate TLS-intercepting proxy such as Zscaler, whose root CA OpenSSL 3.x
@@ -61,6 +64,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.warning("Failed to initialize registry client: %s", e)
 
+        # Start background tasks. Stored so they can be cancelled cleanly on
+    # shutdown instead of being abandoned mid-loop.
+    usage_poller_task = asyncio.create_task(start_usage_poller())
+    usage_limit_aggregator_task = asyncio.create_task(start_usage_limit_aggregator())
+
+    yield
+
+    # Cleanup
+    logger.info("Shutting down Loom backend...")
+    usage_poller_task.cancel()
+    usage_limit_aggregator_task.cancel()
     yield
 
     # Cleanup

@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error(f"Failed to initialize database: {e}")
         raise
 
-    # Initialize registry client from site_settings (or env var fallback)
+        # Initialize registry client from site_settings (or env var fallback)
     try:
         from app.services.registry import init_registry_from_db
         from app.db import SessionLocal
@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.warning("Failed to initialize registry client: %s", e)
 
-        # Start background tasks. Stored so they can be cancelled cleanly on
+    # Start background tasks. Stored so they can be cancelled cleanly on
     # shutdown instead of being abandoned mid-loop.
     usage_poller_task = asyncio.create_task(start_usage_poller())
     usage_limit_aggregator_task = asyncio.create_task(start_usage_limit_aggregator())
@@ -75,10 +75,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Shutting down Loom backend...")
     usage_poller_task.cancel()
     usage_limit_aggregator_task.cancel()
-    yield
-
-    # Cleanup
-    logger.info("Shutting down Loom backend...")
 
 
 # Create FastAPI application

@@ -99,7 +99,8 @@ src/
 │   ├── AgentCard.tsx              # Agent card with refresh + eraser icon deletion + overlay confirmation
 │   ├── SortableCardGrid.tsx       # Drag-to-reorder card grid with @dnd-kit, alphabetical sort, SortButton
 │   ├── SortableTableHead.tsx      # Clickable sortable table column headers
-│   ├── AgentRegistrationForm.tsx  # Import (ARN + model) and Deploy (full form) tabs
+│   ├── AgentRegistrationForm.tsx  # Legacy ARN registration + 5-step deploy wizard with shared review/deploy step
+│   ├── AgentWizardChooser.tsx     # "New agent" entry: guided setup vs. import manifest
 │   ├── IdentityProviderPanel.tsx  # Identity provider CRUD, OIDC discovery, group mapping
 │   ├── JsonConfigSection.tsx     # Shared collapsible JSON import/export section
 │   ├── AuthorizerManagementPanel.tsx # Authorizer config and credential management

@@ -76,6 +76,7 @@ backend/
 │   │   ├── settings.py      # Settings endpoints (tag policy CRUD, tag profile CRUD)
 │   │   ├── costs.py          # Cost dashboard: estimated costs + actuals from CloudWatch usage logs
 │   │   ├── traces.py        # Trace retrieval: OTEL log parsing for trace summaries and span detail
+│   │   ├── evaluations.py   # Read-only AgentCore Evaluations results: sources, per-trace scores, evaluated exchange
 │   │   ├── invocations.py   # SSE streaming invoke + session/invocation queries
 │   │   ├── logs.py          # CloudWatch log browsing with pagination + session log retrieval via stream-name matching
 │   │   ├── memories.py      # Memory resource CRUD + strategy mapping

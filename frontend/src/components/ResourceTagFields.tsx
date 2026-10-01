@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -102,47 +101,44 @@ export function ResourceTagFields({ onChange, profileId: controlledProfileId, gr
 
   const selectedProfile = availableProfiles.find((p) => p.id.toString() === selectedProfileId);
 
+  const resolvedTags = tagPolicies
+    .map((tp) => ({ key: tp.key.replace(/^loom:/, ""), value: selectedProfile?.tags[tp.key] }))
+    .filter((t): t is { key: string; value: string } => !!t.value);
+
   return (
-    <section className="space-y-3">
-      <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-        Resource Tags
-      </h4>
-      <div className="flex items-end gap-3">
-        <div className="w-1/3 min-w-0 space-y-1">
-          <label className="text-xs text-muted-foreground">Tag Profile</label>
-          {ownerRestriction && selectedProfile ? (
-            <div className="flex h-9 items-center rounded-md border border-input bg-muted px-3 text-sm text-muted-foreground">
-              {selectedProfile.name}
-            </div>
-          ) : (
-            <Select value={selectedProfileId || ""} onValueChange={handleProfileChange}>
-              <SelectTrigger className="w-full text-sm">
-                <SelectValue placeholder="Select a tag profile..." />
-              </SelectTrigger>
-              <SelectContent>
-                {availableProfiles.map((p) => (
-                  <SelectItem key={p.id} value={p.id.toString()}>
-                    {p.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
-        </div>
-        {selectedProfile && tagPolicies.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 pb-1">
-            {tagPolicies.map((tp) => {
-              const val = selectedProfile.tags[tp.key];
-              if (!val) return null;
-              return (
-                <Badge key={tp.key} variant="outline" className="text-[10px] px-1.5 py-0.5 font-normal">
-                  {tp.key.replace(/^loom:/, "")}: {val}
-                </Badge>
-              );
-            })}
+    <section className="space-y-2">
+      <h4 className="text-sm font-medium">Tag profile</h4>
+      <div className="space-y-0 overflow-hidden rounded-md border">
+        {ownerRestriction && selectedProfile ? (
+          <div className="flex h-9 items-center border-b px-3 font-mono text-xs text-muted-foreground">
+            {selectedProfile.name}
+          </div>
+        ) : (
+          <Select value={selectedProfileId || ""} onValueChange={handleProfileChange}>
+            <SelectTrigger className="w-full rounded-none border-0 border-b font-mono text-xs">
+              <SelectValue placeholder="Select a tag profile..." />
+            </SelectTrigger>
+            <SelectContent>
+              {availableProfiles.map((p) => (
+                <SelectItem key={p.id} value={p.id.toString()}>
+                  {p.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        {resolvedTags.length > 0 && (
+          <div className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5 bg-muted/40 px-3 py-2.5 font-mono text-xs">
+            {resolvedTags.map((t) => (
+              <div key={t.key} className="contents">
+                <div className="text-muted-foreground">{t.key}</div>
+                <div className="truncate">{t.value}</div>
+              </div>
+            ))}
           </div>
         )}
       </div>
+      <p className="text-[11px] text-muted-foreground">Applied to every AWS resource this agent creates.</p>
       {!selectedProfileId && requiredPolicies.some((tp) => tp.required) && (
         <p className="text-[10px] text-amber-600 dark:text-amber-400">
           No tag profile selected. Required tags will use default values or &quot;missing&quot;.

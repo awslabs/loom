@@ -54,7 +54,8 @@ frontend/
 │   │   ├── SortableCardGrid.tsx — Drag-to-reorder card grid using @dnd-kit, default alphabetical sort, SortButton, localStorage persistence
 │   │   ├── SortableTableHead.tsx — Clickable sortable table column headers with arrow indicators
 │   │   ├── AgentCard.tsx       # Agent summary card with refresh + Trash2 icon deletion
-│   │   ├── AgentRegistrationForm.tsx  # Tabbed form: ARN registration + agent deployment
+│   │   ├── AgentRegistrationForm.tsx  # ARN registration + 5-step deploy wizard with shared review/deploy step
+│   │   ├── AgentWizardChooser.tsx     # "New agent" entry: guided setup vs. import manifest (file/paste)
 │   │   ├── JsonConfigSection.tsx     # Shared collapsible JSON import/export section
 │   │   ├── AuthorizerManagementPanel.tsx # Authorizer config + credential management
 │   │   ├── McpAccessControl.tsx        # Persona access control for MCP servers and tools
@@ -232,37 +233,35 @@ When deletion is confirmed with "Also delete in AgentCore" checked, the agent tr
 **Content:**
 - Page header: "Agent Administration" with card/table view toggle (top-right)
 - Sub-header: "Agents" with description and "Add Agent" button (right-aligned)
-- "Add Agent" toggles a Card containing Deploy/Import tab switcher and `AgentRegistrationForm`
-- When deploy succeeds, the form collapses and an ephemeral `AgentCard` appears at the top of the grid with CREATING status and spinner/timer. Once the real agent appears in the agents list, the ephemeral card is removed.
-- Below the form: responsive grid of `AgentCard` components (cards default) or table view
+- "Add Agent" opens `AgentWizardChooser` (see below). Editing an existing agent (pencil icon on `AgentCard`) skips the chooser and opens the wizard directly on the shared review step, prefilled from the agent's current configuration.
+- When deploy succeeds, the wizard collapses and an ephemeral `AgentCard` appears at the top of the grid with CREATING status and spinner/timer. Once the real agent appears in the agents list, the ephemeral card is removed.
+- Below the wizard: responsive grid of `AgentCard` components (cards default) or table view
 
-### Import Tab
+### New Agent Chooser (`AgentWizardChooser`)
+
+Two paths, side by side:
+- **Guided setup**: starts the 5-step wizard at Runtime (step 1).
+- **Import manifest**: drag-and-drop file drop zone, "Choose file" picker (`.json`), and a "Paste JSON" disclosure with its own textarea. The pasted/dropped text is validated as JSON client-side; on success it's handed to the wizard, which applies it via the same `applyManifestJson` parser used by the in-wizard JSON panel and jumps straight to the shared review step (bypassing all 5 steps).
+- A tertiary link ("Or register an existing AgentCore runtime by ARN instead") drops back to the legacy ARN-registration form (see Import Tab below) for attaching an already-deployed runtime, which is a distinct flow from deploying/importing a manifest.
+
+### Import Tab (legacy ARN registration)
 
 - ARN text input and Model selector on the same line (ARN fills remaining space, model is fixed width)
 - Labels: "AgentCore Runtime ARN" and "Model Used"
-- Model selector uses `SearchableSelect` with grouped options (Anthropic / Amazon), no default selection
+- Model selector uses `SearchableSelect`, options sorted via `groupModels()`/`sortModelsByRecency()` (tier-then-version order — see "Model Sorting" below), no default selection
 - Import button with `min-w-[120px]` to prevent layout shift during loading spinner
 
-### Deploy Tab
+### Deploy Wizard (`AgentRegistrationForm`, `mode="deploy"`)
 
-Full deployment form with sections:
-- **Deployment Type Selector**: Radio buttons for "Custom Agent" (code-based, full configuration) or "Managed Agent" (AgentCore Harness, no code required). Defaults to Custom. Controls which form sections are visible.
-- **Agent Framework Selector** (custom only): Radio buttons for "Strands Agent" (default) or "Google ADK". Selects `agent_framework` sent as part of the deploy request; omitted from JSON export when left at the default "strands". Not shown for managed (harness) agents, which have no framework concept.
-- **JSON Import/Export**: Collapsible section (ChevronDown/ChevronRight toggle) via the shared `JsonConfigSection` component. Import maps `name`, `description`, `persona` (→ agent description), `instructions` (→ behavioral guidelines), `behavior` (→ output expectations), `model`, `role`, `network_mode`, `authorizer`, `tags` (tag profile name). Export serializes the current form state to JSON using human-readable identifiers (model ID, role name, authorizer name, tag profile name); empty/default fields are omitted. Apply/Export/Cancel buttons. Invalid JSON shows inline error without clearing existing fields.
-- **Agent Identity**: name (1/3 width) and description (2/3 width)
-- **System Prompt**: agent description, behavioral guidelines, output expectations — each with placeholder examples
-- **Provider / Default Model / Protocol / Network / IAM Role**: Provider selector (Bedrock default, or LiteLLM when a proxy connection is configured — see [17. Alternate LLM Providers](#17-alternate-llm-providers-litellm-proxy)) precedes Default Model, which uses `SearchableSelect` with grouped options and no default selection; switching provider resets the model selection. Protocol offers HTTP as selectable; MCP and A2A shown as disabled (custom only). Network offers PUBLIC; VPC shown as disabled. IAM Role uses a `SearchableSelect` with searchable dropdown. Model, provider, and IAM role are required — deploy button is disabled until all are selected.
-- **Allowed Models (runtime selection)**: shown after a default model is selected. Per-vendor grouped checkboxes via `groupModels()`. The default model is always checked and disabled. Additional models can be checked to allow runtime selection at invoke time. If no additional models are selected, only the default model is allowed. JSON import/export supports `allowed_models` array field.
-- **Model Parameters** (managed only): max tokens, temperature, top_p — numeric inputs for controlling harness model behavior.
-- **Built-in Tools** (managed only): toggle switches for Code Interpreter and Browser tools. When enabled, the corresponding `agentcore_code_interpreter` or `agentcore_browser` tool is added to the harness configuration.
-- **Role Permissions (read-only)**: collapsible section shown after IAM role selection, displays policy document. Clicking the header toggles visibility.
-- **Authorizer** (custom only): radio selection of None, Cognito, or Other. Authorizer dropdown is 25% width, shows just the authorizer config name. Fields show "Allowed Clients" and "Allowed Scopes".
-  - Cognito: searchable Cognito pool select (30% width), auto-populated discovery URL, tag inputs for allowed clients and scopes, app client ID and client secret fields
-  - Other: textbox for discovery URL, tag inputs for allowed clients and scopes
-- **Harness Parameters** (managed only): max iterations and timeout seconds — positioned between Authorizer and Lifecycle.
-- **Lifecycle**: idle timeout and max lifetime fields with dynamic placeholders fetched from `/api/agents/defaults` (e.g., "300" and "3600")
-- **Resource Tags**: `ResourceTagFields` component with tag profile dropdown (persisted in `sessionStorage`). Deploy-time tags are auto-applied; build-time tags are resolved from the selected tag profile.
-- **Integrations**: Memory (enabled, with multi-select dropdown for memory resources, custom only), MCP Servers (enabled with multi-select dropdown), A2A Agents (enabled with multi-select dropdown, custom only), Code Interpreter (custom only — peer integration section with enable toggle, network mode select (SANDBOX/PUBLIC), region labeled dropdown, and CI execution role selector filtered to `role_type="code_interpreter"` managed roles). JSON import/export uses nested `code_interpreter` key: `{"enabled": true, "region": "us-east-1", "network_mode": "SANDBOX", "role": "loom-ci-role-demo"}`.
+A 5-step wizard with a left rail (step number/checkmark, label, and a one-line mono "current value" subline per step), a header with the agent name (or "New agent — guided setup") and a single Cancel action, and a "View / Paste JSON" disclosure (the same `JsonConfigSection` used elsewhere) available from any step. Each step renders as a bordered card with its own title/helper text and a footer bar ("Step n of 5" + Back/Next); Next is disabled until that step's required fields are valid. The rail allows jumping to any step directly (including backward) regardless of validation — only the Next button gates forward progress.
+
+- **Step 1 — Runtime**: Deployment type as two description-cards ("Custom agent" vs. "Managed agent" / AgentCore Harness). Framework (custom only) as a segmented control: "Strands Agents" (default) or "Google ADK"; hidden for managed agents.
+- **Step 2 — Prompt & models**: Name (locked after deploy, 2-col grid with Description) and a System Prompt editor styled as a code surface — line-number gutter kept in sync with the textarea's scroll position, non-wrapping (`wrap="off"`/`whitespace-pre`, so logical and visual lines always match 1:1 and the gutter never drifts out of alignment), fixed height with internal scrolling (`field-sizing: fixed` forced via `!important` to override the shared `Textarea` component's default content-based auto-grow) capped at a larger height when "expand" is toggled, and a live chars/`~tokens` (chars/4 estimate) counter. Below a divider: a Bedrock/LiteLLM segmented provider toggle, provider-specific base URL/API key inputs when required, a "Default model" field (labeled dropdown via `SearchableSelect`, options from `sortedProviderModels` — the provider's models run through `groupModels()`/`sortModelsByRecency()`), and — once a default model is picked — an "Allowed at runtime" section: a filterable (`modelFilter`), vendor-grouped chip grid (one row per `group`, each chip toggles membership in `selectedAllowedModelIds`; the default model's chip is pinned, labeled, and non-removable). Embedding models (`isEmbeddingModel()`, matched by `/embed/i` on model_id/display_name) are excluded from the grid with a count note; vendor groups with zero selections collapse into a single "N models, 0 selected" summary row behind a "Show" link unless the filter is active. Chip labels strip the redundant "Claude " prefix (`chipLabel()`). Managed-agent-only "Managed agent parameters" (max iterations/tokens, human-confirmation toggle + policy textarea) sit at the bottom of this step.
+- **Step 3 — Access**: Network as two radio-cards (Public/VPC; VPC reveals a `SearchableSelect` for VPC config and a collapsible read-only details panel). Execution role via `SearchableSelect`, with the role's first 3 IAM actions shown as always-visible chips plus a "+N · view policy" toggle that expands the full `PolicyViewer`. Inbound authorizer via `SearchableSelect` with its detail panel (type, pool, truncated client IDs, discovery URL with a copy button, audience/scopes) rendered directly attached to the select (flattened bottom border via `SearchableSelect`'s `triggerClassName` prop) rather than as a separate disclosure.
+- **Step 4 — Tools & memory**: Ordered to match per-turn usage — Skills (registry:read only; checklist with name/description/version columns) → Connected tools (MCP servers and A2A agents merged into one checklist with a MCP/A2A type badge, host, and OAuth2/M2M badge; A2A entries only appear for custom agents) → Code interpreter (switch; enabling reveals network mode, region, and CI execution role selects) → Memory (toggle chips).
+- **Step 5 — Lifecycle & tags**: Idle timeout / max lifetime inputs pre-filled with the real default values (not placeholder text) plus a humanized suffix ("sec · 5 min") and quick preset chips (5m/15m/1h and 1h/4h/8h respectively). `ResourceTagFields` renders the tag profile select with the resolved tags as an attached key/value table (not floating badges).
+- **Review & deploy** (shared with the import path): two-column layout — a bordered rows card (Runtime, Prompt & models, Access, Tools & memory, Lifecycle & tags; each row shows real resolved values, not a one-line summary, with an "Edit" link that jumps back to the corresponding step) and a side panel with deploy-impact notes, Back + Deploy/Update buttons, and an "Export manifest" link that downloads the same JSON object the deploy/update request would send (`buildManifestJson()`, shared with the JSON panel's Export action).
+- **JSON Import/Export**: via the shared `JsonConfigSection` component (`applyManifestJson`/`buildManifestJson`). Import maps `name`, `description`, `persona` (→ agent description), `model`, `provider` (flat string or `{id, base_url, api_key}` object), `role`, `vpc` (`{mode, config}`), `authorizer`, `tags` (tag profile name), `mcp_servers`/`a2a_agents`/`memories`/`skills` (by name), `code_interpreter`, and managed-agent fields (`max_iterations`, `max_tokens`, `human_confirmation`, `confirmation_policy`). A manifest handed in from the chooser's import path is applied once reference data has loaded, then the wizard jumps to the review step; parse failures are surfaced via a toast. Export serializes current form state using human-readable identifiers; empty/default fields are omitted.
 
 ---
 
@@ -1035,7 +1034,7 @@ The Security Admin page includes an "Approval Policies" section (`ApprovalPolicy
 
 ### 15.6 Harness Human Confirmation
 
-The Agent Registration Form includes a "Enable human confirmation (inline function HITL)" checkbox under Harness Parameters. When enabled:
+The deploy wizard's "Prompt & models" step includes a "Enable human confirmation (inline function HITL)" checkbox under "Managed agent parameters" (managed agents only). When enabled:
 - A customizable "Confirmation Policy" textarea defines when the agent should seek confirmation.
 - The policy text becomes the `description` of the `user_confirmation` inline function tool deployed with the harness.
 - The JSON config export/import includes `human_confirmation` and `confirmation_policy` fields.
@@ -1072,7 +1071,7 @@ Backend design (provider registry, virtual key vending, dynamic model catalog, I
 
 ### 17.1 Provider-Aware Deploy Form
 
-`AgentRegistrationForm` adds a provider selector (fetched via `fetchProviders()` → `GET /api/agents/providers`), positioned alongside the Default Model field. Switching providers resets the model selection and any provider-specific credential fields.
+`AgentRegistrationForm`'s "Prompt & models" step adds a provider selector (fetched via `fetchProviders()` → `GET /api/agents/providers`, rendered as a Bedrock/LiteLLM segmented toggle), positioned above the Default Model field. Switching providers resets the model selection and any provider-specific credential fields.
 
 - **Bedrock** (default): unchanged — model list from `fetchModels()`, no additional fields.
 - **LiteLLM**: selecting it triggers a lazy, on-demand fetch of `fetchLitellmModels()` (`GET /api/agents/models/litellm`) rather than loading it eagerly alongside Bedrock's list on page mount, since the LiteLLM catalog reflects exactly what's deployed on the connected proxy and may not be configured at all. The same lazy fetch is triggered when importing/editing a manifest whose `provider` is `litellm`, so the model dropdown has options to match against.
@@ -1110,7 +1109,7 @@ Backend design (dual-endpoint model invocation, curated-catalog-driven `models.j
 
 ### 18.1 Recency Sort (`lib/models.ts`)
 
-`groupModels()` now sorts each vendor group newest-first via `sortModelsByRecency()`, which extracts the first version-shaped number out of a model's `display_name` (e.g. "Claude Opus 4.8" → `4.8`) as a recency proxy, falling back to alphabetical for ties and for names with no version (e.g. "Nova Lite"). Applies everywhere `groupModels()`/`groupModelsByProvider()` is used — the Settings page's model browser and every model picker (Invoke, Chat, Deploy, Allowed Models) — since Bedrock doesn't expose a release date on any model-list API.
+`groupModels()` now sorts each vendor group by **tier recency** via `sortModelsByRecency()` (issue #65): it strips every version number out of a model's `display_name` to get its "tier" (`extractTier()` — e.g. "Claude Opus 4.8" and "Claude Opus 4.7" both → "Claude Opus"; "Nova 2 Lite" and "Nova Lite" both → "Nova Lite"), ranks tiers by their newest member's version (`extractVersion()` — the first version-shaped number in the name), then lists each tier's own versions newest-first. This keeps a tier's versions adjacent instead of interleaving with another tier that happens to share a version number (e.g. "Claude Sonnet 5" no longer sorts between "Claude Opus 5" and "Claude Opus 4.8" just because they share the number 5) — ties between tiers, and names with no version at all, fall back to alphabetical. Applies everywhere `groupModels()`/`groupModelsByProvider()` is used — the Settings page's model browser and every model picker (Invoke, Chat, Deploy wizard's Default/Allowed models, legacy ARN registration) — since Bedrock doesn't expose a release date on any model-list API.
 
 ### 18.2 Settings Page — Model Catalog Refresh (§ 9 addendum)
 

@@ -230,7 +230,7 @@ class TestCreateRuntimeVpc(unittest.TestCase):
 
     @patch("boto3.client")
     def test_create_runtime_public_mode_no_vpc_fields(self, mock_boto_client: MagicMock) -> None:
-        """PUBLIC mode should not include vpcSubnetIds or vpcSecurityGroupIds."""
+        """PUBLIC mode should not include networkModeConfig."""
         mock_client = MagicMock()
         mock_boto_client.return_value = mock_client
         mock_client.create_agent_runtime.return_value = {"agentRuntimeId": "rt-pub"}
@@ -249,12 +249,11 @@ class TestCreateRuntimeVpc(unittest.TestCase):
         call_kwargs = mock_client.create_agent_runtime.call_args[1]
         net = call_kwargs["networkConfiguration"]
         self.assertEqual(net["networkMode"], "PUBLIC")
-        self.assertNotIn("vpcSubnetIds", net)
-        self.assertNotIn("vpcSecurityGroupIds", net)
+        self.assertNotIn("networkModeConfig", net)
 
     @patch("boto3.client")
     def test_create_runtime_vpc_mode_passes_subnet_and_sg(self, mock_boto_client: MagicMock) -> None:
-        """VPC mode should include vpcSubnetIds and vpcSecurityGroupIds in networkConfiguration."""
+        """VPC mode should pass subnets and security groups in networkModeConfig."""
         mock_client = MagicMock()
         mock_boto_client.return_value = mock_client
         mock_client.create_agent_runtime.return_value = {"agentRuntimeId": "rt-vpc"}
@@ -275,8 +274,8 @@ class TestCreateRuntimeVpc(unittest.TestCase):
         call_kwargs = mock_client.create_agent_runtime.call_args[1]
         net = call_kwargs["networkConfiguration"]
         self.assertEqual(net["networkMode"], "VPC")
-        self.assertEqual(net["vpcSubnetIds"], ["subnet-aaa", "subnet-bbb"])
-        self.assertEqual(net["vpcSecurityGroupIds"], ["sg-ccc"])
+        self.assertEqual(net["networkModeConfig"]["subnets"], ["subnet-aaa", "subnet-bbb"])
+        self.assertEqual(net["networkModeConfig"]["securityGroups"], ["sg-ccc"])
 
     @patch("boto3.client")
     def test_create_runtime_vpc_mode_no_subnets(self, mock_boto_client: MagicMock) -> None:
@@ -299,8 +298,7 @@ class TestCreateRuntimeVpc(unittest.TestCase):
         call_kwargs = mock_client.create_agent_runtime.call_args[1]
         net = call_kwargs["networkConfiguration"]
         self.assertEqual(net["networkMode"], "VPC")
-        self.assertNotIn("vpcSubnetIds", net)
-        self.assertNotIn("vpcSecurityGroupIds", net)
+        self.assertNotIn("networkModeConfig", net)
 
 
 class TestUpdateRuntimeVpc(unittest.TestCase):
@@ -324,8 +322,8 @@ class TestUpdateRuntimeVpc(unittest.TestCase):
         call_kwargs = mock_client.update_agent_runtime.call_args[1]
         net = call_kwargs["networkConfiguration"]
         self.assertEqual(net["networkMode"], "VPC")
-        self.assertEqual(net["vpcSubnetIds"], ["subnet-111", "subnet-222"])
-        self.assertEqual(net["vpcSecurityGroupIds"], ["sg-333"])
+        self.assertEqual(net["networkModeConfig"]["subnets"], ["subnet-111", "subnet-222"])
+        self.assertEqual(net["networkModeConfig"]["securityGroups"], ["sg-333"])
 
     @patch("boto3.client")
     def test_update_runtime_public_mode_no_vpc_fields(self, mock_boto_client: MagicMock) -> None:
@@ -343,8 +341,7 @@ class TestUpdateRuntimeVpc(unittest.TestCase):
         call_kwargs = mock_client.update_agent_runtime.call_args[1]
         net = call_kwargs["networkConfiguration"]
         self.assertEqual(net["networkMode"], "PUBLIC")
-        self.assertNotIn("vpcSubnetIds", net)
-        self.assertNotIn("vpcSecurityGroupIds", net)
+        self.assertNotIn("networkModeConfig", net)
 
     @patch("boto3.client")
     def test_update_runtime_no_network_mode_omits_network_config(self, mock_boto_client: MagicMock) -> None:

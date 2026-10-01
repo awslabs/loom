@@ -12,6 +12,8 @@ from app.main import app
 from app.db import Base, get_db
 from app.models.agent import Agent
 from app.models.config_entry import ConfigEntry
+from app.routers.agents import DEFAULT_REGION
+from app.services.model_catalog import get_merged_models
 
 
 class TestModelSelection(unittest.TestCase):
@@ -180,7 +182,15 @@ class TestModelSelection(unittest.TestCase):
             allowed_models=["us.anthropic.claude-sonnet-4-6"]
         )
 
-        new_allowed = ["us.anthropic.claude-sonnet-4-6", "us.anthropic.claude-haiku-4-5-20251001-v1:0"]
+        # Take the second model from the catalog the PATCH validator reads,
+        # not a hard-coded ID: etc/models.json is regenerated with a lookback
+        # window, so a fixed ID ages out (claude-haiku-4-5 did in 2d8b161).
+        extra_model_id = next(
+            m["model_id"]
+            for m in get_merged_models(DEFAULT_REGION)
+            if m["model_id"] != "us.anthropic.claude-sonnet-4-6"
+        )
+        new_allowed = ["us.anthropic.claude-sonnet-4-6", extra_model_id]
         response = self.client.patch(
             f"/api/agents/{agent.id}",
             json={"allowed_model_ids": new_allowed},

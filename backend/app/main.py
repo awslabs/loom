@@ -4,10 +4,13 @@ Loom Backend API
 FastAPI application for the Loom Agent Builder Playground.
 Provides endpoints for agent registration, invocation, and log retrieval.
 """
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+from app.services.usage_poller import start_usage_poller
+from app.services.usage_limit_aggregator import start_usage_limit_aggregator
 
 # Delegate TLS verification to the OS trust store when enabled (e.g. behind a
 # corporate TLS-intercepting proxy such as Zscaler, whose root CA OpenSSL 3.x
@@ -21,7 +24,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import init_db
-from app.routers import a2a, admin, agents, approvals, auth, costs, credentials, evaluations, identity_providers, integrations, invocations, logs, mcp, memories, registry, security, settings, traces
+from app.routers import a2a, admin, agents, approvals, auth, costs, credentials, evaluations, identity_providers, integrations, invocations, logs, mcp, memories, registry, security, settings, traces, usage_limits
 
 # Configure logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
@@ -49,7 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error(f"Failed to initialize database: {e}")
         raise
 
-    # Initialize registry client from site_settings (or env var fallback)
+        # Initialize registry client from site_settings (or env var fallback)
     try:
         from app.services.registry import init_registry_from_db
         from app.db import SessionLocal
@@ -61,10 +64,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.warning("Failed to initialize registry client: %s", e)
 
+    # Start background tasks. Stored so they can be cancelled cleanly on
+    # shutdown instead of being abandoned mid-loop.
+    usage_poller_task = asyncio.create_task(start_usage_poller())
+    usage_limit_aggregator_task = asyncio.create_task(start_usage_limit_aggregator())
+
     yield
 
     # Cleanup
     logger.info("Shutting down Loom backend...")
+    usage_poller_task.cancel()
+    usage_limit_aggregator_task.cancel()
 
 
 # Create FastAPI application
@@ -113,6 +123,7 @@ app.include_router(registry.router)
 app.include_router(security.router)
 app.include_router(settings.router)
 app.include_router(traces.router)
+app.include_router(usage_limits.router)
 
 
 @app.get("/")

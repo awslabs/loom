@@ -1096,7 +1096,28 @@ The Settings page's "Enabled Models" section (§ 9) is split into a Bedrock bloc
 
 ---
 
-## 18. Future Work
+## 18. Usage Limits
+
+### 18.1 Usage Limits Administration (`UsageLimitsPanel.tsx`)
+
+A new tab in the Security Admin page (`SecurityAdminPage.tsx`), following the same structure as `ApprovalPolicyPanel.tsx`:
+- Table view listing each limit's scope ("Applies To"), target ("Model Scope"), current cached usage against threshold, enforcement action, and enabled state, using the existing `StatusPill` component for the enforcement and enabled columns.
+- Inline create/edit form, matching the existing panel's layout: two-step scope selector (type + value), two-step target selector (type + value, value field conditional on target type), and selects for measure/window/enforcement.
+- No user/group autocomplete picker exists elsewhere in the app for this kind of field, so scope/target values are plain text inputs, consistent with the rest of the admin UI rather than introducing a new input pattern.
+
+### 18.2 API Client (`api/usage_limits.ts`)
+
+Standard CRUD wrapper over `apiFetch`, matching `api/approvals.ts`'s structure: `listUsageLimits`, `getUsageLimit`, `createUsageLimit`, `updateUsageLimit`, `deleteUsageLimit`.
+
+### 18.3 Types
+
+`UsageLimit` added to `api/types.ts`, with `scope`/`target` typed as discriminated unions rather than loose `Record<string, unknown>`, so the panel component gets exhaustiveness checking on scope/target type branches.
+
+### 18.4 Known Gap
+
+The backend emits `usage_warnings` on the `session_start` SSE event when a `warn`-tier limit is exceeded (see backend §17.2), but nothing in the chat/invoke UI currently reads or displays it. Follow-up work.
+
+## 19. Future Work
 
 - **VPC network mode** support
 - **Operate Tab** — aggregate dashboard with summary cards, per-agent latency charts

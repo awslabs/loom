@@ -807,8 +807,7 @@ Scopes are automatically derived from group membership. Each scope has read and 
 | a2a:read/write | Viewing and managing A2A agents |
 | tagging:read/write | Viewing and managing tag policies and profiles |
 | costs:read/write | Viewing cost dashboards |
-| settings:read/write | Viewing and modifying application settings |
-| admin:read/write | Viewing audit logs and analytics |
+| admin:read/write | Viewing audit logs and analytics, and viewing/modifying global deployment configuration (site settings, registry, LiteLLM proxy, enabled models, VPC configs) — held only by `g-admins-super` |
 | invoke | Invoking agents (sending prompts and receiving responses) |
 
 ---

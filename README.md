@@ -54,6 +54,7 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 - Semantic search over registry records via data plane API
 - Visibility filtering: end-users see only APPROVED or unregistered resources
 - Integration gating: only APPROVED MCP servers and A2A agents can be selected for agent deployments
+- Skills: author, edit, and delete SKILL records directly from the Skills page (registry:write), with governance (submit/approve/reject) and read-only browsing (registry:read) for everyone else; also listed in the Platform Catalog. Approved skills can be attached to an agent at creation time or afterward, folding their SKILL.md content into that agent's system prompt on deploy/redeploy
 
 ### Security and Access Control
 - Cognito user authentication with automatic token refresh
@@ -90,6 +91,7 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 ### Observability and UX
 - OpenTelemetry observability with ADOT auto-instrumentation and OTEL trace visualization
 - Interactive waterfall timeline for inspecting per-span events from OTEL log records
+- Read-only AgentCore Evaluations results per agent (Evaluations tab): online evaluation configs and batch evaluation runs that score the agent, when each last ran, and every evaluated session or test case with its scores, judge explanations, and the prompt and answer
 - Card/table view toggle on all listing pages
 - Estimated cost column in agent and memory table views; consistent 5-column layout for MCP and A2A tables
 - Drag-to-reorder cards with persistent ordering

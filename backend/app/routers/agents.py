@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db, SessionLocal
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.agent import Agent
+from app.models.integration import Integration
 from app.models.authorizer_config import AuthorizerConfig
 from app.models.config_entry import ConfigEntry
 from app.models.a2a import A2aAgent as A2aAgentModel, A2aAgentAccess
@@ -35,12 +36,14 @@ from app.routers.utils import get_agent_or_404
 from app.services.agentcore import describe_runtime, list_runtime_endpoints
 from app.services.deployment import (
     _merge_tags,
+    bake_config_into_artifact,
     build_agent_artifact,
     create_runtime,
     delete_runtime,
     delete_runtime_endpoint,
     get_runtime,
     get_runtime_endpoint,
+    MAX_INLINE_CONFIG_JSON_LENGTH,
     update_runtime,
 )
 from app.services.iam import (
@@ -57,6 +60,12 @@ from app.services.credential import (
     delete_credential_provider,
 )
 from app.services.model_catalog import get_bedrock_models, get_litellm_models_live, get_merged_models
+from app.services.bedrock_invocation import (
+    BEDROCK_RUNTIME,
+    UnsupportedModelEndpointError,
+    assert_model_supports_endpoint,
+    invoke_model as invoke_bedrock_model,
+)
 from app.services.harness import (
     create_harness as create_harness_api,
     update_harness as update_harness_api,
@@ -182,6 +191,7 @@ class AgentCreateRequest(BaseModel):
     memory_ids: list[int] = Field(default_factory=list, description="Memory resource IDs to integrate")
     mcp_servers: list[int] = Field(default_factory=list, description="MCP server IDs to integrate")
     a2a_agents: list[int] = Field(default_factory=list, description="A2A agent IDs to integrate")
+    skill_ids: list[str] = Field(default_factory=list, description="Approved SKILL registry record IDs to attach")
     code_interpreter_enabled: bool = Field(default=False, description="Enable Code Interpreter tool")
     code_interpreter_region: str = Field(default="", description="AWS region for Code Interpreter (empty = agent region)")
     code_interpreter_network_mode: str = Field(default="SANDBOX", description="Code Interpreter network mode: PUBLIC, SANDBOX, or VPC")
@@ -220,6 +230,7 @@ class AgentResponse(BaseModel):
     authorizer_config: dict | None = None
     model_id: str | None = None
     allowed_model_ids: list[str] = []
+    deprecated_model_ids: list[str] = []
     provider: str = "bedrock"
     base_url: str | None = None
     deployed_at: str | None = None
@@ -336,6 +347,21 @@ def compute_active_session_count(agent_id: int, db: Session) -> int:
     return count
 
 
+def _get_current_model_id(agent: Agent) -> str | None:
+    """Read the agent's currently-configured default model_id straight from
+    its AGENT_CONFIG_JSON config entry — there's no dedicated column for it
+    (unlike allowed_model_ids). Used to grandfather an already-assigned
+    model through PATCH validation even if it's since been dropped from
+    the catalog (#64 follow-up)."""
+    for entry in agent.config_entries:
+        if entry.key == "AGENT_CONFIG_JSON":
+            try:
+                return json.loads(entry.value).get("model_id")
+            except (json.JSONDecodeError, TypeError):
+                return None
+    return None
+
+
 def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     """Build an AgentResponse from an Agent ORM object."""
     model_id = None
@@ -433,10 +459,22 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     if not allowed_models and model_id:
         allowed_models = [model_id]
 
+    # Flag model IDs no longer in the current catalog (dropped by a
+    # models.json refresh, #64 follow-up) so the UI can surface "this agent
+    # needs to be updated" without blocking the agent itself — grandfathered
+    # models keep working, they're just no longer assignable to new agents
+    # (see the matching PATCH /{agent_id} validation below).
+    valid_model_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
+    candidate_ids = list(allowed_models)
+    if model_id and model_id not in candidate_ids:
+        candidate_ids.append(model_id)
+    deprecated_model_ids = sorted(mid for mid in candidate_ids if mid not in valid_model_ids)
+
     result = AgentResponse(
         **agent_dict,
         model_id=model_id,
         allowed_model_ids=allowed_models,
+        deprecated_model_ids=deprecated_model_ids,
         provider=provider,
         base_url=base_url,
         active_session_count=compute_active_session_count(agent.id, db),
@@ -498,8 +536,133 @@ def _resolve_tags(
     return resolved, policy_dicts
 
 
-def _build_system_prompt(request: AgentCreateRequest) -> str:
-    """Combine agent_description, behavioral_guidelines, output_expectations into a system prompt."""
+def _validate_skill_ids(skill_ids: list[str]) -> None:
+    """Reject skill_ids that don't resolve to an APPROVED SKILL registry
+    record, mirroring the same registry_status == "APPROVED" gate already
+    applied to mcp_servers/a2a_agents above — a skill can be attached at
+    deploy time only once it's cleared governance."""
+    if not skill_ids:
+        return
+    from app.services.registry import get_registry_client
+    client = get_registry_client()
+    for record_id in skill_ids:
+        try:
+            rec = client.get_record(record_id)
+        except Exception:
+            rec = None
+        if not rec:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Skill record '{record_id}' not found in the registry",
+            )
+        if rec.get("status") != "APPROVED":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Skill '{rec.get('name', record_id)}' is not approved in the registry (status: {rec.get('status')}). Only approved skills can be attached to agents.",
+            )
+
+
+def _sync_attached_skills(agent_id: int, skill_ids: list[str], db: Session) -> None:
+    """Reconcile 'skill'-typed Integration rows for this agent against the
+    requested skill_ids — the same mechanism AttachedSkillsSection.tsx uses,
+    so create/redeploy (this form) and post-creation attach/detach (that
+    section) converge on one lookup in _get_attached_skill_prompt_text.
+    Missing record_ids are added, no-longer-selected ones are removed; a
+    freshly-created agent has no existing rows so this is just an add-all.
+    """
+    existing = db.query(Integration).filter(
+        Integration.agent_id == agent_id,
+        Integration.integration_type == "skill",
+    ).all()
+    existing_by_record_id: dict[str, Integration] = {}
+    for integration in existing:
+        try:
+            record_id = json.loads(integration.integration_config or "{}").get("record_id")
+        except json.JSONDecodeError:
+            continue
+        if record_id:
+            existing_by_record_id[record_id] = integration
+
+    wanted = set(skill_ids)
+    for record_id, integration in existing_by_record_id.items():
+        if record_id not in wanted:
+            db.delete(integration)
+    for record_id in wanted:
+        if record_id not in existing_by_record_id:
+            db.add(Integration(
+                agent_id=agent_id,
+                integration_type="skill",
+                integration_config=json.dumps({"record_id": record_id}),
+                enabled=True,
+            ))
+    db.commit()
+
+
+def _config_json_env_var(config_json: str, artifact_bucket: str, artifact_key: str, region: str) -> dict[str, str]:
+    """Return the single env var entry that carries AGENT_CONFIG_JSON to the
+    runtime — inline if it fits within CreateAgentRuntime's 5000-char
+    environmentVariables value limit, otherwise baked into the artifact zip
+    and referenced via AGENT_CONFIG_PATH instead (see bake_config_into_artifact)."""
+    if len(config_json) <= MAX_INLINE_CONFIG_JSON_LENGTH:
+        return {"AGENT_CONFIG_JSON": config_json}
+    bake_config_into_artifact(artifact_bucket, artifact_key, config_json, region)
+    return {"AGENT_CONFIG_PATH": "agent_config.json"}
+
+
+def _get_attached_skill_prompt_text(agent_id: int, db: Session) -> str:
+    """Fetch the SKILL.md content of every enabled 'skill' integration attached
+    to this agent, from the live registry — not cached — so a skill that gets
+    un-approved, edited, or deleted after being attached is reflected on the
+    next redeploy rather than baked in stale at attach time. Skills that are
+    not currently APPROVED are silently skipped, matching the same
+    registry_status == "APPROVED" visibility rule already applied to MCP/A2A
+    records elsewhere in this codebase.
+    """
+    skill_integrations = db.query(Integration).filter(
+        Integration.agent_id == agent_id,
+        Integration.integration_type == "skill",
+        Integration.enabled == True,  # noqa: E712
+    ).all()
+    if not skill_integrations:
+        return ""
+
+    from app.services.registry import get_registry_client
+    client = get_registry_client()
+
+    sections: list[str] = []
+    for integration in skill_integrations:
+        try:
+            config = json.loads(integration.integration_config or "{}")
+        except json.JSONDecodeError:
+            continue
+        record_id = config.get("record_id")
+        if not record_id:
+            continue
+        try:
+            rec = client.get_record(record_id)
+        except Exception as e:
+            logger.warning("Failed to fetch attached skill record %s: %s", record_id, e)
+            continue
+        if not rec or rec.get("status") != "APPROVED":
+            continue
+        skill_md = (
+            rec.get("descriptors", {})
+            .get("agentSkillsDefinition", {})
+            .get("additionalData", {})
+            .get("skillMd", {})
+            .get("data", "")
+        )
+        if skill_md:
+            sections.append(skill_md)
+
+    if not sections:
+        return ""
+    return "## Attached Skills\n\n" + "\n\n---\n\n".join(sections)
+
+
+def _build_system_prompt(request: AgentCreateRequest, skill_prompt_text: str = "") -> str:
+    """Combine agent_description, behavioral_guidelines, output_expectations,
+    and any attached skills' content into a system prompt."""
     parts = []
     if request.agent_description:
         parts.append(request.agent_description)
@@ -517,6 +680,8 @@ def _build_system_prompt(request: AgentCreateRequest) -> str:
             "the `shell` tool (e.g. write a script and run `python3 script.py`) "
             "and read/write files via the `file_operations` tool."
         )
+    if skill_prompt_text:
+        parts.append(skill_prompt_text)
     return "\n\n".join(parts) if parts else "You are a helpful assistant."
 
 
@@ -582,6 +747,58 @@ def get_model_pricing(
 ) -> list[dict]:
     """Return models with pricing data, enriched with live availability and pricing when available."""
     return get_merged_models(DEFAULT_REGION)
+
+
+class ModelInvokeTestRequest(BaseModel):
+    """Request body for a one-off serverless inference test call."""
+    model_id: str = Field(..., description="Catalog model_id to invoke")
+    prompt: str = Field(..., description="User message to send")
+    system_prompt: str | None = Field(None, description="Optional system prompt")
+    max_tokens: int | None = Field(None, description="Optional max output tokens")
+    endpoint: str | None = Field(
+        None, description="Force 'bedrock-runtime' or 'bedrock-mantle'; defaults to the model's preferred endpoint"
+    )
+
+
+class ModelInvokeTestResponse(BaseModel):
+    """Response for a one-off serverless inference test call."""
+    model_id: str
+    endpoint: str
+    api: str
+    content: str
+
+
+@router.post("/models/invoke-test", response_model=ModelInvokeTestResponse)
+def invoke_model_test(
+    request: ModelInvokeTestRequest,
+    user: UserInfo = Depends(require_scopes("agent:write")),
+) -> ModelInvokeTestResponse:
+    """Run a single serverless inference call against any catalog model,
+    regardless of whether it's served on bedrock-runtime or bedrock-mantle
+    (#64 R1) — lets a user verify a model works before wiring it into an
+    agent or harness."""
+    try:
+        result = invoke_bedrock_model(
+            model_id=request.model_id,
+            catalog=SUPPORTED_MODELS,
+            messages=[{"role": "user", "content": request.prompt}],
+            region=DEFAULT_REGION,
+            max_tokens=request.max_tokens,
+            system_prompt=request.system_prompt,
+            preferred_endpoint=request.endpoint,
+        )
+    except UnsupportedModelEndpointError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.exception("Model invoke-test failed for %s", request.model_id)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Model invocation failed: {e}")
+
+    return ModelInvokeTestResponse(
+        model_id=request.model_id,
+        endpoint=result["endpoint"],
+        api=result["api"],
+        content=result["content"],
+    )
 
 
 @router.get("/providers")
@@ -844,8 +1061,8 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     # Resolve tags from tag policies + user-supplied profile values
     resolved_tags, tag_policy_dicts = _resolve_tags(db, request.tags)
 
-    # Build system prompt and model config
-    system_prompt = _build_system_prompt(request)
+    # Model config (system prompt is built after the agent record exists, so
+    # any attached skills' content can be folded in via their Integration rows)
     model_max_tokens = next(
         (m["max_tokens"] for m in SUPPORTED_MODELS if m["model_id"] == request.model_id),
         4096,
@@ -908,6 +1125,9 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Memory IDs not found: {sorted(missing)}"
             )
+
+    # Validate skill record IDs — must resolve to an APPROVED SKILL record
+    _validate_skill_ids(request.skill_ids)
 
     # Snapshot MCP server data for the background task (avoid lazy-load after session close)
     mcp_snapshots = [
@@ -1043,6 +1263,12 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     # Commit all auto-granted access rules
     if request.mcp_servers or request.a2a_agents:
         db.commit()
+
+    # Attach skills, then build the system prompt so their content is folded
+    # in from the very first deploy (not just on a later redeploy)
+    _sync_attached_skills(agent_id, request.skill_ids, db)
+    skill_prompt_text = _get_attached_skill_prompt_text(agent_id, db)
+    system_prompt = _build_system_prompt(request, skill_prompt_text)
 
     # Schedule heavy deployment work in the background
     background_tasks.add_task(
@@ -1403,6 +1629,13 @@ def _deploy_agent_background(
             "AGENT_OBSERVABILITY_ENABLED": "true",
             "AWS_REGION": region,
         }
+        # env_vars (above) is persisted to ConfigEntry as Loom's own record of
+        # this agent's config — runtime_env_vars is what actually goes to
+        # CreateAgentRuntime, which caps each environmentVariables value at
+        # 5000 chars; swap the inline JSON for a baked-artifact file path
+        # when it's too large (see _config_json_env_var).
+        runtime_env_vars = {k: v for k, v in env_vars.items() if k != "AGENT_CONFIG_JSON"}
+        runtime_env_vars.update(_config_json_env_var(config_json, artifact_bucket, artifact_key, region))
 
         for key, value in env_vars.items():
             db.add(ConfigEntry(
@@ -1464,7 +1697,7 @@ def _deploy_agent_background(
                 name=request.name,
                 description=request.description,
                 role_arn=execution_role_arn,
-                env_vars=env_vars,
+                env_vars=runtime_env_vars,
                 network_mode=request.network_mode,
                 vpc_subnet_ids=vpc_cfg.get_subnet_ids() if vpc_cfg else None,
                 vpc_security_group_ids=vpc_cfg.get_sg_ids() if vpc_cfg else None,
@@ -1767,6 +2000,8 @@ def _update_deploy_agent_background(
             "AGENT_OBSERVABILITY_ENABLED": "true",
             "AWS_REGION": region,
         }
+        runtime_env_vars = {k: v for k, v in env_vars.items() if k != "AGENT_CONFIG_JSON"}
+        runtime_env_vars.update(_config_json_env_var(config_json, artifact_bucket, artifact_key, region))
 
         # Replace config entries
         db.query(ConfigEntry).filter(ConfigEntry.agent_id == agent_id).delete()
@@ -1824,7 +2059,7 @@ def _update_deploy_agent_background(
                 runtime_id=agent.runtime_id,
                 description=request.description,
                 role_arn=agent.execution_role_arn,
-                env_vars=env_vars,
+                env_vars=runtime_env_vars,
                 authorizer_config=authorizer_config,
                 artifact_bucket=artifact_bucket,
                 artifact_prefix=artifact_key,
@@ -1924,6 +2159,15 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
             detail=f"Field 'api_key' is required for provider '{harness_provider}'"
         )
 
+    if harness_provider == "bedrock":
+        # AgentCore Harness only reaches models via the bedrock-runtime
+        # endpoint — reject bedrock-mantle-only models (e.g. Gemma 4) up
+        # front instead of letting CreateHarness fail opaquely (#64 R1).
+        try:
+            assert_model_supports_endpoint(request.model_id, SUPPORTED_MODELS, BEDROCK_RUNTIME)
+        except UnsupportedModelEndpointError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     runtime_name_pattern = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,47}$")
     if not runtime_name_pattern.match(request.name):
         raise HTTPException(
@@ -1947,7 +2191,8 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
 
     resolved_tags, _ = _resolve_tags(db, request.tags)
 
-    system_prompt = _build_system_prompt(request)
+    # Validate skill record IDs — must resolve to an APPROVED SKILL record
+    _validate_skill_ids(request.skill_ids)
 
     # Snapshot MCP server data for the background task
     mcp_snapshots: list[dict[str, Any]] = []
@@ -2081,6 +2326,10 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
 
     agent_id = agent.id
     response_data = AgentResponse(**agent.to_dict(), active_session_count=0)
+
+    _sync_attached_skills(agent_id, request.skill_ids, db)
+    skill_prompt_text = _get_attached_skill_prompt_text(agent_id, db)
+    system_prompt = _build_system_prompt(request, skill_prompt_text)
 
     background_tasks.add_task(
         _deploy_harness_background,
@@ -3469,10 +3718,35 @@ def redeploy_agent_endpoint(agent_id: int, user: UserInfo = Depends(require_scop
     agent.deployment_status = "deploying"
     db.commit()
 
+    # This endpoint reuses the existing artifact unchanged — but if the
+    # stored AGENT_CONFIG_JSON grew too large for environmentVariables
+    # (e.g. a skill was attached since the last full redeploy), the
+    # artifact needs a fresh rebuild just to bake the config file into it.
+    artifact_bucket: str | None = None
+    artifact_key: str | None = None
+    config_json = env_vars.get("AGENT_CONFIG_JSON")
+    if config_json and len(config_json) > MAX_INLINE_CONFIG_JSON_LENGTH:
+        try:
+            artifact_bucket, artifact_key = build_agent_artifact(
+                agent.region, agent_framework=agent.agent_framework or "strands"
+            )
+        except Exception as e:
+            agent.deployment_status = "failed"
+            db.commit()
+            logger.error("Failed to rebuild artifact for oversized config on agent %s: %s", agent.id, e)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to rebuild artifact: {str(e)}"
+            )
+        env_vars = {k: v for k, v in env_vars.items() if k != "AGENT_CONFIG_JSON"}
+        env_vars.update(_config_json_env_var(config_json, artifact_bucket, artifact_key, agent.region))
+
     try:
         response = update_runtime(
             runtime_id=agent.runtime_id,
             env_vars=env_vars if env_vars else None,
+            artifact_bucket=artifact_bucket,
+            artifact_prefix=artifact_key,
             region=agent.region,
         )
         agent.deployment_status = "deployed"
@@ -3618,7 +3892,10 @@ def redeploy_deploy_agent(
     ]
 
     resolved_tags, tag_policy_dicts = _resolve_tags(db, request.tags)
-    system_prompt = _build_system_prompt(request)
+    _validate_skill_ids(request.skill_ids)
+    _sync_attached_skills(agent.id, request.skill_ids, db)
+    skill_prompt_text = _get_attached_skill_prompt_text(agent.id, db)
+    system_prompt = _build_system_prompt(request, skill_prompt_text)
     model_max_tokens = next(
         (m["max_tokens"] for m in SUPPORTED_MODELS if m["model_id"] == request.model_id),
         4096,
@@ -3675,6 +3952,12 @@ def redeploy_harness_agent(
             detail="Agent has no harness_id — cannot update. Delete and redeploy instead.",
         )
 
+    if (request.provider or "bedrock").lower() == "bedrock" and request.model_id:
+        try:
+            assert_model_supports_endpoint(request.model_id, SUPPORTED_MODELS, BEDROCK_RUNTIME)
+        except UnsupportedModelEndpointError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     region = os.getenv("AWS_REGION", DEFAULT_REGION)
     account_id = os.getenv("AWS_ACCOUNT_ID", "") or agent.account_id
 
@@ -3699,7 +3982,10 @@ def redeploy_harness_agent(
 
     # Update agent fields
     resolved_tags, _ = _resolve_tags(db, request.tags)
-    system_prompt = _build_system_prompt(request)
+    _validate_skill_ids(request.skill_ids)
+    _sync_attached_skills(agent.id, request.skill_ids, db)
+    skill_prompt_text = _get_attached_skill_prompt_text(agent.id, db)
+    system_prompt = _build_system_prompt(request, skill_prompt_text)
 
     provider = request.provider
     litellm_base_url: str | None = None
@@ -4023,6 +4309,30 @@ def export_agent(agent_id: int, user: UserInfo = Depends(require_scopes("admin:w
                 ci_export["role"] = role_arn
         data["code_interpreter"] = ci_export
 
+    skill_integrations = db.query(Integration).filter(
+        Integration.agent_id == agent_id,
+        Integration.integration_type == "skill",
+        Integration.enabled == True,  # noqa: E712
+    ).all()
+    if skill_integrations:
+        from app.services.registry import get_registry_client
+        client = get_registry_client()
+        skill_names: list[str] = []
+        for integration in skill_integrations:
+            try:
+                record_id = json.loads(integration.integration_config or "{}").get("record_id")
+            except json.JSONDecodeError:
+                continue
+            if not record_id:
+                continue
+            try:
+                rec = client.get_record(record_id)
+            except Exception:
+                rec = None
+            skill_names.append(rec["name"] if rec and rec.get("name") else record_id)
+        if skill_names:
+            data["skills"] = skill_names
+
     return data
 
 
@@ -4044,7 +4354,13 @@ def patch_agent(
                 logger.warning("Failed to propagate description to AgentCore for agent %s", agent_id, exc_info=True)
     if "model_id" in request.model_fields_set and request.model_id is not None:
         valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
-        if request.model_id not in valid_ids:
+        # Grandfather the agent's current model in — a model dropped from
+        # the catalog by a models.json refresh stays assignable to agents
+        # that already have it (it still works; it's just no longer
+        # offered for new selections), so a no-op PATCH doesn't 400 (#64
+        # follow-up). Switching to a *different* invalid model is still
+        # rejected.
+        if request.model_id not in valid_ids and request.model_id != _get_current_model_id(agent):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid model ID: {request.model_id}",
@@ -4060,7 +4376,11 @@ def patch_agent(
                 break
     if "allowed_model_ids" in request.model_fields_set and request.allowed_model_ids is not None:
         valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
-        invalid = [m for m in request.allowed_model_ids if m not in valid_ids]
+        # Same grandfathering as model_id above: an already-assigned model
+        # can be kept (or dropped) even if it's no longer in the catalog;
+        # only *adding* a model not in either set is rejected.
+        already_assigned = set(agent.get_allowed_model_ids())
+        invalid = [m for m in request.allowed_model_ids if m not in valid_ids and m not in already_assigned]
         if invalid:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

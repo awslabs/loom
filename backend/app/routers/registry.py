@@ -12,6 +12,7 @@ from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.a2a import A2aAgent
 from app.models.agent import Agent
+from app.models.integration import Integration
 from app.models.mcp import McpServer, McpTool
 from app.services.registry import get_registry_client
 
@@ -27,9 +28,14 @@ MCP_NAMESPACES = ("aws.agentcore", "remote.mcp", "npm", "custom")
 
 
 class RegistryRecordCreateRequest(BaseModel):
-    resource_type: str = Field(..., description="Resource type: 'mcp', 'a2a', or 'agent'")
-    resource_id: int = Field(..., description="ID of the MCP server, A2A agent, or agent")
+    resource_type: str = Field(..., description="Resource type: 'mcp', 'a2a', 'agent', or 'skill'")
+    resource_id: int | None = Field(None, description="ID of the MCP server, A2A agent, or agent (not used for 'skill')")
     namespace: str | None = Field(None, description="Namespace prefix for MCP servers")
+    skill_name: str | None = Field(None, description="Skill name (required for resource_type='skill')")
+    skill_description: str | None = Field(None, description="Skill description (required for resource_type='skill')")
+    skill_license: str | None = Field(None, description="Skill license, e.g. 'MIT' (required for resource_type='skill')")
+    skill_version: str | None = Field(None, description="Skill version, e.g. '1.0.0' (required for resource_type='skill')")
+    skill_md: str | None = Field(None, description="Full SKILL.md markdown body (required for resource_type='skill')")
 
 
 class RegistryRecordResponse(BaseModel):
@@ -40,12 +46,21 @@ class RegistryRecordResponse(BaseModel):
     description: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    record_version: str | None = None
 
 
 class RegistryRecordDetailResponse(RegistryRecordResponse):
     descriptors: dict = {}
-    record_version: str | None = None
     status_reason: str | None = None
+
+
+class SkillDependent(BaseModel):
+    agent_id: int
+    agent_name: str
+
+
+class SkillDependentsResponse(BaseModel):
+    dependents: list[SkillDependent]
 
 
 class StatusReasonRequest(BaseModel):
@@ -143,6 +158,7 @@ def _record_to_response(rec: dict) -> RegistryRecordResponse:
         description=rec.get("description"),
         created_at=_to_str(rec.get("createdAt")),
         updated_at=_to_str(rec.get("updatedAt")),
+        record_version=rec.get("recordVersion"),
     )
 
 
@@ -257,13 +273,41 @@ def create_record(
         descriptor_type = "A2A"
         resource = agent_record
 
+    elif request.resource_type == "skill":
+        missing = [
+            f for f in ("skill_name", "skill_description", "skill_license", "skill_version", "skill_md")
+            if not getattr(request, f)
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"resource_type='skill' requires: {', '.join(missing)}",
+            )
+        # Skills aren't Loom-owned/deployed resources — there's no DB row to
+        # link registry_record_id/registry_status back onto, unlike mcp/a2a/agent.
+        descriptors = client.build_skill_descriptors(
+            name=request.skill_name,
+            description=request.skill_description,
+            skill_license=request.skill_license,
+            metadata_author=user.username or user.sub,
+            metadata_version=request.skill_version,
+            skill_md=request.skill_md,
+        )
+        display_name = request.skill_name
+        description = request.skill_description
+        descriptor_type = "SKILL"
+        resource = None
+
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="resource_type must be 'mcp', 'a2a', or 'agent'",
+            detail="resource_type must be 'mcp', 'a2a', 'agent', or 'skill'",
         )
 
-    rv = "1.0"
+    # For skills, recordVersion should reflect the skill's own semver (SKILL.md
+    # metadata.version), not a placeholder — the detail/list pages display
+    # this value verbatim as the skill's version tag.
+    rv = request.skill_version if request.resource_type == "skill" and request.skill_version else "1.0"
     result = _call_registry(lambda: client.create_record(
         name=display_name,
         display_name=display_name,
@@ -276,10 +320,11 @@ def create_record(
     record_id = result.get("recordId", "")
     if record_id:
         rec = _call_registry(lambda: client.wait_for_record(record_id))
-        resource.registry_record_id = record_id
-        resource.registry_status = rec.get("status", "DRAFT")
-        db.commit()
-        db.refresh(resource)
+        if resource is not None:
+            resource.registry_record_id = record_id
+            resource.registry_status = rec.get("status", "DRAFT")
+            db.commit()
+            db.refresh(resource)
         return _record_to_detail_response(rec)
 
     return _record_to_detail_response(result)
@@ -287,6 +332,23 @@ def create_record(
 
 class RegistryRecordUpdateRequest(BaseModel):
     namespace: str | None = Field(None, description="Namespace prefix for MCP servers")
+    skill_name: str | None = Field(None, description="Updated skill name (for SKILL records)")
+    skill_description: str | None = Field(None, description="Updated skill description (for SKILL records)")
+    skill_license: str | None = Field(None, description="Updated skill license (for SKILL records)")
+    skill_version: str | None = Field(None, description="Updated skill version (for SKILL records)")
+    skill_md: str | None = Field(None, description="Updated SKILL.md markdown body (for SKILL records)")
+
+
+def _existing_skill_author(rec: dict) -> str:
+    """Pull the original author out of an existing SKILL record's descriptor
+    data, so editing a skill never silently reassigns authorship to whoever
+    happens to submit the edit."""
+    import json as _json
+    try:
+        data_str = rec.get("descriptors", {}).get("agentSkillsDefinition", {}).get("data", "{}")
+        return _json.loads(data_str).get("metadata", {}).get("author", "")
+    except (AttributeError, ValueError):
+        return ""
 
 
 @router.put("/records/{record_id}", response_model=RegistryRecordDetailResponse)
@@ -296,7 +358,9 @@ def update_record(
     user: UserInfo = Depends(require_scopes("registry:write")),
     db: Session = Depends(get_db),
 ) -> RegistryRecordDetailResponse:
-    """Update a registry record by re-building descriptors from the linked Loom resource."""
+    """Update a registry record by re-building descriptors from the linked Loom
+    resource (mcp/a2a/agent), or from re-submitted content for a skill, which
+    has no linked Loom resource to derive descriptors from."""
     client = get_registry_client()
 
     server = db.query(McpServer).filter(McpServer.registry_record_id == record_id).first()
@@ -324,19 +388,45 @@ def update_record(
                 display_name = agent.name or agent.runtime_id
                 description = agent.description
             else:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"No Loom resource found linked to registry record {record_id}",
+                existing = _call_registry(lambda: client.get_record(record_id))
+                if not existing or _from_record_type(existing.get("recordType", "")) != "SKILL":
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"No Loom resource found linked to registry record {record_id}",
+                    )
+                missing = [
+                    f for f in ("skill_name", "skill_description", "skill_license", "skill_version", "skill_md")
+                    if not getattr(request, f)
+                ]
+                if missing:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Updating a SKILL record requires: {', '.join(missing)}",
+                    )
+                author = _existing_skill_author(existing) or (user.username or user.sub)
+                descriptors = client.build_skill_descriptors(
+                    name=request.skill_name,
+                    description=request.skill_description,
+                    skill_license=request.skill_license,
+                    metadata_author=author,
+                    metadata_version=request.skill_version,
+                    skill_md=request.skill_md,
                 )
+                display_name = request.skill_name
+                description = request.skill_description
 
     result = _call_registry(lambda: client.update_record(
         record_id=record_id,
         display_name=display_name,
         descriptors=descriptors,
-        record_version="1.0",
+        record_version=request.skill_version if request.skill_version else "1.0",
         description=description,
     ))
-    rec = _call_registry(lambda: client.get_record(record_id))
+    # UpdateRegistryRecord is asynchronous, like CreateRegistryRecord — wait
+    # for the record to leave UPDATING before returning, or the caller (and
+    # anyone re-listing shortly after) can observe the transient UPDATING
+    # status, which the frontend has no case for and renders as "UNREGISTERED".
+    rec = _call_registry(lambda: client.wait_for_record(record_id))
     return _record_to_detail_response(rec) if rec else _record_to_detail_response(result)
 
 
@@ -419,6 +509,44 @@ def delete_record(
         db.commit()
 
     return {"deleted": True, "record_id": record_id}
+
+
+@router.get("/records/{record_id}/dependents", response_model=SkillDependentsResponse)
+def get_skill_dependents(
+    record_id: str,
+    user: UserInfo = Depends(require_scopes("registry:read")),
+    db: Session = Depends(get_db),
+) -> SkillDependentsResponse:
+    """List agents with a 'skill' integration attached to this registry record.
+
+    Skills have no Loom-owned resource row of their own, so this is a reverse
+    lookup across every agent's Integration rows — the only place a
+    record_id -> agent relationship is recorded for a skill (see
+    AttachedSkillsSection.tsx / _get_attached_skill_prompt_text in
+    routers/agents.py, issue #61). AWS's registry API has no concept of this
+    relationship at all.
+    """
+    import json as _json
+
+    integrations = db.query(Integration).filter(
+        Integration.integration_type == "skill",
+        Integration.enabled == True,  # noqa: E712
+    ).all()
+    agent_ids: list[int] = []
+    for integration in integrations:
+        try:
+            config = _json.loads(integration.integration_config or "{}")
+        except _json.JSONDecodeError:
+            continue
+        if config.get("record_id") == record_id:
+            agent_ids.append(integration.agent_id)
+    if not agent_ids:
+        return SkillDependentsResponse(dependents=[])
+
+    agents = db.query(Agent).filter(Agent.id.in_(agent_ids)).all()
+    return SkillDependentsResponse(dependents=[
+        SkillDependent(agent_id=a.id, agent_name=a.name or a.runtime_id) for a in agents
+    ])
 
 
 @router.get("/search", response_model=SearchResponse)

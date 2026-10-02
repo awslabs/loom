@@ -645,7 +645,7 @@ async def invoke_agent_stream(
                         logger.info("MCP elicitation request: id=%s", elicit_id)
 
                         from app.routers.approvals import create_approval_request, wait_for_approval
-                        request_id = create_approval_request()
+                        request_id = create_approval_request(requester_id=session.user_id)
 
                         yield format_sse_event("elicitation_request", {
                             "elicitation_id": elicit_id,
@@ -709,7 +709,7 @@ async def invoke_agent_stream(
                         logger.info("Agent interrupted with %d pending approval(s)", len(interrupts))
                         for intr in interrupts:
                             from app.routers.approvals import create_approval_request, wait_for_approval
-                            request_id = create_approval_request()
+                            request_id = create_approval_request(requester_id=session.user_id)
                             approval_event = {
                                 "request_id": request_id,
                                 "interrupt_id": intr.get("id", ""),
@@ -1191,7 +1191,7 @@ async def invoke_harness_agent_stream(
                         tool_name, tool_use_id, json.dumps(tool_input),
                     )
 
-                    request_id = create_approval_request()
+                    request_id = create_approval_request(requester_id=session.user_id)
                     approval_event = {
                         "request_id": request_id,
                         "tool_name": tool_name,

@@ -24,7 +24,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import init_db
-from app.routers import a2a, admin, agents, approvals, auth, costs, credentials, identity_providers, integrations, invocations, logs, mcp, memories, registry, security, settings, traces, usage_limits
+from app.routers import a2a, admin, agents, approvals, auth, costs, credentials, evaluations, identity_providers, integrations, invocations, logs, mcp, memories, registry, security, settings, traces, usage_limits
 
 # Configure logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="Loom Backend API",
     description="Backend API for the Loom agent platform",
-    version="1.7.2",
+    version="1.7.4",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
@@ -112,6 +112,7 @@ app.include_router(approvals.router)
 app.include_router(auth.router)
 app.include_router(costs.router)
 app.include_router(credentials.router)
+app.include_router(evaluations.router)
 app.include_router(identity_providers.router)
 app.include_router(integrations.router)
 app.include_router(invocations.router)
@@ -130,7 +131,7 @@ async def root() -> dict:
     """Root endpoint - health check."""
     return {
         "service": "Loom Backend API",
-        "version": "1.7.2",
+        "version": "1.7.4",
         "status": "running"
     }
 

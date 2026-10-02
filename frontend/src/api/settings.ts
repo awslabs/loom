@@ -110,6 +110,23 @@ export function refreshLitellmModels(): Promise<EnabledModelsConfig> {
   });
 }
 
+// Bedrock model catalog (etc/models.json) refresh — see issue #64.
+export interface ModelsJsonRefreshResult {
+  cutoff: string;
+  lookback_months: number;
+  included: string[];
+  excluded_stale: string[];
+  excluded_incomplete: string[];
+  excluded_unavailable: string[];
+}
+
+export function refreshModelsJson(lookbackMonths?: number): Promise<ModelsJsonRefreshResult> {
+  return apiFetch<ModelsJsonRefreshResult>("/api/settings/models/refresh", {
+    method: "POST",
+    body: JSON.stringify(lookbackMonths ? { lookback_months: lookbackMonths } : {}),
+  });
+}
+
 // LiteLLM Proxy Configuration API
 export interface LitellmProxyConfig {
   enabled: boolean;

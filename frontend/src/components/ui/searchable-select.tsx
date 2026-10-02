@@ -14,6 +14,9 @@ interface SearchableSelectProps {
   onValueChange: (value: string) => void;
   placeholder?: string;
   className?: string;
+  /** Extra classes for the trigger button itself — e.g. to flatten its
+   * bottom border/radius when a details panel is attached directly below. */
+  triggerClassName?: string;
 }
 
 export function SearchableSelect({
@@ -22,6 +25,7 @@ export function SearchableSelect({
   onValueChange,
   placeholder = "Select...",
   className,
+  triggerClassName,
 }: SearchableSelectProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -57,7 +61,10 @@ export function SearchableSelect({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-input-bg px-3 py-2 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 hover:bg-input-bg/80"
+        className={cn(
+          "flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-input-bg px-3 py-2 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 hover:bg-input-bg/80",
+          triggerClassName
+        )}
       >
         <span className={cn("truncate", !selectedLabel && "text-muted-foreground")}>
           {selectedLabel ?? placeholder}

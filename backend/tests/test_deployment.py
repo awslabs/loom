@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.services.deployment import (
+    bake_config_into_artifact,
     build_agent_artifact,
     create_runtime,
     create_runtime_endpoint,
@@ -78,6 +79,7 @@ class TestCreateRuntime(unittest.TestCase):
         self.assertEqual(call_kwargs["networkConfiguration"], {"networkMode": "PUBLIC"})
         self.assertEqual(call_kwargs["protocolConfiguration"], {"serverProtocol": "HTTP"})
         self.assertIn("tags", call_kwargs)
+        self.assertEqual(call_kwargs["platformVersion"], "V2")
         self.assertEqual(result["agentRuntimeId"], "rt-123")
 
     @patch("boto3.client")
@@ -228,7 +230,7 @@ class TestCreateRuntimeVpc(unittest.TestCase):
 
     @patch("boto3.client")
     def test_create_runtime_public_mode_no_vpc_fields(self, mock_boto_client: MagicMock) -> None:
-        """PUBLIC mode should not include vpcSubnetIds or vpcSecurityGroupIds."""
+        """PUBLIC mode should not include networkModeConfig."""
         mock_client = MagicMock()
         mock_boto_client.return_value = mock_client
         mock_client.create_agent_runtime.return_value = {"agentRuntimeId": "rt-pub"}
@@ -247,12 +249,11 @@ class TestCreateRuntimeVpc(unittest.TestCase):
         call_kwargs = mock_client.create_agent_runtime.call_args[1]
         net = call_kwargs["networkConfiguration"]
         self.assertEqual(net["networkMode"], "PUBLIC")
-        self.assertNotIn("vpcSubnetIds", net)
-        self.assertNotIn("vpcSecurityGroupIds", net)
+        self.assertNotIn("networkModeConfig", net)
 
     @patch("boto3.client")
     def test_create_runtime_vpc_mode_passes_subnet_and_sg(self, mock_boto_client: MagicMock) -> None:
-        """VPC mode should include vpcSubnetIds and vpcSecurityGroupIds in networkConfiguration."""
+        """VPC mode should pass subnets and security groups in networkModeConfig."""
         mock_client = MagicMock()
         mock_boto_client.return_value = mock_client
         mock_client.create_agent_runtime.return_value = {"agentRuntimeId": "rt-vpc"}
@@ -273,8 +274,8 @@ class TestCreateRuntimeVpc(unittest.TestCase):
         call_kwargs = mock_client.create_agent_runtime.call_args[1]
         net = call_kwargs["networkConfiguration"]
         self.assertEqual(net["networkMode"], "VPC")
-        self.assertEqual(net["vpcSubnetIds"], ["subnet-aaa", "subnet-bbb"])
-        self.assertEqual(net["vpcSecurityGroupIds"], ["sg-ccc"])
+        self.assertEqual(net["networkModeConfig"]["subnets"], ["subnet-aaa", "subnet-bbb"])
+        self.assertEqual(net["networkModeConfig"]["securityGroups"], ["sg-ccc"])
 
     @patch("boto3.client")
     def test_create_runtime_vpc_mode_no_subnets(self, mock_boto_client: MagicMock) -> None:
@@ -297,8 +298,7 @@ class TestCreateRuntimeVpc(unittest.TestCase):
         call_kwargs = mock_client.create_agent_runtime.call_args[1]
         net = call_kwargs["networkConfiguration"]
         self.assertEqual(net["networkMode"], "VPC")
-        self.assertNotIn("vpcSubnetIds", net)
-        self.assertNotIn("vpcSecurityGroupIds", net)
+        self.assertNotIn("networkModeConfig", net)
 
 
 class TestUpdateRuntimeVpc(unittest.TestCase):
@@ -322,8 +322,8 @@ class TestUpdateRuntimeVpc(unittest.TestCase):
         call_kwargs = mock_client.update_agent_runtime.call_args[1]
         net = call_kwargs["networkConfiguration"]
         self.assertEqual(net["networkMode"], "VPC")
-        self.assertEqual(net["vpcSubnetIds"], ["subnet-111", "subnet-222"])
-        self.assertEqual(net["vpcSecurityGroupIds"], ["sg-333"])
+        self.assertEqual(net["networkModeConfig"]["subnets"], ["subnet-111", "subnet-222"])
+        self.assertEqual(net["networkModeConfig"]["securityGroups"], ["sg-333"])
 
     @patch("boto3.client")
     def test_update_runtime_public_mode_no_vpc_fields(self, mock_boto_client: MagicMock) -> None:
@@ -341,8 +341,7 @@ class TestUpdateRuntimeVpc(unittest.TestCase):
         call_kwargs = mock_client.update_agent_runtime.call_args[1]
         net = call_kwargs["networkConfiguration"]
         self.assertEqual(net["networkMode"], "PUBLIC")
-        self.assertNotIn("vpcSubnetIds", net)
-        self.assertNotIn("vpcSecurityGroupIds", net)
+        self.assertNotIn("networkModeConfig", net)
 
     @patch("boto3.client")
     def test_update_runtime_no_network_mode_omits_network_config(self, mock_boto_client: MagicMock) -> None:
@@ -418,6 +417,7 @@ class TestUpdateRuntime(unittest.TestCase):
         call_kwargs = mock_client.update_agent_runtime.call_args[1]
         self.assertEqual(call_kwargs["agentRuntimeId"], "rt-123")
         self.assertEqual(call_kwargs["environmentVariables"], {"KEY": "new_value"})
+        self.assertEqual(call_kwargs["platformVersion"], "V2")
         self.assertEqual(result["status"], "UPDATING")
 
     @patch("boto3.client")
@@ -432,6 +432,7 @@ class TestUpdateRuntime(unittest.TestCase):
         call_kwargs = mock_client.update_agent_runtime.call_args[1]
         self.assertEqual(call_kwargs["agentRuntimeId"], "rt-123")
         self.assertNotIn("environmentVariables", call_kwargs)
+        self.assertEqual(call_kwargs["platformVersion"], "V2")
 
     @patch("boto3.client")
     def test_update_runtime_with_role_arn(self, mock_boto_client: MagicMock) -> None:
@@ -576,6 +577,39 @@ class TestStoreLargeConfig(unittest.TestCase):
             ContentType="text/plain",
         )
         self.assertEqual(result, "s3://my-bucket/my-agent/config/large-config")
+
+
+class TestBakeConfigIntoArtifact(unittest.TestCase):
+    """Test cases for bake_config_into_artifact function."""
+
+    @patch("boto3.client")
+    def test_bakes_config_file_into_existing_zip(self, mock_boto_client: MagicMock) -> None:
+        """Downloads the artifact zip, adds agent_config.json, re-uploads it."""
+        import io
+        import zipfile
+
+        original = io.BytesIO()
+        with zipfile.ZipFile(original, "w") as zf:
+            zf.writestr("src/handler.py", "# handler")
+        original.seek(0)
+
+        mock_client = MagicMock()
+        mock_client.get_object.return_value = {"Body": io.BytesIO(original.getvalue())}
+        mock_boto_client.return_value = mock_client
+
+        bake_config_into_artifact("my-bucket", "loom-artifacts/agent.zip", '{"system_prompt": "hi"}', "us-east-1")
+
+        mock_client.get_object.assert_called_once_with(Bucket="my-bucket", Key="loom-artifacts/agent.zip")
+        mock_client.put_object.assert_called_once()
+        put_kwargs = mock_client.put_object.call_args.kwargs
+        self.assertEqual(put_kwargs["Bucket"], "my-bucket")
+        self.assertEqual(put_kwargs["Key"], "loom-artifacts/agent.zip")
+
+        with zipfile.ZipFile(io.BytesIO(put_kwargs["Body"])) as zf:
+            names = zf.namelist()
+            self.assertIn("src/handler.py", names)
+            self.assertIn("agent_config.json", names)
+            self.assertEqual(zf.read("agent_config.json").decode(), '{"system_prompt": "hi"}')
 
 
 class TestFixConsoleScriptShebangs(unittest.TestCase):

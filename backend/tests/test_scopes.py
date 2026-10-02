@@ -47,7 +47,6 @@ class TestDeriveScopes(unittest.TestCase):
         expected = {
             "security:read", "security:write",
             "memory:read", "memory:write",
-            "settings:read", "settings:write",
             "tagging:read",
         }
         self.assertEqual(scopes, expected)
@@ -67,7 +66,6 @@ class TestDeriveScopes(unittest.TestCase):
         self.assertIn("memory:read", scopes)
         self.assertIn("memory:write", scopes)
         self.assertIn("security:read", scopes)
-        self.assertIn("settings:read", scopes)
         self.assertIn("tagging:read", scopes)
         self.assertIn("costs:read", scopes)
         self.assertIn("costs:write", scopes)
@@ -79,7 +77,9 @@ class TestDeriveScopes(unittest.TestCase):
         self.assertNotIn("catalog:write", scopes)
         self.assertNotIn("security:write", scopes)
         self.assertNotIn("tagging:write", scopes)
-        # settings:write is intentionally granted to g-admins-demo
+        # admin:read/admin:write (global-configuration routes) are super-admin only
+        self.assertNotIn("admin:read", scopes)
+        self.assertNotIn("admin:write", scopes)
 
     def test_group_scopes_consistency(self) -> None:
         """Every scope in ALL_SCOPES should appear in at least one group."""
@@ -203,6 +203,50 @@ class TestScopeEnforcement(unittest.TestCase):
     def test_auth_config_is_public(self) -> None:
         # No user override — but bypass mode should still work
         response = self.client.get("/api/auth/config")
+        self.assertEqual(response.status_code, 200)
+
+    # -- Global-configuration settings routes: admin-only, no domain-admin over-grant --
+    def test_domain_admins_denied_global_settings_read(self) -> None:
+        """g-admins-security/memory/mcp/a2a/demo/registry no longer hold admin:read."""
+        for group in (
+            "g-admins-security", "g-admins-memory", "g-admins-mcp",
+            "g-admins-a2a", "g-admins-demo", "g-admins-registry",
+        ):
+            with self.subTest(group=group):
+                self._override_user(["t-admin", group])
+                for path in ("/api/settings/site", "/api/settings/registry", "/api/settings/litellm-proxy", "/api/settings/models"):
+                    response = self.client.get(path)
+                    self.assertEqual(response.status_code, 403, f"{group} should be denied on GET {path}")
+
+    def test_domain_admins_denied_global_settings_write(self) -> None:
+        """g-admins-security/memory/mcp/a2a/demo/registry no longer hold admin:write."""
+        self._override_user(["t-admin", "g-admins-demo"])
+        response = self.client.put("/api/settings/site/enabled_model_ids", json={"value": "[]"})
+        self.assertEqual(response.status_code, 403)
+        response = self.client.put("/api/settings/registry", json={"registry_arn": ""})
+        self.assertEqual(response.status_code, 403)
+        response = self.client.post("/api/settings/vpc-configs", json={
+            "name": "vpc-1", "vpc_id": "vpc-123", "subnet_ids": [], "sg_ids": [],
+        })
+        self.assertEqual(response.status_code, 403)
+
+    def test_super_admin_allowed_global_settings_read_and_write(self) -> None:
+        self._override_user(["t-admin", "g-admins-super"])
+        response = self.client.get("/api/settings/site")
+        self.assertEqual(response.status_code, 200)
+        response = self.client.put("/api/settings/registry", json={"registry_arn": ""})
+        self.assertEqual(response.status_code, 200)
+
+    # -- VPC configs: admin-only (used in agent deploy form, but never for t-user) --
+    def test_t_user_denied_vpc_configs_list(self) -> None:
+        self._override_user(["t-user", "g-users-demo"])
+        response = self.client.get("/api/settings/vpc-configs")
+        self.assertEqual(response.status_code, 403)
+
+    def test_domain_admin_allowed_vpc_configs_list(self) -> None:
+        """Any t-admin group can still see VPC options for their own deploys."""
+        self._override_user(["t-admin", "g-admins-mcp"])
+        response = self.client.get("/api/settings/vpc-configs")
         self.assertEqual(response.status_code, 200)
 
 

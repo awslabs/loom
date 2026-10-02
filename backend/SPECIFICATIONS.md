@@ -76,6 +76,7 @@ backend/
 │   │   ├── settings.py      # Settings endpoints (tag policy CRUD, tag profile CRUD)
 │   │   ├── costs.py          # Cost dashboard: estimated costs + actuals from CloudWatch usage logs
 │   │   ├── traces.py        # Trace retrieval: OTEL log parsing for trace summaries and span detail
+│   │   ├── evaluations.py   # Read-only AgentCore Evaluations results: sources, per-trace scores, evaluated exchange
 │   │   ├── invocations.py   # SSE streaming invoke + session/invocation queries
 │   │   ├── logs.py          # CloudWatch log browsing with pagination + session log retrieval via stream-name matching
 │   │   ├── memories.py      # Memory resource CRUD + strategy mapping
@@ -131,7 +132,8 @@ backend/
 ├── etc/
 │   ├── environment.sh           # Sources account-specific file + shared outputs
 │   ├── environment.sh.example   # Example environment configuration template
-│   ├── models.json              # Supported model catalog (model_id, display_name, group, pricing)
+│   ├── models.json              # Supported model catalog (model_id, display_name, group, pricing, endpoints, apis) — generated, see scripts/refresh_models_json.py
+│   ├── bedrock_model_catalog.json # Curated superset of known Bedrock models (adds launch_date; source of truth for models.json)
 │   └── runtime_pricing.json     # AgentCore Runtime pricing constants (CPU, memory, defaults)
 ├── iac/
 │   ├── rds.yaml                 # RDS PostgreSQL with optional RDS Proxy
@@ -562,6 +564,7 @@ The `/api/auth/config` endpoint returns only the pool ID and region. The user cl
 | `GET` | `/api/agents/models/litellm` | List models reported by the configured LiteLLM proxy's live catalog (`model_catalog.get_litellm_models_live()`). Fetched on demand by the frontend when the LiteLLM provider is selected, not eagerly alongside `/models`. Returns an empty list if no proxy is configured/reachable. |
 | `GET` | `/api/agents/providers` | List the supported LLM provider registry (`backend/etc/providers.json`), each entry annotated with a live `available: bool` (LiteLLM is available only when a proxy connection is configured and enabled). |
 | `GET` | `/api/agents/models/pricing` | List models with pricing metadata (input/output price per 1K tokens). |
+| `POST` | `/api/agents/models/invoke-test` | Run a one-off serverless inference call against any catalog `model_id`, on whichever endpoint (`bedrock-runtime` or `bedrock-mantle`) it supports (`bedrock_invocation.invoke_model()`) — validates a model works before wiring it into an agent or harness (#64 R1). |
 | `GET` | `/api/agents/defaults` | Get configurable defaults (idle timeout, max lifetime). |
 | `PATCH` | `/api/agents/{agent_id}` | Update editable agent fields (description, model_id, allowed_model_ids). Description changes propagated to AgentCore. |
 | `PUT` | `/api/agents/{agent_id}/config` | Update agent configuration entries. |
@@ -930,14 +933,19 @@ Replaces all existing access rules for the agent. Personas not listed have no ac
 |--------|------|-------------|
 | `GET` | `/api/registry/records` | List all registry records. Optional query params: `status` (filter by record status), `descriptor_type` (filter by MCP or A2A). |
 | `GET` | `/api/registry/records/{record_id}` | Get full detail for a registry record including descriptors. |
-| `POST` | `/api/registry/records` | Create a registry record from a Loom MCP server or A2A agent. Body: `{resource_type: "mcp"|"a2a", resource_id: int}`. |
+| `POST` | `/api/registry/records` | Create a registry record. Body: `{resource_type: "mcp"|"a2a"|"agent", resource_id: int}` derives the record from a Loom MCP server/A2A agent/agent; `{resource_type: "skill", skill_name, skill_description, skill_license, skill_version, skill_md}` authors a SKILL record directly (no linked Loom resource — see "Skill authoring" below). |
+| `PUT` | `/api/registry/records/{record_id}` | Update a registry record by re-building descriptors from the linked Loom resource, or (for a SKILL record, which has none) from re-submitted `skill_name`/`skill_description`/`skill_license`/`skill_version`/`skill_md` fields. |
 | `POST` | `/api/registry/records/{record_id}/submit` | Submit a registry record for approval. Updates linked resource status to PENDING_APPROVAL. |
 | `POST` | `/api/registry/records/{record_id}/approve` | Approve a registry record. Updates linked resource status to APPROVED. |
 | `POST` | `/api/registry/records/{record_id}/reject` | Reject a registry record. Body: `{reason: str}`. Updates linked resource status to REJECTED. |
-| `DELETE` | `/api/registry/records/{record_id}` | Delete a registry record and clear the linked resource's registry fields. |
+| `DELETE` | `/api/registry/records/{record_id}` | Delete a registry record and clear the linked resource's registry fields (already worked for SKILL records unmodified, since they have no linked resource to clear). |
 | `GET` | `/api/registry/search` | Semantic search over registry records. Query params: `q` (search query), `max_results` (default 10). |
 
 **Record lifecycle:** CREATING → DRAFT → PENDING_APPROVAL → APPROVED | REJECTED (also DEPRECATED)
+
+**Skill authoring (issue #61):** Unlike `mcp`/`a2a`/`agent`, a SKILL record isn't derived from a Loom-owned/deployed resource — its content (name/description/license/metadata/SKILL.md body) is authored directly through `SkillsPage.tsx`'s create/edit form and built via `RegistryClient.build_skill_descriptors()`. AWS validates the `agentSkillsDefinition.data` field server-side against an undocumented, closed schema — confirmed by direct trial against a live registry (see `tmp/issues/061-add-skill-management-capabilities.md`): `data` must be *exactly* `{name, description, license, metadata: {author, version}}` with no other top-level keys, and `dataSchemaVersion` must be omitted entirely (AWS auto-assigns it) rather than set to any explicit value. The full SKILL.md markdown body lives separately in `additionalData.skillMd.data`. `metadata.author` is always the current Loom user on create, and is preserved from the existing record (not reassigned to the editor) on update — the create/update request models have no author field for exactly this reason. The existing submit/approve/reject/deprecate governance actions (`RegistryActions.tsx`, `/api/registry/records/{record_id}/submit|approve|reject`) already worked for SKILL records unmodified — they operate purely on `registryRecordId`/`registryStatus` and (via `_find_resource_by_record_id`) silently skip the "sync a linked Loom resource's status" step for skills, which have none — so wiring `RegistryActions` into `SkillsPage.tsx`'s detail view required no backend changes, confirmed by exercising the full submit→approve flow against a live registry.
+
+`create_record`/`update_record` pass the skill's own `skill_version` (the SKILL.md `metadata.version` semver, e.g. `1.2.3`) as AWS's `recordVersion` field for `resource_type == "skill"` — a fix for an earlier bug where both calls hardcoded `record_version="1.0"` regardless of what the author set, so the version tag Loom displayed never actually matched what was submitted.
 
 **Registry is opt-in:** The registry is configured via the Settings page by entering a registry ARN (validated format: `arn:aws:agent-registry:<region>:<account>:registry/<id>`). The ARN is stored in `site_settings` and loaded into memory on startup. When enabled, it provides additional governance mechanisms: agents, MCP servers, and A2A agents must be approved in the registry before they can be used. When not configured, all resources are available without registry approval. The `LOOM_REGISTRY_ID` env var is supported as a bootstrap fallback.
 
@@ -955,6 +963,14 @@ Replaces all existing access rules for the agent. Personas not listed have no ac
 - `A2aAgent`: stores base URL, Agent Card fields (name, description, version, provider, capabilities, auth schemes, I/O modes), raw card JSON, OAuth2 config, status, and timestamps.
 - `A2aAgentSkill`: stores skill ID, name, description, tags, examples, and I/O mode overrides. Foreign key to `A2aAgent` with cascade delete.
 - `A2aAgentAccess`: stores persona_id, access_level (`all_skills`/`selected_skills`), and allowed_skill_ids (JSON). Foreign key to `A2aAgent` with cascade delete.
+
+**Attaching Agent Registry skills to an agent (issue #61):** `Integration` (`models/integration.py`, previously used only for AWS-service integrations like S3/DynamoDB) is reused with `integration_type="skill"` and `integration_config={"record_id": "<SKILL record id>"}` to record which SKILL registry records an agent should use — managed through the existing `/api/agents/{agent_id}/integrations` CRUD (`routers/integrations.py`), surfaced in `AttachedSkillsSection.tsx` on `AgentDetailPage.tsx`, scoped in the picker to `APPROVED`-status SKILL records only (`GET /api/registry/records?status=APPROVED&descriptor_type=SKILL`). An unrecognized `integration_type` like `"skill"` is silently ignored by `build_integration_policy_statements()` (`services/iam.py`), so attaching a skill grants no IAM permissions — it's purely content, not an AWS-service integration.
+
+At agent create/update/redeploy time, `_get_attached_skill_prompt_text(agent_id, db)` (`routers/agents.py`) fetches each enabled skill integration's registry record **live** (never cached) and folds `additionalData.skillMd.data` into the system prompt built by `_build_system_prompt()`, right alongside `agent_description`/`behavioral_guidelines`/`output_expectations`. Any attached skill that isn't currently `APPROVED` (later un-approved, deleted, or a registry lookup error) is silently skipped rather than failing the redeploy — the same "re-check live, fail open on the individual item" pattern used for MCP tool refreshes elsewhere. This is only wired into the two full-redeploy paths (`PUT /{agent_id}/redeploy-deploy`, `PUT /{agent_id}/redeploy-harness`), which already rebuild the system prompt from a fresh `AgentCreateRequest` — **not** the quick `POST /{agent_id}/redeploy`, which just resends the agent's existing env vars unchanged and never rebuilds the prompt at all. Attaching or detaching a skill therefore takes effect on the next full redeploy, not the quick one — the same "attach, then redeploy to apply" operational pattern already used for every other integration type in this codebase.
+
+`AgentCreateRequest.skill_ids` (list of registry record IDs) lets skills be attached at initial deploy/harness-create time too, not just afterward via `AttachedSkillsSection.tsx` — validated against `APPROVED` status the same way as MCP/A2A, then reconciled onto `Integration` rows by `_sync_attached_skills()` (add missing, remove deselected) immediately after the agent row exists but before the system prompt is built, so a skill picked at creation time is included in that agent's very first deployed system prompt. `_sync_attached_skills()` is also called from both full-redeploy paths, so the "Update Agent" form's skill checklist and `AttachedSkillsSection.tsx`'s attach/detach both converge on the same rows.
+
+**CreateAgentRuntime/UpdateAgentRuntime's `environmentVariables` map caps every value at 5000 characters** — `AGENT_CONFIG_JSON` (system prompt + integrations) can exceed that once a skill's SKILL.md content is folded in. `_config_json_env_var()` guards this: if the JSON fits under `MAX_INLINE_CONFIG_JSON_LENGTH` (4500, leaving headroom) it's sent inline as before; otherwise `bake_config_into_artifact()` (`services/deployment.py`) injects it as `agent_config.json` into the already-built artifact zip in S3, and `AGENT_CONFIG_PATH=agent_config.json` is sent instead of the inline JSON — the runtime's `config.py` (`load_config()`) already supported this file-path fallback (relative to the artifact root, which is the process's CWD since `entryPoint` runs `src/handler.py` relative to it), so no runtime code changes were needed, and no new IAM permissions either. Loom's own `ConfigEntry` bookkeeping always keeps the full inline JSON regardless of what was actually sent to AWS. The lightweight `POST /{agent_id}/redeploy` (which normally reuses the existing artifact untouched) rebuilds the artifact only in this oversized-config case, purely to bake the file in.
 
 ### Agent Invocation (SSE Streaming)
 
@@ -1043,6 +1059,7 @@ The `has_token` and `token_source` fields in `session_start` indicate whether an
 | `PUT` | `/api/settings/site/{key}` | Create or update a site setting. |
 | `GET` | `/api/settings/models` | Get admin-enabled model IDs and the full merged model catalog (`model_catalog.get_merged_models()` — static + live Bedrock + live LiteLLM). |
 | `PUT` | `/api/settings/models` | Update the set of admin-enabled models. Validates model IDs against the merged catalog (`get_merged_models()`), so dynamically-discovered Bedrock and LiteLLM models can be enabled too, not just the curated static list. |
+| `POST` | `/api/settings/models/refresh` | Regenerate `etc/models.json` from `etc/bedrock_model_catalog.json` on demand (`model_catalog_refresh.refresh_models_json()`), then reload `SUPPORTED_MODELS` in-process (#64 R2). Uses the `models_json_lookback_months` site setting (default 6) unless an override is given in the request body. Returns the cutoff date and the included/excluded model IDs. |
 | `GET` | `/api/settings/registry` | Get current registry configuration (ARN, ID, enabled status). |
 | `PUT` | `/api/settings/registry` | Update registry configuration. Validates ARN format before saving. Empty ARN disables. |
 | `GET` | `/api/settings/litellm-proxy` | Get the current LiteLLM proxy configuration (`enabled`, `base_url`, `discovery_base_url`, `has_master_key`). Reflects env-seeded defaults when no Settings-page override has been saved. Never returns the master key. |
@@ -1127,6 +1144,7 @@ Handles agent artifact build and runtime lifecycle:
 
 - Builds agent artifacts by cross-compiling pip dependencies for ARM64 (`manylinux2014_aarch64`).
 - Creates, updates, and deletes AgentCore runtimes and endpoints.
+- `create_runtime()` and `update_runtime()` always set `platformVersion="V2"` in the boto3 call params, so every runtime Loom creates or updates lands on AgentCore Runtime v2 (snapshot-restore cold starts, paged memory) with no caller-supplied flag. Requires `boto3>=1.43.95` — earlier versions' `bedrock-agentcore-control` service model doesn't expose `platformVersion` on `CreateAgentRuntime`/`UpdateAgentRuntime`.
 - `update_runtime()` accepts optional `description`, `env_vars`, `role_arn`, `authorizer_config`, and `region` parameters. Description updates are propagated from the `PATCH /api/agents/{id}` endpoint.
 - Updates agent runtime authorizer configuration (e.g., adding client IDs to `allowedClients`).
 - Validates configuration values for secrets, stores/updates/deletes secrets in AWS Secrets Manager.
@@ -1147,6 +1165,7 @@ AgentCore Harness API wrapper for managed agent deployments:
 - `resume_harness_stream(harness_arn, session_id, tool_result, region, ..., user_access_token) -> Generator[dict]` — re-invokes a harness with a `toolResult` to resume after an inline function call. Supports the same `user_access_token` header injection for OBO flows.
 - `_build_model_config(provider, model_id, max_tokens=None, litellm_api_key_arn=None, litellm_api_base=None) -> dict` — internal helper selecting the `model` payload shape for `CreateHarness`/`UpdateHarness`/`InvokeHarness` based on `provider`.
 
+
 ### `services/usage_limits.py`
 
 Core evaluation logic for usage limits, called as a pre-flight check from the invoke endpoint:
@@ -1163,6 +1182,30 @@ Background job that keeps `UsageLimit.cached_usage` warm so the pre-flight check
 
 - `start_usage_limit_aggregator()` — async task, runs every 60 seconds (`POLL_INTERVAL_SECONDS`). Much shorter than `usage_poller.py`'s 10-minute interval, since that job reconciles historical data where staleness is harmless, while this one backs a live enforcement decision.
 - `_refresh_once()` recomputes and stores `cached_usage` + `cached_usage_updated_at` for every enabled limit, reusing the same `_current_usage()`/`_window_start()` logic from `usage_limits.py` so the cached value and the live-fallback value can never silently drift apart into two different definitions of "current usage."
+
+AgentCore Harness only reaches models via the `bedrock-runtime` endpoint. `app.routers.agents._deploy_harness()` and `redeploy_harness_agent()` call `bedrock_invocation.assert_model_supports_endpoint(model_id, SUPPORTED_MODELS, BEDROCK_RUNTIME)` before `create_harness`/`update_harness` and reject `bedrock-mantle`-only models (e.g. Gemma 4) with a 400 rather than letting `CreateHarness`/`UpdateHarness` fail opaquely (#64 R1). Models missing from the curated catalog (dynamically-discovered LiteLLM/live-Bedrock models) are not validated — nothing to check against.
+
+### `services/bedrock_invocation.py`
+
+Resolves and performs serverless inference against Bedrock models on either the `bedrock-runtime` or `bedrock-mantle` endpoint (#64 R1). Each `models.json`/`bedrock_model_catalog.json` entry declares which endpoint(s) and API(s) its `model_id` supports via `endpoints` (list of `"bedrock-runtime"`/`"bedrock-mantle"`) and `apis` (dict of endpoint → list of `"converse"`/`"invoke"`/`"messages"`/`"chat_completions"`/`"responses"`), plus an optional `endpoint_model_ids` override for models whose ID differs per endpoint (e.g. `openai.gpt-oss-120b-1:0` on `bedrock-runtime` vs. `openai.gpt-oss-120b` on `bedrock-mantle`).
+
+- `resolve_model_target(model_id, catalog, region, preferred_endpoint=None, preferred_api=None) -> ModelInvocationTarget` — picks the endpoint/API/model-ID to invoke with. Catalog entries predating this metadata fall back to `bedrock-runtime` + `converse`.
+- `assert_model_supports_endpoint(model_id, catalog, endpoint="bedrock-runtime")` — raises `UnsupportedModelEndpointError` unless `model_id` supports `endpoint`; used by the harness deploy/redeploy validation above.
+- `invoke_model(model_id, catalog, messages, region, max_tokens=None, system_prompt=None, preferred_endpoint=None, preferred_api=None) -> dict` — runs a single-turn inference call and returns `{"content", "endpoint", "api", "model_id", "raw"}`. On `bedrock-runtime` this uses the standard `boto3.client("bedrock-runtime")` (Converse API, or `InvokeModel` with the Anthropic Messages body for the `messages`/`invoke` APIs). `bedrock-mantle` isn't a registered boto3 service model, so the request is built and SigV4-signed directly (`botocore.auth.SigV4Auth` against service `"bedrock"`) and sent via `urllib.request` to `https://bedrock-mantle.{region}.api.aws{path}` — `/anthropic/v1/messages` for the native Messages API, `/openai/v1/chat/completions` or `/openai/v1/responses` for the OpenAI-compatible APIs.
+- Exposed via `POST /api/agents/models/invoke-test` (see API Endpoints below) so a user can validate any catalog model works, on whichever endpoint it requires, before wiring it into an agent or harness.
+
+### `services/model_catalog_refresh.py`
+
+Regenerates `etc/models.json` from the curated `etc/bedrock_model_catalog.json` superset (#64 R2). `bedrock_model_catalog.json` carries every known model — including ones too old, or too new/unpriced, to serve by default — plus a `launch_date` field that `models.json` (which lacks it) doesn't need at runtime. Filtering rules:
+
+1. **Recency** — a model is included only if `launch_date` falls within `lookback_months` (default 6) of today. A `null` `launch_date` (unknown) is always included rather than guessed away.
+2. **Completeness** — a model is included only if it has non-null `max_tokens` and both per-1k-token prices. Bedrock publishes no pricing API, so this is manually curated; incomplete entries are excluded, not zero-filled, until an engineer fills them in.
+3. Optionally cross-checked against live `ListFoundationModels`/`ListInferenceProfiles` availability in a target region — best-effort, any failure (missing credentials, network) is logged and skipped rather than failing the run.
+
+- `refresh_models_json(catalog_path, output_path, lookback_months=6, region="us-east-1", skip_live_check=False, reference_date=None, dry_run=False) -> dict` — does the filtering; returns `{"included", "excluded_stale", "excluded_incomplete", "excluded_unavailable", "cutoff"}` (each a list of `model_id`s except `cutoff`, an ISO date string).
+- `reload_supported_models()` — re-reads `etc/models.json` and pushes it into `app.routers.agents.SUPPORTED_MODELS`, since that module-level list is otherwise only loaded once at import.
+- Used by `scripts/refresh_models_json.py` (CLI — run via `make refresh-models` at each major release; accepts `LOOKBACK_MONTHS`/`REGION` env overrides) and `POST /api/settings/models/refresh` (on-demand admin trigger, reads the `models_json_lookback_months` site setting unless overridden in the request body).
+
 
 ### `services/credential.py`
 
@@ -1186,14 +1229,15 @@ Core authentication and authorization module. Provides:
 - `GROUP_SCOPES: dict[str, list[str]]` — maps Cognito group names to scope lists. Must match the frontend `GROUP_SCOPES` exactly. Uses two-dimensional group architecture:
   - **Type groups** (UI view): `t-admin`, `t-user` — no scopes, determine layout
   - **Resource groups** (access control):
-    - `g-admins-super`: all 21 scopes (catalog:r/w, agent:r/w, memory:r/w, security:r/w, settings:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, registry:r/w, invoke)
-    - `g-admins-demo`: `catalog:read`, `agent:read`, `agent:write`, `memory:read`, `memory:write`, `security:read`, `settings:read`, `tagging:read`, `costs:read`, `costs:write`, `mcp:read`, `mcp:write`, `a2a:read`, `a2a:write`, `invoke` (can create/delete demo resources only)
-    - `g-admins-security`: `security:read`, `security:write`, `settings:read`
-    - `g-admins-memory`: `memory:read`, `memory:write`, `settings:read`
-    - `g-admins-mcp`: `mcp:read`, `mcp:write`, `settings:read`
-    - `g-admins-a2a`: `a2a:read`, `a2a:write`, `settings:read`
-    - `g-admins-registry`: `mcp:read`, `a2a:read`, `registry:read`, `registry:write`, `settings:read`, `settings:write`, `tagging:read`
+    - `g-admins-super`: all 21 scopes (catalog:r/w, agent:r/w, memory:r/w, security:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, registry:r/w, admin:r/w, invoke)
+    - `g-admins-demo`: `catalog:read`, `agent:read`, `agent:write`, `memory:read`, `memory:write`, `security:read`, `tagging:read`, `costs:read`, `costs:write`, `mcp:read`, `mcp:write`, `a2a:read`, `a2a:write`, `invoke` (can create/delete demo resources only)
+    - `g-admins-security`: `security:read`, `security:write`, `tagging:read`
+    - `g-admins-memory`: `memory:read`, `memory:write`, `tagging:read`
+    - `g-admins-mcp`: `mcp:read`, `mcp:write`, `tagging:read`
+    - `g-admins-a2a`: `a2a:read`, `a2a:write`, `tagging:read`
+    - `g-admins-registry`: `mcp:read`, `a2a:read`, `registry:read`, `registry:write`, `tagging:read`
     - `g-users-demo`, `g-users-test`, `g-users-strategics`: `invoke` + read access to resources tagged with matching group
+  - **`admin:read`/`admin:write`** (global deployment configuration — site settings, registry config, LiteLLM proxy config, enabled models, VPC configs): held only by `g-admins-super`. No domain-scoped admin group holds these, since none of the actions they gate are scoped to a `loom:group` — a write by any domain admin would apply to the whole deployment.
 - `UserInfo` dataclass — `sub`, `username`, `groups`, `scopes` (derived from groups).
 - `get_current_user(request: Request) -> UserInfo` — validates JWT, extracts `cognito:groups`, derives scopes. In bypass mode (no `LOOM_COGNITO_USER_POOL_ID`), returns a super-admin with all scopes. Raises 401 on missing/invalid token.
 - `require_scopes(*required: str)` — factory returning a FastAPI dependency that checks the user has ALL required scopes. Raises 403 on missing scope. Used as `Depends(require_scopes("scope:name"))` on all guarded endpoints.
@@ -1213,8 +1257,9 @@ Core authentication and authorization module. Provides:
 | `memories.py` | `memory:read` | `memory:write` |
 | `security.py` | `security:read` | `security:write` |
 | `settings.py` (tag policies/profiles) | `tagging:read` | `tagging:write` |
-| `settings.py` (site settings) | `settings:read` | `settings:write` |
-| `settings.py` (enabled models) | `settings:read` | `settings:write` |
+| `settings.py` (site settings, registry config, LiteLLM proxy config, enabled models) | `admin:read` | `admin:write` |
+| `settings.py` (VPC configs list/detail) | any `t-admin` group | — |
+| `settings.py` (VPC configs create/update/delete) | — | `admin:write` |
 | `costs.py` | `costs:read` | `costs:write` (actuals endpoint) |
 | `mcp.py` | `mcp:read` | `mcp:write` |
 | `a2a.py` | `a2a:read` | `a2a:write` |
@@ -1244,7 +1289,7 @@ SSRF-safe HTTP fetchers for outbound calls to user-supplied URLs, at two guard l
 - Both levels resolve the hostname once via `socket.getaddrinfo` and pin the outbound connection to that validated IP (rather than letting the HTTP client re-resolve at connect time), preventing DNS-rebinding between the check and the actual connection. `guarded_get`/`guarded_post` additionally re-validate every redirect hop before following it (up to 5 hops, `SSRFBlockedError` beyond that) — an initial target passing validation does not grant a later cross-host redirect target a pass.
 - `SSRFBlockedError(ValueError)` — raised by both levels when a URL is blocked; callers catch it separately from generic connection errors to log/return a distinct "blocked" outcome without ever surfacing the disallowed target's response body.
 - **`get_trusted_oauth_hosts() -> set[str]`, `is_trusted_oauth_host(url, trusted_hosts) -> bool`** — closes the residual gap `safe_get`/`safe_post` leave on their own: both still permit *any* public HTTPS host, so a well-known URL/discovery document (attacker-influenced input at `mcp:write`/`a2a:write`, not the platform's top trust level) could still redirect a client-credentials exchange or an on-behalf-of token exchange to a public server the caller controls — handing over the resource's own `client_secret` (M2M) or, more seriously, another user's real access token (OBO). `get_trusted_oauth_hosts()` builds the set of hostnames from `IdentityProvider.issuer_url` and `AuthorizerConfig.discovery_url` — both populated only via admin flows gated by a higher-trust scope than `mcp:write`/`a2a:write` — via its own short-lived `SessionLocal()` session (module-level pattern, matching `model_catalog.py`/background tasks elsewhere in this codebase); a DB failure fails closed to an empty set rather than raising. `mcp.py`'s `_get_oauth2_token`/`_get_obo_token` and `a2a.py`'s `_get_oauth2_token` call this immediately after resolving `token_endpoint` from the discovery document and refuse to proceed (logging a warning, returning `None`) if the resolved host isn't in the trusted set — before any secret or user token is sent. One operational consequence: a brand-new downstream OAuth2 provider for a single MCP server/A2A agent must first be registered as an Authorizer config (Security tab) or Identity Provider (Settings) before OBO/M2M to it will work — a deliberate one-time step, not a bug.
-- **Coverage beyond MCP/A2A:** the same two guard levels were retrofitted onto every other place the backend makes an outbound OAuth2/OIDC call that was still using raw `urllib.request`/`httpx` with, at most, a scheme check (`oidc.require_https_url`, now removed as dead code once every caller moved to `safe_get`/`safe_post`). `services/oidc.py`'s `fetch_discovery()` (well-known documents for `AuthorizerConfig.discovery_url`/`IdentityProvider.issuer_url`) and `services/jwt_validator.py`'s `_get_jwks()` (JWKS endpoints — `jwks_uri` comes from the discovery document itself, so it's attacker-influenced whenever the issuer is) now call `safe_get`. `services/token.py`'s `get_oauth2_token()` (generic OIDC client-credentials), `services/authorizer_linking.py`'s `resolve_access_token()`/`exchange_code_for_tokens()` (per-user refresh-token/auth-code exchange), and `services/cognito.py`'s `get_cognito_token()` now call `safe_post`, and the two functions whose `token_endpoint` comes from a discovery document they resolved themselves (`token.py`, `authorizer_linking.py`) also gate on `is_trusted_oauth_host()`/`get_trusted_oauth_hosts()`, identical to the `mcp.py`/`a2a.py` fix, since a compromised or malicious discovery response is the same attack regardless of which caller triggered the fetch. `routers/auth.py`'s `/api/auth/token` handler posts to `idp.token_endpoint` (a value already vetted at IdP-registration time, not re-resolved per request) via `safe_post` for the DNS-pinning/IP-validation defense-in-depth, without an additional trust-host check. Deliberately left unguarded: `services/litellm.py`/`model_catalog.py`'s calls to the LiteLLM proxy `base_url` — that value is `settings:write`-gated (equivalent trust tier to `security:write`), a single global deployment setting rather than a per-resource attacker-influenced field, and is documented to legitimately point at `http://localhost:<port>` during local development (an SSM tunnel to the proxy) — `net_guard`'s guards unconditionally block loopback, so applying them here would break that supported flow without closing a real gap.
+- **Coverage beyond MCP/A2A:** the same two guard levels were retrofitted onto every other place the backend makes an outbound OAuth2/OIDC call that was still using raw `urllib.request`/`httpx` with, at most, a scheme check (`oidc.require_https_url`, now removed as dead code once every caller moved to `safe_get`/`safe_post`). `services/oidc.py`'s `fetch_discovery()` (well-known documents for `AuthorizerConfig.discovery_url`/`IdentityProvider.issuer_url`) and `services/jwt_validator.py`'s `_get_jwks()` (JWKS endpoints — `jwks_uri` comes from the discovery document itself, so it's attacker-influenced whenever the issuer is) now call `safe_get`. `services/token.py`'s `get_oauth2_token()` (generic OIDC client-credentials), `services/authorizer_linking.py`'s `resolve_access_token()`/`exchange_code_for_tokens()` (per-user refresh-token/auth-code exchange), and `services/cognito.py`'s `get_cognito_token()` now call `safe_post`, and the two functions whose `token_endpoint` comes from a discovery document they resolved themselves (`token.py`, `authorizer_linking.py`) also gate on `is_trusted_oauth_host()`/`get_trusted_oauth_hosts()`, identical to the `mcp.py`/`a2a.py` fix, since a compromised or malicious discovery response is the same attack regardless of which caller triggered the fetch. `routers/auth.py`'s `/api/auth/token` handler posts to `idp.token_endpoint` (a value already vetted at IdP-registration time, not re-resolved per request) via `safe_post` for the DNS-pinning/IP-validation defense-in-depth, without an additional trust-host check. Deliberately left unguarded: `services/litellm.py`/`model_catalog.py`'s calls to the LiteLLM proxy `base_url` — that value is `admin:write`-gated (as of the settings-scope tightening below, a strictly higher trust tier than `security:write`, held only by `g-admins-super`), a single global deployment setting rather than a per-resource attacker-influenced field, and is documented to legitimately point at `http://localhost:<port>` during local development (an SSM tunnel to the proxy) — `net_guard`'s guards unconditionally block loopback, so applying them here would break that supported flow without closing a real gap.
 
 ### `services/mcp.py`
 
@@ -1472,7 +1517,7 @@ Stores OIDC identity provider configurations. Columns include `name`, `provider_
 | `POST` | `/api/settings/identity-providers/discover` | Run OIDC discovery against a well-known URL |
 | `POST` | `/api/settings/identity-providers/{id}/test-discovery` | Test discovery for an existing provider |
 
-Scope enforcement: `settings:read` for GET, `settings:write` for POST/PUT/DELETE.
+Scope enforcement: `security:read` for GET, `security:write` for POST/PUT/DELETE.
 
 ### OIDC Discovery Service (`services/oidc.py`)
 
@@ -1493,7 +1538,7 @@ External IdPs use different claim names and group identifiers. The `group_mappin
 - The `group_mapping` JSON dict maps external group names/IDs to Loom group names (e.g., `{"EntraAdmins": "g-admins-super", "EntraUsers": "g-users-demo"}`).
 - Unmapped groups are ignored. Users with no mapped groups receive no scopes (same as an unrecognized Cognito group).
 
-**Self-escalation guard on `group_mappings` writes:** `security:write` alone is enough to create/update an identity provider, and the mapping table names arbitrary Loom groups with no restriction on which ones — so without a check, a security-scoped admin (`g-admins-security`: `security:read/write`, `settings:read/write`, `tagging:read` only) could map an external group they control to `g-admins-super` and, by authenticating through that IdP, obtain every scope in the system including `admin:write`. `routers/identity_providers.py`'s `_assert_group_mappings_within_caller_scopes()` closes this: on `create`/`update`, every Loom group named anywhere in `group_mappings`' values is resolved via `derive_scopes()`, and the request is rejected (403) if that union grants any scope the calling admin doesn't already hold — the general "no delegation beyond what you hold" rule, not a hardcoded reserved-group denylist, so it also blocks mapping to e.g. `g-admins-mcp` (which a security admin doesn't hold `mcp:write` for either). A genuine super-admin (holding every scope) is unaffected. Type groups (`t-admin`/`t-user`, which grant no scopes) and mapping to one's own group are always allowed.
+**Self-escalation guard on `group_mappings` writes:** `security:write` alone is enough to create/update an identity provider, and the mapping table names arbitrary Loom groups with no restriction on which ones — so without a check, a security-scoped admin (`g-admins-security`: `security:read/write`, `tagging:read` only) could map an external group they control to `g-admins-super` and, by authenticating through that IdP, obtain every scope in the system including `admin:write`. `routers/identity_providers.py`'s `_assert_group_mappings_within_caller_scopes()` closes this: on `create`/`update`, every Loom group named anywhere in `group_mappings`' values is resolved via `derive_scopes()`, and the request is rejected (403) if that union grants any scope the calling admin doesn't already hold — the general "no delegation beyond what you hold" rule, not a hardcoded reserved-group denylist, so it also blocks mapping to e.g. `g-admins-mcp` (which a security admin doesn't hold `mcp:write` for either). A genuine super-admin (holding every scope) is unaffected. Type groups (`t-admin`/`t-user`, which grant no scopes) and mapping to one's own group are always allowed.
 
 ### Generic Token Service (`services/token.py`)
 

@@ -34,7 +34,6 @@ export type Scope =
   | "agent:read" | "agent:write"
   | "memory:read" | "memory:write"
   | "security:read" | "security:write"
-  | "settings:read" | "settings:write"
   | "tagging:read" | "tagging:write"
   | "costs:read" | "costs:write"
   | "mcp:read" | "mcp:write"
@@ -52,7 +51,7 @@ export const GROUP_SCOPES: Record<string, Scope[]> = {
   "g-admins-super": [
     "catalog:read", "catalog:write", "agent:read", "agent:write",
     "memory:read", "memory:write", "security:read", "security:write",
-    "settings:read", "settings:write", "tagging:read", "tagging:write",
+    "tagging:read", "tagging:write",
     "costs:read", "costs:write",
     "mcp:read", "mcp:write", "a2a:read", "a2a:write",
     "registry:read", "registry:write",
@@ -60,25 +59,25 @@ export const GROUP_SCOPES: Record<string, Scope[]> = {
   ],
   "g-admins-demo": [
     "catalog:read", "agent:read", "agent:write", "memory:read", "memory:write",
-    "security:read", "settings:read", "settings:write", "tagging:read", "costs:read", "costs:write",
+    "security:read", "tagging:read", "costs:read", "costs:write",
     "mcp:read", "mcp:write", "a2a:read", "a2a:write",
     "registry:read", "registry:write",
     "invoke",
   ],
   "g-admins-security": [
-    "security:read", "security:write", "settings:read", "settings:write", "tagging:read",
+    "security:read", "security:write", "tagging:read",
   ],
   "g-admins-memory": [
-    "memory:read", "memory:write", "settings:read", "settings:write", "tagging:read",
+    "memory:read", "memory:write", "tagging:read",
   ],
   "g-admins-mcp": [
-    "mcp:read", "mcp:write", "settings:read", "settings:write", "tagging:read",
+    "mcp:read", "mcp:write", "tagging:read",
   ],
   "g-admins-a2a": [
-    "a2a:read", "a2a:write", "settings:read", "settings:write", "tagging:read",
+    "a2a:read", "a2a:write", "tagging:read",
   ],
   "g-admins-registry": [
-    "mcp:read", "a2a:read", "registry:read", "registry:write", "settings:read", "settings:write", "tagging:read",
+    "mcp:read", "a2a:read", "registry:read", "registry:write", "tagging:read",
   ],
 
   // User groups (t-user users - can have multiple)
@@ -123,9 +122,10 @@ interface AuthContextValue {
 const ALL_SCOPES = new Set<Scope>([
   "catalog:read", "catalog:write", "agent:read", "agent:write",
   "memory:read", "memory:write", "security:read", "security:write",
-  "settings:read", "settings:write", "tagging:read", "tagging:write",
+  "tagging:read", "tagging:write",
   "costs:read", "costs:write",
   "mcp:read", "mcp:write", "a2a:read", "a2a:write", "invoke",
+  "registry:read", "registry:write",
 ]);
 const EMPTY_SCOPES = new Set<Scope>();
 

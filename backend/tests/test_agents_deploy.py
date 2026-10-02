@@ -732,7 +732,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         cp_kwargs = mock_create_cp.call_args[1]
         self.assertEqual(cp_kwargs["name"], "loom-oauth_mcp_agent-mcp-oauth_mcp")
         self.assertEqual(cp_kwargs["client_id"], "my-client")
-        self.assertEqual(cp_kwargs["client_secret"], "my-secret")
+        self.assertEqual(cp_kwargs["client_secret"], "my-test-secret")
         # Empty tags passed when no tag policies configured (filtered in service layer)
         self.assertEqual(cp_kwargs["tags"], {})
 

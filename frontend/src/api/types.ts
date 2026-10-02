@@ -26,6 +26,8 @@ export interface AgentResponse {
   authorizer_config: { type?: string; name?: string; pool_id?: string; discovery_url?: string; allowed_audience?: string[]; allowed_clients?: string[]; allowed_scopes?: string[] } | null;
   model_id: string | null;
   allowed_model_ids: string[];
+  /** model_id/allowed_model_ids entries no longer in the current model catalog — still work (grandfathered), just no longer assignable to new agents. See issue #64. */
+  deprecated_model_ids: string[];
   deployed_at: string | null;
   tags: Record<string, string>;
   cost_summary: {
@@ -76,6 +78,7 @@ export interface AgentHarnessDeployRequest {
   authorizer_client_secret: string | null;
   mcp_servers: number[];
   memory_ids?: number[];
+  skill_ids?: string[];
   tags?: Record<string, string>;
   harness_max_iterations: number | null;
   harness_max_tokens: number | null;
@@ -123,6 +126,7 @@ export interface AgentDeployRequest {
   memory_ids: number[];
   mcp_servers: number[];
   a2a_agents: number[];
+  skill_ids?: string[];
   code_interpreter_enabled: boolean;
   code_interpreter_region: string;
   code_interpreter_network_mode: string;
@@ -1114,20 +1118,38 @@ export interface RegistryRecord {
   description: string | null;
   created_at: string | null;
   updated_at: string | null;
+  record_version: string | null;
 }
 
 export interface RegistryRecordDetail extends RegistryRecord {
   descriptors: Record<string, unknown>;
-  record_version: string | null;
   status_reason: string | null;
+}
+
+export interface SkillDependent {
+  agent_id: number;
+  agent_name: string;
 }
 
 export type McpNamespace = "aws.agentcore" | "remote.mcp" | "npm" | "custom";
 
 export interface RegistryRecordCreateRequest {
-  resource_type: "mcp" | "a2a" | "agent";
-  resource_id: number;
+  resource_type: "mcp" | "a2a" | "agent" | "skill";
+  resource_id?: number;
   namespace?: McpNamespace;
+  skill_name?: string;
+  skill_description?: string;
+  skill_license?: string;
+  skill_version?: string;
+  skill_md?: string;
+}
+
+export interface RegistryRecordSkillUpdateRequest {
+  skill_name: string;
+  skill_description: string;
+  skill_license: string;
+  skill_version: string;
+  skill_md: string;
 }
 
 export interface RegistrySearchResult {
@@ -1170,4 +1192,76 @@ export interface IntegrationInfoResponse {
   network_mode: string;
   endpoints: IntegrationEndpoint[];
   auth: IntegrationAuthSigV4 | IntegrationAuthOAuth2;
+}
+
+// ---------------------------------------------------------------------------
+// AgentCore Evaluations (read-only results)
+// ---------------------------------------------------------------------------
+
+export interface OnlineEvaluationSource {
+  id: string;
+  name: string | null;
+  status: string | null;
+  execution_status: string | null;
+  sampling_percentage: number | null;
+  session_timeout_minutes: number | null;
+  evaluators: string[];
+  shared: boolean;
+  last_evaluated_at: string | null;
+  updated_at: string | null;
+}
+
+export interface EvaluatorSummary {
+  evaluator_id: string | null;
+  average_score: number | null;
+  total_evaluated: number | null;
+  total_failed: number | null;
+}
+
+export interface BatchEvaluationSource {
+  id: string;
+  name: string | null;
+  description: string | null;
+  status: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  evaluators: string[];
+  shared: boolean;
+  targeted_session_count: number;
+  sessions_total: number | null;
+  sessions_completed: number | null;
+  sessions_failed: number | null;
+  sessions_ignored: number | null;
+  evaluator_summaries: EvaluatorSummary[];
+}
+
+export interface EvaluationOverviewResponse {
+  online: OnlineEvaluationSource[];
+  batch: BatchEvaluationSource[];
+}
+
+export interface EvaluationScore {
+  evaluator: string | null;
+  value: number | null;
+  label: string | null;
+  explanation: string | null;
+  level: string | null;
+}
+
+export interface EvaluatedTrace {
+  session_id: string | null;
+  trace_id: string | null;
+  trace_time: string | null;
+  evaluated_at: string | null;
+  scores: EvaluationScore[];
+}
+
+export interface EvaluationResultsResponse {
+  results: EvaluatedTrace[];
+  truncated: boolean;
+}
+
+export interface EvaluatedExchangeResponse {
+  prompt: string | null;
+  answer: string | null;
 }

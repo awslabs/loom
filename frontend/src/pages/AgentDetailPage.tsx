@@ -11,7 +11,10 @@ import { LatencySummary } from "@/components/LatencySummary";
 import { DeploymentPanel, ModelsCard } from "@/components/DeploymentPanel";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
 import { RegistryActions } from "@/components/RegistryActions";
+import { getRegistryRecord } from "@/api/registry";
 import { ExternalIntegrationSection } from "@/components/ExternalIntegrationSection";
+import { AttachedSkillsSection } from "@/components/AttachedSkillsSection";
+import { AgentEvaluationsPanel } from "@/components/AgentEvaluationsPanel";
 import { StatusPill } from "@/components/StatusPill";
 import { statusVariant } from "@/lib/status";
 import { useTimezone } from "@/contexts/TimezoneContext";
@@ -33,6 +36,11 @@ interface AgentDetailPageProps {
   canInvoke?: boolean;
   registryReadOnly?: boolean;
   registryEnabled?: boolean;
+  /** registry:read — gates visibility of the Skills section, same as the
+   * Skills page itself. Domain-admin groups that reach this page via
+   * agent:write but hold no registry:read must not see skill names/ids
+   * via the attach picker either. */
+  canViewSkills?: boolean;
   userGroups?: string[];
   initialTab?: "details" | "invoke";
 }
@@ -48,6 +56,7 @@ export function AgentDetailPage({
   canInvoke = true,
   registryReadOnly,
   registryEnabled = false,
+  canViewSkills = false,
   userGroups = [],
   initialTab = "details",
 }: AgentDetailPageProps) {
@@ -111,6 +120,20 @@ export function AgentDetailPage({
   useEffect(() => {
     if (sessionStart?.user_id) setBackendUserId(sessionStart.user_id);
   }, [sessionStart]);
+
+  // Registry record's own statusReason (why it was approved/rejected) — same
+  // governance detail the Skills detail page shows, distinct from
+  // agent.status_reason (an AgentCore Runtime deployment failureReason).
+  const [registryStatusReason, setRegistryStatusReason] = useState<string | null>(null);
+  useEffect(() => {
+    if (!registryEnabled || !canViewSkills || !agent.registry_record_id) {
+      setRegistryStatusReason(null);
+      return;
+    }
+    getRegistryRecord(agent.registry_record_id)
+      .then((rec) => setRegistryStatusReason(rec.status_reason ?? null))
+      .catch(() => setRegistryStatusReason(null));
+  }, [registryEnabled, canViewSkills, agent.registry_record_id, agent.registry_status]);
   const currentUserId = backendUserId ?? user?.username ?? user?.sub;
 
   const handleInvoke = async (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean) => {
@@ -193,6 +216,7 @@ export function AgentDetailPage({
         <TabsList variant="line" className="h-auto justify-start gap-5 rounded-none bg-transparent p-0">
           <TabsTrigger value="details" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">Details</TabsTrigger>
           <TabsTrigger value="invoke" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">Invoke</TabsTrigger>
+          <TabsTrigger value="evaluations" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">Evaluations</TabsTrigger>
         </TabsList>
       </div>
 
@@ -274,6 +298,17 @@ export function AgentDetailPage({
             </Card>
           )}
 
+          {registryEnabled && canViewSkills && (
+            <Card className="gap-2.5 py-4">
+              <CardHeader className="px-[18px]">
+                <CardTitle className="text-[13px] font-semibold">Skills</CardTitle>
+              </CardHeader>
+              <CardContent className="px-[18px]">
+                <AttachedSkillsSection agentId={agent.id} />
+              </CardContent>
+            </Card>
+          )}
+
           {registryEnabled && (agent.registry_status || canManageRegistry) && (
             <Card className="gap-2.5 py-4">
               <CardHeader className="px-[18px]">
@@ -281,6 +316,9 @@ export function AgentDetailPage({
               </CardHeader>
               <CardContent className="flex flex-col gap-2.5 px-[18px]">
                 <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{approvalContext}</p>
+                {registryStatusReason && (
+                  <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{registryStatusReason}</p>
+                )}
                 {canManageRegistry && (
                   <RegistryActions
                     resourceType="agent"
@@ -349,6 +387,9 @@ export function AgentDetailPage({
         {(sessionStart?.user_token || tokenInfos.length > 0) && (
           <TokenInfoCard userToken={sessionStart?.user_token} oboTokens={tokenInfos} groupMappings={authConfig?.group_mappings} authorizerName={agent.authorizer_config?.name} />
         )}
+      </TabsContent>
+      <TabsContent value="evaluations">
+        <AgentEvaluationsPanel agentId={agent.id} />
       </TabsContent>
     </Tabs>
   );

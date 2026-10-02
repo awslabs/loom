@@ -54,7 +54,8 @@ frontend/
 │   │   ├── SortableCardGrid.tsx — Drag-to-reorder card grid using @dnd-kit, default alphabetical sort, SortButton, localStorage persistence
 │   │   ├── SortableTableHead.tsx — Clickable sortable table column headers with arrow indicators
 │   │   ├── AgentCard.tsx       # Agent summary card with refresh + Trash2 icon deletion
-│   │   ├── AgentRegistrationForm.tsx  # Tabbed form: ARN registration + agent deployment
+│   │   ├── AgentRegistrationForm.tsx  # ARN registration + 5-step deploy wizard with shared review/deploy step
+│   │   ├── AgentWizardChooser.tsx     # "New agent" entry: guided setup vs. import manifest (file/paste)
 │   │   ├── JsonConfigSection.tsx     # Shared collapsible JSON import/export section
 │   │   ├── AuthorizerManagementPanel.tsx # Authorizer config + credential management
 │   │   ├── McpAccessControl.tsx        # Persona access control for MCP servers and tools
@@ -69,13 +70,17 @@ frontend/
 │   │   ├── ResourceTagFields.tsx       # Shared tag profile selector + tag resolution
 │   │   ├── DeploymentPanel.tsx # Deployment details panel
 │   │   ├── ExternalIntegrationSection.tsx # External integration info (endpoints, auth, code snippets)
+│   │   ├── AttachedSkillsSection.tsx # Attach/detach APPROVED registry SKILL records to an agent (issue #61)
+│   │   ├── SkillDocument.tsx   # Renders SKILL.md body: IMPORTANT callouts, dash bullets, a 3-col numbered step table — hand-styled to match the Claude Design mockup's type scale, not Tailwind's prose defaults
+│   │   ├── SkillEditor.tsx     # Create/edit SKILL.md content: name/description/license/version fields + a live SkillDocument preview of the body textarea
 │   │   ├── InvokePanel.tsx     # Qualifier select, credential select, model select, prompt input, invoke/cancel
 │   │   ├── LatencySummary.tsx  # Invocation metrics (timing + token usage + cost)
 │   │   ├── SessionTable.tsx    # Clickable session list
 │   │   ├── InvocationTable.tsx # Invocation timing data + token/cost columns
 │   │   ├── LogViewer.tsx       # Paginated log viewer with toggleable line numbers and timestamps
 │   │   ├── TraceList.tsx      # Trace summary table (Trace ID, Start/End Time, Duration, Spans, Events) with clickable rows
-│   │   └── TraceGraph.tsx     # Interactive waterfall timeline with colored span bars, hover detail panel, click-to-select events, expand/collapse all
+│   │   ├── TraceGraph.tsx     # Interactive waterfall timeline with colored span bars, hover detail panel, click-to-select events, expand/collapse all
+│   │   └── AgentEvaluationsPanel.tsx # Evaluations tab: AgentCore evaluation sources, evaluated sessions/test cases, scores and judge explanations
 │   ├── pages/
 │   │   ├── AgentListPage.tsx   # Agents persona: registration form + agent grid
 │   │   ├── AgentDetailPage.tsx # Sessions, latency, invoke, response
@@ -84,6 +89,7 @@ frontend/
 │   │   ├── LoginPage.tsx        # Cognito login + NEW_PASSWORD_REQUIRED challenge
 │   │   ├── McpServersPage.tsx  # MCP server management: list, detail, tools, access
 │   │   ├── A2aAgentsPage.tsx       # A2A agent management with card/access tabs
+│   │   ├── SkillsPage.tsx          # Browser + (registry:write) create/edit/delete + submit/approve/reject for registry SKILL records (list + detail; issue #61); Claude Design-driven redesign, card/detail header aligned to AgentCard/Agent-detail conventions, "Registry" governance card (renamed from "Governance")
 │   │   ├── MemoryManagementPage.tsx # Memory persona: memory resource management
 │   │   ├── TaggingPage.tsx         # Tagging persona: tag policy + tag profile CRUD
 │   │   ├── SettingsPage.tsx        # Settings persona: display preferences + cost estimation settings
@@ -144,7 +150,7 @@ The 7 personas are grouped under four section headers (`SidebarSection` in `App.
 | Memory | Brain | Create and manage AgentCore Memory resources | `memory:read` or `memory:write` | |
 | Security Admin | Shield | Manage roles, authorizers, credentials, permissions | `security:read` or `security:write` | |
 | Integrations | Network | MCP Servers and A2A Agents tabs (formerly two standalone personas) | `mcp:read`/`mcp:write` or `a2a:read`/`a2a:write` (either grants entry; each tab is independently gated — see below) | |
-| Settings | Settings | Display preferences, models, networking, infrastructure, and (per R2) a Tagging tab | `settings:read`, `tagging:read`, or `tagging:write` (any grants entry; the Tagging tab itself requires `tagging:read`) | |
+| Settings | Settings | Display preferences, models, networking, infrastructure, and (per R2) a Tagging tab | `tagging:read` or `tagging:write` (either grants entry; the models/networking/infrastructure sub-pages additionally require `admin:read`/`admin:write` — domain-scoped admins see only the Tagging tab) | |
 | Analytics | BarChart3 | Platform usage analytics ("User Activity" tab: Sessions/Actions/Page Views) and (per R3) a "Costs" tab — renamed from "Admin"/"Admin Dashboard" once the persona grew to cover both | `admin:read`, `costs:read`, or `costs:write` (any grants entry; User Activity requires `admin:read`, Costs requires `costs:read`) | |
 
 Sidebar items are conditionally rendered based on the user's scopes derived from their Cognito group membership (`effectiveHasScope`). When auth is not configured, all items are visible.
@@ -228,37 +234,35 @@ When deletion is confirmed with "Also delete in AgentCore" checked, the agent tr
 **Content:**
 - Page header: "Agent Administration" with card/table view toggle (top-right)
 - Sub-header: "Agents" with description and "Add Agent" button (right-aligned)
-- "Add Agent" toggles a Card containing Deploy/Import tab switcher and `AgentRegistrationForm`
-- When deploy succeeds, the form collapses and an ephemeral `AgentCard` appears at the top of the grid with CREATING status and spinner/timer. Once the real agent appears in the agents list, the ephemeral card is removed.
-- Below the form: responsive grid of `AgentCard` components (cards default) or table view
+- "Add Agent" opens `AgentWizardChooser` (see below). Editing an existing agent (pencil icon on `AgentCard`) skips the chooser and opens the wizard directly on the shared review step, prefilled from the agent's current configuration.
+- When deploy succeeds, the wizard collapses and an ephemeral `AgentCard` appears at the top of the grid with CREATING status and spinner/timer. Once the real agent appears in the agents list, the ephemeral card is removed.
+- Below the wizard: responsive grid of `AgentCard` components (cards default) or table view
 
-### Import Tab
+### New Agent Chooser (`AgentWizardChooser`)
+
+Two paths, side by side:
+- **Guided setup**: starts the 5-step wizard at Runtime (step 1).
+- **Import manifest**: drag-and-drop file drop zone, "Choose file" picker (`.json`), and a "Paste JSON" disclosure with its own textarea. The pasted/dropped text is validated as JSON client-side; on success it's handed to the wizard, which applies it via the same `applyManifestJson` parser used by the in-wizard JSON panel and jumps straight to the shared review step (bypassing all 5 steps).
+- A tertiary link ("Or register an existing AgentCore runtime by ARN instead") drops back to the legacy ARN-registration form (see Import Tab below) for attaching an already-deployed runtime, which is a distinct flow from deploying/importing a manifest.
+
+### Import Tab (legacy ARN registration)
 
 - ARN text input and Model selector on the same line (ARN fills remaining space, model is fixed width)
 - Labels: "AgentCore Runtime ARN" and "Model Used"
-- Model selector uses `SearchableSelect` with grouped options (Anthropic / Amazon), no default selection
+- Model selector uses `SearchableSelect`, options sorted via `groupModels()`/`sortModelsByRecency()` (tier-then-version order — see "Model Sorting" below), no default selection
 - Import button with `min-w-[120px]` to prevent layout shift during loading spinner
 
-### Deploy Tab
+### Deploy Wizard (`AgentRegistrationForm`, `mode="deploy"`)
 
-Full deployment form with sections:
-- **Deployment Type Selector**: Radio buttons for "Custom Agent" (code-based, full configuration) or "Managed Agent" (AgentCore Harness, no code required). Defaults to Custom. Controls which form sections are visible.
-- **Agent Framework Selector** (custom only): Radio buttons for "Strands Agent" (default) or "Google ADK". Selects `agent_framework` sent as part of the deploy request; omitted from JSON export when left at the default "strands". Not shown for managed (harness) agents, which have no framework concept.
-- **JSON Import/Export**: Collapsible section (ChevronDown/ChevronRight toggle) via the shared `JsonConfigSection` component. Import maps `name`, `description`, `persona` (→ agent description), `instructions` (→ behavioral guidelines), `behavior` (→ output expectations), `model`, `role`, `network_mode`, `authorizer`, `tags` (tag profile name). Export serializes the current form state to JSON using human-readable identifiers (model ID, role name, authorizer name, tag profile name); empty/default fields are omitted. Apply/Export/Cancel buttons. Invalid JSON shows inline error without clearing existing fields.
-- **Agent Identity**: name (1/3 width) and description (2/3 width)
-- **System Prompt**: agent description, behavioral guidelines, output expectations — each with placeholder examples
-- **Provider / Default Model / Protocol / Network / IAM Role**: Provider selector (Bedrock default, or LiteLLM when a proxy connection is configured — see [17. Alternate LLM Providers](#17-alternate-llm-providers-litellm-proxy)) precedes Default Model, which uses `SearchableSelect` with grouped options and no default selection; switching provider resets the model selection. Protocol offers HTTP as selectable; MCP and A2A shown as disabled (custom only). Network offers PUBLIC; VPC shown as disabled. IAM Role uses a `SearchableSelect` with searchable dropdown. Model, provider, and IAM role are required — deploy button is disabled until all are selected.
-- **Allowed Models (runtime selection)**: shown after a default model is selected. Per-vendor grouped checkboxes via `groupModels()`. The default model is always checked and disabled. Additional models can be checked to allow runtime selection at invoke time. If no additional models are selected, only the default model is allowed. JSON import/export supports `allowed_models` array field.
-- **Model Parameters** (managed only): max tokens, temperature, top_p — numeric inputs for controlling harness model behavior.
-- **Built-in Tools** (managed only): toggle switches for Code Interpreter and Browser tools. When enabled, the corresponding `agentcore_code_interpreter` or `agentcore_browser` tool is added to the harness configuration.
-- **Role Permissions (read-only)**: collapsible section shown after IAM role selection, displays policy document. Clicking the header toggles visibility.
-- **Authorizer** (custom only): radio selection of None, Cognito, or Other. Authorizer dropdown is 25% width, shows just the authorizer config name. Fields show "Allowed Clients" and "Allowed Scopes".
-  - Cognito: searchable Cognito pool select (30% width), auto-populated discovery URL, tag inputs for allowed clients and scopes, app client ID and client secret fields
-  - Other: textbox for discovery URL, tag inputs for allowed clients and scopes
-- **Harness Parameters** (managed only): max iterations and timeout seconds — positioned between Authorizer and Lifecycle.
-- **Lifecycle**: idle timeout and max lifetime fields with dynamic placeholders fetched from `/api/agents/defaults` (e.g., "300" and "3600")
-- **Resource Tags**: `ResourceTagFields` component with tag profile dropdown (persisted in `sessionStorage`). Deploy-time tags are auto-applied; build-time tags are resolved from the selected tag profile.
-- **Integrations**: Memory (enabled, with multi-select dropdown for memory resources, custom only), MCP Servers (enabled with multi-select dropdown), A2A Agents (enabled with multi-select dropdown, custom only), Code Interpreter (custom only — peer integration section with enable toggle, network mode select (SANDBOX/PUBLIC), region labeled dropdown, and CI execution role selector filtered to `role_type="code_interpreter"` managed roles). JSON import/export uses nested `code_interpreter` key: `{"enabled": true, "region": "us-east-1", "network_mode": "SANDBOX", "role": "loom-ci-role-demo"}`.
+A 5-step wizard with a left rail (step number/checkmark, label, and a one-line mono "current value" subline per step), a header with the agent name (or "New agent — guided setup") and a single Cancel action, and a "View / Paste JSON" disclosure (the same `JsonConfigSection` used elsewhere) available from any step. Each step renders as a bordered card with its own title/helper text and a footer bar ("Step n of 5" + Back/Next); Next is disabled until that step's required fields are valid. The rail allows jumping to any step directly (including backward) regardless of validation — only the Next button gates forward progress.
+
+- **Step 1 — Runtime**: Deployment type as two description-cards ("Custom agent" vs. "Managed agent" / AgentCore Harness). Framework (custom only) as a segmented control: "Strands Agents" (default) or "Google ADK"; hidden for managed agents.
+- **Step 2 — Prompt & models**: Name (locked after deploy, 2-col grid with Description) and a System Prompt editor styled as a code surface — line-number gutter kept in sync with the textarea's scroll position, non-wrapping (`wrap="off"`/`whitespace-pre`, so logical and visual lines always match 1:1 and the gutter never drifts out of alignment), fixed height with internal scrolling (`field-sizing: fixed` forced via `!important` to override the shared `Textarea` component's default content-based auto-grow) capped at a larger height when "expand" is toggled, and a live chars/`~tokens` (chars/4 estimate) counter. Below a divider: a Bedrock/LiteLLM segmented provider toggle, provider-specific base URL/API key inputs when required, a "Default model" field (labeled dropdown via `SearchableSelect`, options from `sortedProviderModels` — the provider's models run through `groupModels()`/`sortModelsByRecency()`), and — once a default model is picked — an "Allowed at runtime" section: a filterable (`modelFilter`), vendor-grouped chip grid (one row per `group`, each chip toggles membership in `selectedAllowedModelIds`; the default model's chip is pinned, labeled, and non-removable). Embedding models (`isEmbeddingModel()`, matched by `/embed/i` on model_id/display_name) are excluded from the grid with a count note; vendor groups with zero selections collapse into a single "N models, 0 selected" summary row behind a "Show" link unless the filter is active. Chip labels strip the redundant "Claude " prefix (`chipLabel()`). Managed-agent-only "Managed agent parameters" (max iterations/tokens, human-confirmation toggle + policy textarea) sit at the bottom of this step.
+- **Step 3 — Access**: Network as two radio-cards (Public/VPC; VPC reveals a `SearchableSelect` for VPC config and a collapsible read-only details panel). Execution role via `SearchableSelect`, with the role's first 3 IAM actions shown as always-visible chips plus a "+N · view policy" toggle that expands the full `PolicyViewer`. Inbound authorizer via `SearchableSelect` with its detail panel (type, pool, truncated client IDs, discovery URL with a copy button, audience/scopes) rendered directly attached to the select (flattened bottom border via `SearchableSelect`'s `triggerClassName` prop) rather than as a separate disclosure.
+- **Step 4 — Tools & memory**: Ordered to match per-turn usage — Skills (registry:read only; checklist with name/description/version columns) → Connected tools (MCP servers and A2A agents merged into one checklist with a MCP/A2A type badge, host, and OAuth2/M2M badge; A2A entries only appear for custom agents) → Code interpreter (switch; enabling reveals network mode, region, and CI execution role selects) → Memory (toggle chips).
+- **Step 5 — Lifecycle & tags**: Idle timeout / max lifetime inputs pre-filled with the real default values (not placeholder text) plus a humanized suffix ("sec · 5 min") and quick preset chips (5m/15m/1h and 1h/4h/8h respectively). `ResourceTagFields` renders the tag profile select with the resolved tags as an attached key/value table (not floating badges).
+- **Review & deploy** (shared with the import path): two-column layout — a bordered rows card (Runtime, Prompt & models, Access, Tools & memory, Lifecycle & tags; each row shows real resolved values, not a one-line summary, with an "Edit" link that jumps back to the corresponding step) and a side panel with deploy-impact notes, Back + Deploy/Update buttons, and an "Export manifest" link that downloads the same JSON object the deploy/update request would send (`buildManifestJson()`, shared with the JSON panel's Export action).
+- **JSON Import/Export**: via the shared `JsonConfigSection` component (`applyManifestJson`/`buildManifestJson`). Import maps `name`, `description`, `persona` (→ agent description), `model`, `provider` (flat string or `{id, base_url, api_key}` object), `role`, `vpc` (`{mode, config}`), `authorizer`, `tags` (tag profile name), `mcp_servers`/`a2a_agents`/`memories`/`skills` (by name), `code_interpreter`, and managed-agent fields (`max_iterations`, `max_tokens`, `human_confirmation`, `confirmation_policy`). A manifest handed in from the chooser's import path is applied once reference data has loaded, then the wizard jumps to the review step; parse failures are surfaced via a toast. Export serializes current form state using human-readable identifiers; empty/default fields are omitted.
 
 ---
 
@@ -317,6 +321,9 @@ Full deployment form with sections:
 
 ### External Integration (READY deployed agents only)
 - `ExternalIntegrationSection` component fetches integration info from `GET /api/agents/{id}/integration` and displays endpoint URLs, auth requirements, and copy-ready code snippets.
+- `AttachedSkillsSection` (issue #61) lists the agent's `integration_type="skill"` integrations, and a `SearchableSelect` picker limited to `APPROVED`-status SKILL records for attaching more. Uses the existing generic `listIntegrations`/`createIntegration`/`deleteIntegration` client (`@/api/integrations`) — this is that client's first consumer in the frontend. Attaching/detaching a skill only takes effect on the agent's next full redeploy, not the quick "Redeploy" button; the section's own doc comment and a toast on attach/detach both call this out.
+- `AgentRegistrationForm.tsx` also has its own Skills checklist (gated on `registry:read`, matching the Memory/MCP/A2A checklists) so skills can be selected at initial create time, not just afterward via `AttachedSkillsSection` — submitted as `skill_ids` on `AgentDeployRequest`/`AgentHarnessDeployRequest`, and included (by name) in the JSON import/export manifest alongside `mcp_servers`/`a2a_agents`/`memories`.
+- `AgentDetailPage.tsx`'s "Registry" rail card fetches the agent's own registry record (`getRegistryRecord`, gated on the same `registry:read`/`canViewSkills` signal) to show the registry's actual `statusReason` (why it was approved/rejected) alongside the existing generic status narrative — previously the card only showed the narrative, never the real reason text the Skills detail page already surfaced for SKILL records.
 - **Endpoint info:** Runtime ARN, protocol badge (HTTP/MCP/A2A), network mode badge (PUBLIC/VPC with icon), per-qualifier invocation URLs and protocol-specific URLs (MCP streamable HTTP, A2A agent card). All URL/ARN fields have copy-to-clipboard buttons.
 - **Auth info (SigV4):** IAM action, resource ARN, execution role, example IAM policy (JSON), boto3 snippet, and AWS CLI snippet in syntax-highlighted copyable code blocks.
 - **Auth info (OAuth2):** Authorizer type badge, OIDC discovery URL, token endpoint, allowed client IDs and scopes as badges, example token request and invocation curl snippets. Client secrets are never displayed — a note directs users to their identity provider administrator.
@@ -529,11 +536,11 @@ Create/edit form with:
 - Tab bar (manual tab-pill pattern, `SettingsTab = "general" | "models" | "networking" | "infrastructure" | "tagging"`): General, Models, Networking, Infrastructure always shown; **Tagging** tab conditionally appended only when the caller has `tagging:read` (see [3. Application Shell](#3-application-shell) for the scope-gate rationale).
 - Every tab uses a shared `SettingsCard`/`SettingsRow` grammar (`grid-cols-[200px_minmax(0,1fr)]`: label + helper text left, control right, hairline between rows, card max-width 980px) instead of ad hoc field layout.
 - **General tab**: a *Preferences* card (Theme — two-way segmented Light/Dark control wired to `ThemeContext`, Timezone, Language) and a *Cost estimation* card (CPU I/O-wait-discount slider, vCPU/memory rate display) linking out to Analytics.
-- **Models tab — Enabled Models** section (requires `settings:read`/`settings:write`): grouped by real vendor (Anthropic, Amazon, OpenAI, DeepSeek, Qwen, Z.AI, …, from the model catalog's `group` field) rather than by infrastructure provider (Bedrock/LiteLLM) — each vendor is a collapsible row with a tri-state checkbox (checked/unchecked/indeterminate via `TriCheckbox`), `n / total` count, share bar, and sample names; expanded rows list 2-col checkbox · display name · mono model id. A Chat/Embeddings/All segmented filter (heuristic: model id/name containing "embed") separates embedding models from chat models. When nothing is restricted, the card shows a 3-cell summary (chat count / embedding count / vendor count) plus a "Restrict models" button instead of rendering every checkbox. The LiteLLM connection (enable toggle, base URLs, write-only master key, Refresh) is its own collapsible row — its models merge into the vendor list once configured, they no longer live under a separate "LiteLLM" provider container. The save bar tracks the last-saved baseline and, when models are being newly disabled, cross-references `agents[].model_id`/`allowed_model_ids` to flag how many agents currently use a model about to be disabled. Configuration is saved via `PUT /api/settings/models`. (Family/generation bands and DEFAULT/LEGACY chips from the design mockup were not implemented — the model catalog has no generation or default-model metadata to back them.)
+- **Models tab — Enabled Models** section (requires `admin:read`/`admin:write`): grouped by real vendor (Anthropic, Amazon, OpenAI, DeepSeek, Qwen, Z.AI, …, from the model catalog's `group` field) rather than by infrastructure provider (Bedrock/LiteLLM) — each vendor is a collapsible row with a tri-state checkbox (checked/unchecked/indeterminate via `TriCheckbox`), `n / total` count, share bar, and sample names; expanded rows list 2-col checkbox · display name · mono model id. A Chat/Embeddings/All segmented filter (heuristic: model id/name containing "embed") separates embedding models from chat models. When nothing is restricted, the card shows a 3-cell summary (chat count / embedding count / vendor count) plus a "Restrict models" button instead of rendering every checkbox. The LiteLLM connection (enable toggle, base URLs, write-only master key, Refresh) is its own collapsible row — its models merge into the vendor list once configured, they no longer live under a separate "LiteLLM" provider container. The save bar tracks the last-saved baseline and, when models are being newly disabled, cross-references `agents[].model_id`/`allowed_model_ids` to flag how many agents currently use a model about to be disabled. Configuration is saved via `PUT /api/settings/models`. (Family/generation bands and DEFAULT/LEGACY chips from the design mockup were not implemented — the model catalog has no generation or default-model metadata to back them.)
 - **Networking tab** (`VpcConfigPanel`): VPC configs as `ExpandableRow`s (mono name + VPC-id pill + one-line mono summary "N subnets · N AZs · N IPs available · N security groups"); expanded body is two columns — subnet tiles (id, AZ, CIDR, available IPs) on the left, one security-group rules table with `↓ INBOUND` / `↑ OUTBOUND` band rows on the right (replacing three stacked tables). "Used by N agents" (via `agents[].vpc_config_id`) is shown in the row and blocks Delete while non-zero.
 - **Infrastructure tab**: Agent registry as a `SettingsCard` with a status pill, `CopyField` for the ARN, and a dedicated destructive row (bold red label + consequence line + outline-destructive "Disable" button) instead of a bare red text link beside the Save button.
 - **Tagging tab**: renders `TaggingPage`'s content (see below) via `readOnly={!canEditTagging}`, `userGroups`, and `agents` props passed from `App.tsx`.
-- Sidebar visibility gate: `settings:read || tagging:read || tagging:write` (any grants entry to the Settings persona; the Tagging tab itself requires `tagging:read` independently).
+- Sidebar visibility gate: `tagging:read || tagging:write` (either grants entry to the Settings persona; the Tagging tab itself requires `tagging:read` independently; the models/networking/infrastructure sub-pages additionally require `admin:read`/`admin:write`).
 
 ### Tagging (Settings Tab)
 
@@ -684,15 +691,16 @@ Cognito client secrets are password-masked in forms. Secrets are sent to the bac
 
 ### Scope-Based Authorization
 - `AuthContext` extracts `cognito:groups` from the decoded ID token and maps them to scopes using a `GROUP_SCOPES` lookup table (must match the backend `GROUP_SCOPES` exactly). The `hasScope(scope)` function is exposed to the entire app.
-- Scopes (21 total): `invoke`, `catalog:read`, `catalog:write`, `agent:read`, `agent:write`, `memory:read`, `memory:write`, `security:read`, `security:write`, `settings:read`, `settings:write`, `tagging:read`, `tagging:write`, `costs:read`, `costs:write`, `mcp:read`, `mcp:write`, `a2a:read`, `a2a:write`, `registry:read`, `registry:write`.
+- Scopes (21 total): `invoke`, `catalog:read`, `catalog:write`, `agent:read`, `agent:write`, `memory:read`, `memory:write`, `security:read`, `security:write`, `tagging:read`, `tagging:write`, `costs:read`, `costs:write`, `mcp:read`, `mcp:write`, `a2a:read`, `a2a:write`, `registry:read`, `registry:write`, `admin:read`, `admin:write`.
 - Two-dimensional group architecture:
   - **Type groups**: `t-admin` (admin UI), `t-user` (user UI) — determine layout and default navigation
   - **Resource groups**:
-    - `g-admins-super`: All 21 scopes (full access)
+    - `g-admins-super`: All 21 scopes (full access, including `admin:read`/`admin:write` for global deployment configuration)
     - `g-admins-demo`: Read/write to most pages including MCP and A2A + demo group resources
     - `g-admins-security`, `g-admins-memory`, `g-admins-mcp`, `g-admins-a2a`: Domain-specific admin scopes
-    - `g-admins-registry`: `mcp:read`, `a2a:read`, `registry:read`, `registry:write`, `settings:read`, `settings:write`, `tagging:read`
+    - `g-admins-registry`: `mcp:read`, `a2a:read`, `registry:read`, `registry:write`, `tagging:read`
     - `g-users-demo`, `g-users-test`, `g-users-strategics`: invoke + group-filtered read access
+  - **`admin:read`/`admin:write`**: gate global-configuration Settings sub-pages (site settings, registry config, LiteLLM proxy config, enabled models, VPC configs). Held only by `g-admins-super` — no domain-scoped admin group has access, since none of those pages are scoped to a `loom:group`.
 - Sidebar visibility is controlled by scopes — each persona item is rendered only when the user has one of its gating `*:read`/`*:write` scopes (see [3. Application Shell](#3-application-shell) for the current 7-persona list and each one's exact gate expression, post issue-#20 consolidation). None are unconditionally visible; Platform Catalog is the only one gated by a single always-broadly-held scope (`catalog:read`).
 - Write operations are gated by a `readOnly` prop propagated from `App.tsx` through page components to individual UI elements. When `readOnly` is true, add/edit/delete buttons are disabled or hidden.
 - Pages and their `readOnly` mapping: `AgentListPage` and `CatalogPage` use `!hasScope("agent:write")`, `SecurityAdminPage` uses `!hasScope("security:write")`, `MemoryManagementPage` uses `!hasScope("memory:write")`, `TaggingPage` uses `!hasScope("tagging:write")` (now surfaced as `canEditTagging` through `SettingsPage`), `McpServersPage`/`A2aAgentsPage` use `!hasScope("mcp:write")`/`!hasScope("a2a:write")` (surfaced as `canEditMcp`/`canEditA2a` through `IntegrationsPage`), `CostDashboardPage` uses `!hasScope("costs:write")` (surfaced as `canEditCosts` through `AdminDashboardPage`), and the Registry section within `CatalogPage` uses `!hasScope("registry:write")`.
@@ -1027,7 +1035,7 @@ The Security Admin page includes an "Approval Policies" section (`ApprovalPolicy
 
 ### 15.6 Harness Human Confirmation
 
-The Agent Registration Form includes a "Enable human confirmation (inline function HITL)" checkbox under Harness Parameters. When enabled:
+The deploy wizard's "Prompt & models" step includes a "Enable human confirmation (inline function HITL)" checkbox under "Managed agent parameters" (managed agents only). When enabled:
 - A customizable "Confirmation Policy" textarea defines when the agent should seek confirmation.
 - The policy text becomes the `description` of the `user_confirmation` inline function tool deployed with the harness.
 - The JSON config export/import includes `human_confirmation` and `confirmation_policy` fields.
@@ -1064,7 +1072,7 @@ Backend design (provider registry, virtual key vending, dynamic model catalog, I
 
 ### 17.1 Provider-Aware Deploy Form
 
-`AgentRegistrationForm` adds a provider selector (fetched via `fetchProviders()` → `GET /api/agents/providers`), positioned alongside the Default Model field. Switching providers resets the model selection and any provider-specific credential fields.
+`AgentRegistrationForm`'s "Prompt & models" step adds a provider selector (fetched via `fetchProviders()` → `GET /api/agents/providers`, rendered as a Bedrock/LiteLLM segmented toggle), positioned above the Default Model field. Switching providers resets the model selection and any provider-specific credential fields.
 
 - **Bedrock** (default): unchanged — model list from `fetchModels()`, no additional fields.
 - **LiteLLM**: selecting it triggers a lazy, on-demand fetch of `fetchLitellmModels()` (`GET /api/agents/models/litellm`) rather than loading it eagerly alongside Bedrock's list on page mount, since the LiteLLM catalog reflects exactly what's deployed on the connected proxy and may not be configured at all. The same lazy fetch is triggered when importing/editing a manifest whose `provider` is `litellm`, so the model dropdown has options to match against.
@@ -1096,28 +1104,56 @@ The Settings page's "Enabled Models" section (§ 9) is split into a Bedrock bloc
 
 ---
 
-## 18. Usage Limits
 
-### 18.1 Usage Limits Administration (`UsageLimitsPanel.tsx`)
+## 18. Bedrock Model Catalog UI (issue #64)
+
+Backend design (dual-endpoint model invocation, curated-catalog-driven `models.json` refresh, deprecated-model grandfathering) is documented in [`backend/SPECIFICATIONS.md` § 37](../backend/SPECIFICATIONS.md) (Phase 37 and its follow-up). This section covers the frontend surface.
+
+### 18.1 Recency Sort (`lib/models.ts`)
+
+`groupModels()` now sorts each vendor group by **tier recency** via `sortModelsByRecency()` (issue #65): it strips every version number out of a model's `display_name` to get its "tier" (`extractTier()` — e.g. "Claude Opus 4.8" and "Claude Opus 4.7" both → "Claude Opus"; "Nova 2 Lite" and "Nova Lite" both → "Nova Lite"), ranks tiers by their newest member's version (`extractVersion()` — the first version-shaped number in the name), then lists each tier's own versions newest-first. This keeps a tier's versions adjacent instead of interleaving with another tier that happens to share a version number (e.g. "Claude Sonnet 5" no longer sorts between "Claude Opus 5" and "Claude Opus 4.8" just because they share the number 5) — ties between tiers, and names with no version at all, fall back to alphabetical. Applies everywhere `groupModels()`/`groupModelsByProvider()` is used — the Settings page's model browser and every model picker (Invoke, Chat, Deploy wizard's Default/Allowed models, legacy ARN registration) — since Bedrock doesn't expose a release date on any model-list API.
+
+### 18.2 Settings Page — Model Catalog Refresh (§ 9 addendum)
+
+A new "Bedrock model catalog" card sits alongside the existing "Enabled models" card:
+
+- **Lookback (months)** input, backed by the `models_json_lookback_months` site setting (default 6) via the existing generic `GET/PUT /api/settings/site/{key}` endpoints — no dedicated API needed.
+- **Refresh now** button calls `POST /api/settings/models/refresh` (`refreshModelsJson()` in `api/settings.ts`) and displays the returned summary (cutoff date, included count, and the specific model IDs excluded for being stale, missing verified pricing, or not live in the region), then reloads the enabled-models catalog so the picker reflects the new file immediately.
+
+### 18.3 Deprecated Models — Grandfathering UI
+
+An agent's `model_id`/`allowed_model_ids` can outlive the catalog (a `models.json` refresh dropped it) without breaking the agent — see the backend grandfathering design. The frontend surfaces this rather than hiding it:
+
+- **`AgentCard`**: takes an optional `models: ModelOption[]` prop (fetched once by the parent page — `CatalogPage`, `AgentListPage` — not per-card) to resolve `agent.model_id` to a display name. Added as a "Default model" field in the existing Runtime/Network/Memory/MCP detail grid, full-width on its own row. When `agent.deprecated_model_ids` is non-empty, a `StatusPill` reading "DEPRECATED MODEL" (or "DEPRECATED MODELS" if more than one) sits next to it, with a tooltip listing the specific IDs.
+- **`DeploymentPanel`'s `ModelsCard`** ("Allowed models" panel):
+  - Display mode: a deprecated model has no entry in the live catalog fetch (`fetchModels()`), so it's synthesized as a placeholder `ModelOption` (`{model_id, display_name: model_id, group: "Deprecated"}`) rather than silently vanishing from the chip list, rendered with warning styling and a tooltip.
+  - Edit mode: rebuilt to group the full catalog by vendor as checkbox rows (name + `model_id`, per-group enabled count) — matching the Settings page's model browser — instead of a flat wrap of chips. Deprecated models are pulled out of their vendor group entirely into their own warning-styled "Deprecated — no longer in the model catalog" section, each row showing "uncheck to update" (or "set a new default to uncheck" if it's the agent's current default), so they're easy to find and remove rather than blending into the vendor list.
+- **Types**: `AgentResponse` gains `deprecated_model_ids: string[]` (computed server-side against the same catalog the PATCH endpoint validates against).
+
+---
+
+## 19. Usage Limits
+
+### 19.1 Usage Limits Administration (`UsageLimitsPanel.tsx`)
 
 A new tab in the Security Admin page (`SecurityAdminPage.tsx`), following the same structure as `ApprovalPolicyPanel.tsx`:
 - Table view listing each limit's scope ("Applies To"), target ("Model Scope"), current cached usage against threshold, enforcement action, and enabled state, using the existing `StatusPill` component for the enforcement and enabled columns.
 - Inline create/edit form, matching the existing panel's layout: two-step scope selector (type + value), two-step target selector (type + value, value field conditional on target type), and selects for measure/window/enforcement.
 - No user/group autocomplete picker exists elsewhere in the app for this kind of field, so scope/target values are plain text inputs, consistent with the rest of the admin UI rather than introducing a new input pattern.
 
-### 18.2 API Client (`api/usage_limits.ts`)
+### 19.2 API Client (`api/usage_limits.ts`)
 
 Standard CRUD wrapper over `apiFetch`, matching `api/approvals.ts`'s structure: `listUsageLimits`, `getUsageLimit`, `createUsageLimit`, `updateUsageLimit`, `deleteUsageLimit`.
 
-### 18.3 Types
+### 19.3 Types
 
 `UsageLimit` added to `api/types.ts`, with `scope`/`target` typed as discriminated unions rather than loose `Record<string, unknown>`, so the panel component gets exhaustiveness checking on scope/target type branches.
 
-### 18.4 Known Gap
+### 19.4 Known Gap
 
 The backend emits `usage_warnings` on the `session_start` SSE event when a `warn`-tier limit is exceeded (see backend §17.2), but nothing in the chat/invoke UI currently reads or displays it. Follow-up work.
 
-## 19. Future Work
+## 20. Future Work
 
 - **VPC network mode** support
 - **Operate Tab** — aggregate dashboard with summary cards, per-agent latency charts

@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Table,
   TableBody,
@@ -15,6 +14,7 @@ import {
 import { MultiSelect } from "@/components/ui/multi-select";
 import { AddFilterDropdown } from "@/components/ui/add-filter-dropdown";
 import { AgentRegistrationForm } from "@/components/AgentRegistrationForm";
+import { AgentWizardChooser } from "@/components/AgentWizardChooser";
 import { AgentCard } from "@/components/AgentCard";
 import { ViewModeToggle } from "@/components/ViewModeToggle";
 import { StatusPill } from "@/components/StatusPill";
@@ -27,10 +27,11 @@ import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatTimestamp } from "@/lib/format";
 import { statusVariant } from "@/lib/status";
 import { listTagPolicies, getRegistryConfig } from "@/api/settings";
+import { fetchModels } from "@/api/agents";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
-import type { AgentDeployRequest, AgentHarnessDeployRequest, AgentResponse, TagPolicy } from "@/api/types";
+import type { AgentDeployRequest, AgentHarnessDeployRequest, AgentResponse, ModelOption, TagPolicy } from "@/api/types";
 
-type BuilderTab = "register" | "deploy";
+type WizardStage = "closed" | "chooser" | "guided" | "register";
 
 interface AgentListPageProps {
   agents: AgentResponse[];
@@ -72,19 +73,21 @@ export function AgentListPage({
   const { timezone } = useTimezone();
   const { user, browserSessionId, hasScope } = useAuth();
   const [submitting, setSubmitting] = useState(false);
-  const [activeTab, setActiveTab] = useState<BuilderTab>("deploy");
-  const [showAddForm, setShowAddForm] = useState(false);
+  const [wizardStage, setWizardStage] = useState<WizardStage>("closed");
   const [exportAgentId, setExportAgentId] = useState<number | undefined>(undefined);
+  const [pendingImportJson, setPendingImportJson] = useState<string | undefined>(undefined);
   const [tagPolicies, setTagPolicies] = useState<TagPolicy[]>([]);
   const [tagFilters, setTagFilters] = useState<Record<string, string[]>>(() => {
     try { return JSON.parse(localStorage.getItem("loom:tagFilters:agents") || "{}") as Record<string, string[]>; } catch { return {}; }
   });
 
   const [registryEnabled, setRegistryEnabled] = useState(false);
+  const [models, setModels] = useState<ModelOption[]>([]);
 
   useEffect(() => {
     void listTagPolicies().then(setTagPolicies).catch(() => {});
     getRegistryConfig().then((c) => setRegistryEnabled(c.enabled)).catch(() => {});
+    fetchModels().then(setModels).catch(() => {});
   }, []);
 
 
@@ -132,7 +135,7 @@ export function AgentListPage({
     try {
       if (user && browserSessionId) trackAction(user.username ?? user.sub, browserSessionId, 'agent', 'import', arn);
       await onRegister(arn, modelId);
-      setShowAddForm(false);
+      setWizardStage("closed");
       toast.success("Agent registered");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Registration failed");
@@ -145,7 +148,7 @@ export function AgentListPage({
     if (!onDeploy) return;
     const action = exportAgentId ? "update_deploy" : "deploy";
     if (user && browserSessionId) trackAction(user.username ?? user.sub, browserSessionId, 'agent', action, request.name);
-    setShowAddForm(false);
+    setWizardStage("closed");
     try {
       await onDeploy(request, exportAgentId);
       setExportAgentId(undefined);
@@ -159,7 +162,7 @@ export function AgentListPage({
     if (!onDeployHarness) return;
     const action = exportAgentId ? "update_harness" : "deploy_harness";
     if (user && browserSessionId) trackAction(user.username ?? user.sub, browserSessionId, 'agent', action, request.name);
-    setShowAddForm(false);
+    setWizardStage("closed");
     try {
       await onDeployHarness(request, exportAgentId);
       setExportAgentId(undefined);
@@ -191,7 +194,7 @@ export function AgentListPage({
             <SortButton direction={agentSortDir} onClick={() => setAgentSortDir(toggleSortDirection("builder-agents", agentSortDir))} />
             <Button
               size="sm"
-              onClick={() => setShowAddForm(!showAddForm)}
+              onClick={() => setWizardStage(wizardStage === "closed" ? "chooser" : "closed")}
               disabled={readOnly}
             >
               <Plus className="h-3.5 w-3.5 mr-1" />
@@ -200,26 +203,58 @@ export function AgentListPage({
           </div>
         </div>
 
-        {showAddForm && (
+        {/* R1: chooser between the guided wizard and manifest import. */}
+        {wizardStage === "chooser" && (
+          <Card className="p-4">
+            <AgentWizardChooser
+              onGuided={() => setWizardStage("guided")}
+              onImport={(json) => { setPendingImportJson(json); setWizardStage("guided"); }}
+              onRegisterArn={() => setWizardStage("register")}
+            />
+          </Card>
+        )}
+
+        {/* R2-R9: the guided wizard, which also renders the shared review/deploy step (R7) when
+            editing an existing agent or after a manifest import. */}
+        {wizardStage === "guided" && (
           <Card className="gap-0 py-0">
-            <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as BuilderTab)} className="gap-0">
-              <TabsList variant="line" className="h-auto justify-start gap-5 rounded-none border-b bg-transparent px-4 pt-3.5">
-                <TabsTrigger value="deploy" className="rounded-none px-0.5 pb-2.5 text-[13px] font-medium data-[state=active]:shadow-none">Deploy</TabsTrigger>
-                <TabsTrigger value="register" className="rounded-none px-0.5 pb-2.5 text-[13px] font-medium data-[state=active]:shadow-none">Import</TabsTrigger>
-              </TabsList>
-              <TabsContent value={activeTab} className="p-4">
-                <AgentRegistrationForm
-                  mode={activeTab}
-                  onRegister={handleRegister}
-                  onDeploy={onDeploy ? handleDeploy : undefined}
-                  onDeployHarness={onDeployHarness ? handleDeployHarness : undefined}
-                  isLoading={submitting}
-                  groupRestriction={groupRestriction}
-                  ownerRestriction={ownerRestriction}
-                  exportAgentId={exportAgentId}
-                />
-              </TabsContent>
-            </Tabs>
+            <div className="p-4">
+              <AgentRegistrationForm
+                mode="deploy"
+                onRegister={handleRegister}
+                onDeploy={onDeploy ? handleDeploy : undefined}
+                onDeployHarness={onDeployHarness ? handleDeployHarness : undefined}
+                isLoading={submitting}
+                groupRestriction={groupRestriction}
+                ownerRestriction={ownerRestriction}
+                exportAgentId={exportAgentId}
+                pendingImportJson={pendingImportJson}
+                onImportConsumed={() => setPendingImportJson(undefined)}
+                onCancel={() => { setWizardStage("closed"); setExportAgentId(undefined); setPendingImportJson(undefined); }}
+              />
+            </div>
+          </Card>
+        )}
+
+        {/* Legacy escape hatch: attach an existing AgentCore runtime by ARN. */}
+        {wizardStage === "register" && (
+          <Card className="gap-0 py-0">
+            <div className="p-4 space-y-3">
+              <button
+                type="button"
+                onClick={() => setWizardStage("chooser")}
+                className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+              >
+                &larr; Back
+              </button>
+              <AgentRegistrationForm
+                mode="register"
+                onRegister={handleRegister}
+                isLoading={submitting}
+                groupRestriction={groupRestriction}
+                ownerRestriction={ownerRestriction}
+              />
+            </div>
           </Card>
         )}
 
@@ -345,13 +380,14 @@ export function AgentListPage({
                     agent={agent}
                     onSelect={onSelectAgent}
                     onDelete={onDelete}
-                    onEdit={hasScope("admin:write") ? (id) => { setExportAgentId(id); setShowAddForm(true); } : undefined}
+                    onEdit={hasScope("admin:write") ? (id) => { setExportAgentId(id); setWizardStage("guided"); } : undefined}
                     readOnly={readOnly}
                     deleteStartTime={deleteStartTimes?.[agent.id]}
                     updateStartTime={updateStartTimes?.[agent.id]}
                     userGroups={userGroups}
                     registryEnabled={registryEnabled}
                     maxCost={maxAgentCost}
+                    models={models}
                   />
                 )}
               />

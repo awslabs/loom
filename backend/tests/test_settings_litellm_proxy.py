@@ -14,7 +14,7 @@ from app.dependencies.auth import get_current_user
 def _admin_user():
     return type("UserInfo", (), {
         "sub": "test", "username": "admin", "groups": ["t-admin", "g-admins-super"],
-        "scopes": ["settings:read", "settings:write"],
+        "scopes": ["admin:read", "admin:write"],
     })()
 
 

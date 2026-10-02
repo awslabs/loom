@@ -7,7 +7,7 @@ import { formatTimestamp, capitalize } from "@/lib/format";
 import { statusVariant } from "@/lib/status";
 import { StatusPill } from "@/components/StatusPill";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
-import type { AgentResponse } from "@/api/types";
+import type { AgentResponse, ModelOption } from "@/api/types";
 
 interface AgentCardProps {
   agent: AgentResponse;
@@ -21,6 +21,8 @@ interface AgentCardProps {
   registryEnabled?: boolean;
   /** Highest cost among sibling cards in the same group, for the share-of-max bar. */
   maxCost?: number;
+  /** Catalog models, used to resolve the agent's default model_id to a display name. */
+  models?: ModelOption[];
 }
 
 const DEPLOY_IN_PROGRESS = new Set([
@@ -70,7 +72,7 @@ function existsInAgentCore(agent: AgentResponse): boolean {
   return !!agent.runtime_id;
 }
 
-export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, deleteStartTime, updateStartTime, userGroups = [], registryEnabled = true, maxCost }: AgentCardProps) {
+export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, deleteStartTime, updateStartTime, userGroups = [], registryEnabled = true, maxCost, models = [] }: AgentCardProps) {
   const { timezone } = useTimezone();
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const [cleanupAws, setCleanupAws] = useState(false);
@@ -117,6 +119,10 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, deleteS
   const cost = agent.cost_summary?.total_cost ?? 0;
   const costLabel = cost > 0 ? (cost < 0.01 ? `$${cost.toFixed(6)}` : `$${cost.toFixed(4)}`) : null;
   const sharePct = maxCost && maxCost > 0 ? Math.min(100, Math.round((cost / maxCost) * 100)) : null;
+
+  const modelDisplayName = agent.model_id
+    ? models.find((m) => m.model_id === agent.model_id)?.display_name ?? agent.model_id
+    : null;
 
   const runtimeLabel = agent.source === "harness" ? "Managed" : agent.source === "deploy" ? "Custom" : (agent.source ?? "—");
   const networkLabel = [agent.network_mode, agent.region].filter(Boolean).join(" · ") || "—";
@@ -237,6 +243,22 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, deleteS
             <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">{fourthLabel.key}</span>
             <span className="truncate font-mono text-[12px]">{fourthLabel.value}</span>
           </div>
+          {modelDisplayName && (
+            <div className="col-span-2 flex flex-col gap-0.5">
+              <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Default model</span>
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate font-mono text-[12px]" title={agent.model_id ?? undefined}>{modelDisplayName}</span>
+                {agent.deprecated_model_ids.length > 0 && (
+                  <span
+                    className="w-fit shrink-0"
+                    title={`No longer in the model catalog — update the agent's model: ${agent.deprecated_model_ids.join(", ")}`}
+                  >
+                    <StatusPill label={`DEPRECATED MODEL${agent.deprecated_model_ids.length > 1 ? "S" : ""}`} variant="warning" className="w-fit" />
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
         </div>
         <div className="mt-auto flex items-center gap-2 border-t pt-3 text-[11px] text-muted-foreground">
           {agent.registered_at && <span className="font-mono text-[10.5px]">{formatTimestamp(agent.registered_at, timezone)}</span>}

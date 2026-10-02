@@ -179,6 +179,36 @@ def build_agent_artifact(region: str, agent_framework: str = "strands") -> tuple
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+# CreateAgentRuntime/UpdateAgentRuntime's environmentVariables map caps each
+# value at 5000 characters. AGENT_CONFIG_JSON (system_prompt + integrations)
+# can exceed that once e.g. an attached skill's SKILL.md content is folded
+# into the system prompt — leave headroom below the hard limit.
+MAX_INLINE_CONFIG_JSON_LENGTH = 4500
+BAKED_CONFIG_FILENAME = "agent_config.json"
+
+
+def bake_config_into_artifact(bucket: str, key: str, config_json: str, region: str) -> None:
+    """Inject agent_config.json into an already-uploaded artifact zip in place.
+
+    Used when config_json is too large for an environmentVariables map value —
+    the runtime's config.py already falls back to reading AGENT_CONFIG_PATH
+    (a file path, relative to the artifact root, which is the process's CWD
+    since entryPoint runs `src/handler.py` relative to it) when
+    AGENT_CONFIG_JSON isn't set, so no runtime code changes are needed.
+    """
+    import io
+    import boto3
+
+    s3 = boto3.client("s3", region_name=region)
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    buf = io.BytesIO(obj["Body"].read())
+    with zipfile.ZipFile(buf, "a") as zf:
+        zf.writestr(BAKED_CONFIG_FILENAME, config_json)
+    buf.seek(0)
+    s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
+    logger.info("Baked %d-byte agent_config.json into s3://%s/%s", len(config_json), bucket, key)
+
+
 def create_runtime(
     name: str,
     description: str,
@@ -221,6 +251,11 @@ def create_runtime(
         implement the same BedrockAgentCoreApp entrypoint contract at
         src/handler.py, so no agent_framework parameter is needed here.
 
+        platformVersion is always set to "V2" so every runtime gets
+        AgentCore Runtime v2's snapshot-restore cold starts with no
+        caller-supplied flag; requires boto3>=1.43.95 for the field to
+        exist on CreateAgentRuntime.
+
     Returns:
         create_agent_runtime API response
     """
@@ -247,6 +282,7 @@ def create_runtime(
         "protocolConfiguration": {"serverProtocol": protocol},
         "environmentVariables": env_vars,
         "tags": _merge_tags(extra=tags),
+        "platformVersion": "V2",
     }
 
     network_config: dict[str, Any] = {"networkMode": network_mode}
@@ -400,6 +436,12 @@ def update_runtime(
         lifecycle_config: Optional updated lifecycle configuration
         region: AWS region name
 
+    Note:
+        platformVersion is always set to "V2" so every redeploy moves the
+        runtime onto AgentCore Runtime v2 as a side effect of the existing
+        in-place update, with no caller-supplied flag; requires
+        boto3>=1.43.95 for the field to exist on UpdateAgentRuntime.
+
     Returns:
         update_agent_runtime API response
     """
@@ -407,7 +449,7 @@ def update_runtime(
 
     client = boto3.client("bedrock-agentcore-control", region_name=region)
 
-    params: dict[str, Any] = {"agentRuntimeId": runtime_id}
+    params: dict[str, Any] = {"agentRuntimeId": runtime_id, "platformVersion": "V2"}
     if description is not None:
         params["description"] = description
     if env_vars is not None:

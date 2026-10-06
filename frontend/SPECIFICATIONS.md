@@ -80,7 +80,10 @@ frontend/
 │   │   ├── LogViewer.tsx       # Paginated log viewer with toggleable line numbers and timestamps
 │   │   ├── TraceList.tsx      # Trace summary table (Trace ID, Start/End Time, Duration, Spans, Events) with clickable rows
 │   │   ├── TraceGraph.tsx     # Interactive waterfall timeline with colored span bars, hover detail panel, click-to-select events, expand/collapse all
-│   │   └── AgentEvaluationsPanel.tsx # Evaluations tab: AgentCore evaluation sources, evaluated sessions/test cases, scores and judge explanations
+│   │   ├── EvaluationRail.tsx # Evaluations tab shell: test cases section + live-traffic section
+│   │   ├── EvaluationTestCases.tsx # Test case authoring, run/rescore, per-evaluator scores with judge explanations, run history
+│   │   ├── LiveTrafficScores.tsx # Read-only AgentCore evaluation sources and their evaluated sessions
+│   │   └── ConfirmDialog.tsx  # Shared confirmation dialog (wraps ui/alert-dialog) for destructive actions
 │   ├── pages/
 │   │   ├── AgentListPage.tsx   # Agents persona: registration form + agent grid
 │   │   ├── AgentDetailPage.tsx # Sessions, latency, invoke, response

@@ -146,6 +146,12 @@ class TestInvokeEndpointWithoutAuth(unittest.TestCase):
             json={"prompt": "Test prompt", "qualifier": "DEFAULT"},
         )
         self.assertEqual(response.status_code, 401)
+        # Assert *which* 401. get_current_user can reject for two different
+        # reasons, and only this one is the fail-closed guard — an active IdP
+        # leaking in would skip the bypass branch entirely and reject with
+        # "Missing authorization token" instead, letting this test pass while
+        # the guard itself was gone.
+        self.assertEqual(response.json()["detail"], "No identity provider configured")
 
     @patch.dict("os.environ", {"LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV": "true"}, clear=True)
     @patch("app.routers.invocations.get_log_events")
@@ -189,6 +195,45 @@ class TestInvokeEndpointWithoutAuth(unittest.TestCase):
             json={"prompt": "Test prompt", "qualifier": "DEFAULT"},
         )
         self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "No identity provider configured")
+
+    @patch.dict("os.environ", {"LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV": "true"}, clear=True)
+    @patch("app.dependencies.auth._get_active_idp_cached")
+    def test_configured_idp_takes_the_bypass_off_the_table(self, mock_active_idp) -> None:
+        """An active external IdP must disable the bypass outright.
+
+        This is the dangerous combination, and the one with no coverage until
+        now: a deployment that has wired up a real IdP but still carries the
+        local-dev opt-in, reached from loopback. Both bypass preconditions are
+        satisfied, so the only thing between an unauthenticated caller and
+        every scope is get_current_user checking for a configured IdP *before*
+        it ever considers the bypass.
+
+        The detail assertion is the point of the test. A bare 401 here would
+        also be produced by the bypass branch failing closed, which would pass
+        even if the IdP check had been reordered after it; "Missing
+        authorization token" can only come from the token-validation path, and
+        so proves the bypass was never reachable.
+        """
+        mock_active_idp.return_value = {
+            "id": 1,
+            "provider_type": "okta",
+            "issuer_url": "https://example.okta.com/oauth2/default",
+            "client_id": "test-client",
+            "audience": None,
+            "jwks_uri": "https://example.okta.com/oauth2/default/v1/keys",
+            "group_claim_path": "groups",
+            "group_mappings": {},
+        }
+
+        loopback_client = TestClient(app, client=("127.0.0.1", 12345))
+        response = loopback_client.post(
+            f"/api/agents/{self.agent.id}/invoke",
+            json={"prompt": "Test prompt", "qualifier": "DEFAULT"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "Missing authorization token")
 
 
 if __name__ == "__main__":

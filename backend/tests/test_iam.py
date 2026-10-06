@@ -221,6 +221,75 @@ class TestBuildBasePolicy(unittest.TestCase):
         self.assertIn("secretsmanager:GetSecretValue", secrets_stmt["Action"])
         self.assertTrue(any("loom/agents/my-agent*" in r for r in secrets_stmt["Resource"]))
 
+    def test_credential_providers_are_scoped_to_this_agent(self) -> None:
+        """H1-3956464: the two credential-provider statements were account-wide.
+
+        Both used a bare `.../{oauth2,apikey}credentialprovider/*`, so any
+        agent's execution role could read every credential provider in the
+        account's token vault — OAuth tokens and API keys belonging to other
+        agents — while the workload-identity and Secrets Manager statements
+        beside them were already scoped per agent.
+
+        The resource prefix has to match how Loom actually names providers,
+        `loom-{agent_name}-...` (routers/agents.py builds
+        "loom-{name}-mcp-{server}", "loom-{name}-a2a-{agent}" and
+        "loom-{name}-litellm-key"). Scoping to a bare "{agent_name}-*" would
+        look correct and silently match nothing, breaking every OAuth
+        integration at runtime instead of at deploy time.
+        """
+        policy = build_base_policy("us-east-1", "123456789012", "my-agent")
+        oauth2_stmt, apikey_stmt = policy["Statement"][1], policy["Statement"][2]
+
+        for stmt, provider_type in (
+            (oauth2_stmt, "oauth2credentialprovider"),
+            (apikey_stmt, "apikeycredentialprovider"),
+        ):
+            with self.subTest(provider_type=provider_type):
+                resources = stmt["Resource"]
+                # No account-wide wildcard survives.
+                self.assertNotIn(
+                    f"arn:aws:bedrock-agentcore:us-east-1:123456789012:token-vault/default/{provider_type}/*",
+                    resources,
+                )
+                self.assertFalse(
+                    any(r.endswith(f"/{provider_type}/*") for r in resources),
+                    f"{provider_type} is still account-wide: {resources}",
+                )
+                # Scoped to this agent's own providers, under the name prefix
+                # Loom actually uses.
+                self.assertEqual(
+                    [
+                        f"arn:aws:bedrock-agentcore:us-east-1:123456789012:token-vault/default/{provider_type}/loom-my-agent-*"
+                    ],
+                    resources,
+                )
+                # No "harness_" variant: unlike log groups and workload
+                # identities, where AgentCore applies that prefix to the
+                # runtime name it auto-provisions, provider names are built by
+                # Loom from the agent record's own name. A harness agent's
+                # providers are "loom-{agent_name}-*" too, so such an entry
+                # would match nothing.
+                self.assertFalse(
+                    any("harness_" in r for r in resources),
+                    f"dead harness_ entry in {provider_type}: {resources}",
+                )
+
+    def test_credential_provider_scope_does_not_match_another_agent(self) -> None:
+        """The prefix must not be loose enough to cover a different agent.
+
+        Guards the subtle failure mode of prefix scoping: a role built for
+        "demo" must not grant access to "demo2"'s providers. Loom's naming
+        puts a literal "-" after the agent name, so the wildcard sits past
+        that separator.
+        """
+        policy = build_base_policy("us-east-1", "123456789012", "demo")
+        resources = policy["Statement"][1]["Resource"] + policy["Statement"][2]["Resource"]
+
+        self.assertTrue(all("/loom-demo-" in r for r in resources if "/loom-demo" in r))
+        # "loom-demo2-mcp-x" must not be matched by a "loom-demo-*" pattern.
+        for r in resources:
+            self.assertFalse(r.endswith("/loom-demo*"), f"too loose: {r}")
+
     def test_build_base_policy_secrets_scoped_by_name_not_id(self) -> None:
         """A shared role built with a prefix as agent_name (e.g. "demo") must
         scope Secrets Manager access by that same prefix, independent of any

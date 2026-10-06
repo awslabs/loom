@@ -1334,6 +1334,15 @@ Dynamic model catalog merging the static list with live Bedrock and LiteLLM sour
 - `delete_execution_role(role_arn: str)` — deletes an IAM execution role.
 - `list_agentcore_roles() -> list[dict]` — lists IAM roles suitable for AgentCore.
 - `list_cognito_pools() -> list[dict]` — lists Cognito user pools.
+- `build_base_policy(region, account_id, agent_name, ...) -> dict` — the inline policy attached to an agent's execution role. **Every statement is scoped per agent by `agent_name`**, which may be one agent's exact name or, for a shared managed role, the common name prefix of a family of agents:
+  - Workload identity — `workload-identity-directory/default/workload-identity/{agent_name}-*` plus a `harness_{agent_name}-*` variant.
+  - Credential providers — `token-vault/default/oauth2credentialprovider/loom-{agent_name}-*` and `.../apikeycredentialprovider/loom-{agent_name}-*`.
+  - CloudWatch Logs — the agent's own runtime log groups, plus `harness_` variants.
+  - Secrets Manager — `secret:loom/agents/{agent_name}*`, plus a `harness_` variant.
+
+**Credential-provider scoping (H1-3956464).** The two credential-provider statements previously used a bare `.../{oauth2,apikey}credentialprovider/*`, so any agent's execution role could read *every* credential provider in the account's token vault — other agents' OAuth tokens and API keys — while the workload-identity and Secrets Manager statements beside them were already per-agent. Both are now scoped, in `build_base_policy()` and in the equivalent `bedrock-agentcore` policy in `shared/iac/role.yaml` (where the single mixed statement was split in two so credential providers could be scoped without touching workload-identity grants).
+
+The `loom-` prefix is load-bearing: Loom names providers `loom-{agent_name}-mcp-{server}`, `loom-{agent_name}-a2a-{agent}` and `loom-{agent_name}-litellm-key` (`routers/agents.py`), so scoping to a bare `{agent_name}-*` would look correct and match nothing, breaking every OAuth integration at runtime rather than at deploy time. There is deliberately **no** `harness_` variant for providers, unlike log groups and workload identities: that prefix is applied by AgentCore to the runtime name it auto-provisions for a harness, whereas provider names are built by Loom from the agent record's own name, so a harness agent's providers are `loom-{agent_name}-*` as well.
 
 ### `services/memory.py`
 

@@ -40,6 +40,16 @@ const GROUP_CLAIM_HINTS: Record<string, string> = {
   generic_oidc: "groups",
 };
 
+// What the external side of a group mapping looks like per provider. Entra
+// emits opaque object IDs in its roles claim; Okta and most OIDC providers
+// emit the group's name.
+const MAPPING_VALUE_HINTS: Record<string, string> = {
+  entra_id: "Role or group Object ID (UUID)",
+  okta: "Okta group name",
+  auth0: "Auth0 role or group name",
+  generic_oidc: "Group value as it appears in the claim",
+};
+
 const LOOM_GROUPS = [
   "t-admin",
   "t-user",
@@ -152,11 +162,16 @@ export function IdentityProviderPanel({ readOnly, onCountChange }: IdentityProvi
   };
 
   const handleJsonExport = (): string => {
-    const groupMappings: Record<string, string> = {};
-    for (const [loomGroup, uuid] of Object.entries(formMappings)) {
-      const trimmed = uuid.trim();
+    // Accumulate into arrays, matching the API shape and handleSave. Assigning
+    // a bare string here meant two Loom groups sharing one IdP group collapsed
+    // to whichever was written last, so an exported manifest silently lost a
+    // mapping that the form and the API both supported.
+    const groupMappings: Record<string, string[]> = {};
+    for (const [loomGroup, external] of Object.entries(formMappings)) {
+      const trimmed = external.trim();
       if (!trimmed) continue;
-      groupMappings[trimmed] = loomGroup;
+      if (!groupMappings[trimmed]) groupMappings[trimmed] = [];
+      groupMappings[trimmed].push(loomGroup);
     }
     return JSON.stringify({
       name: formName,
@@ -317,6 +332,7 @@ export function IdentityProviderPanel({ readOnly, onCountChange }: IdentityProvi
   const editingProvider = editingId ? providers.find((p) => p.id === editingId) : null;
   const activeProvider = providers.find((p) => p.status === "active");
 
+
   const renderForm = (isEdit: boolean) => (
     <div className="space-y-4">
       <JsonConfigSection
@@ -420,10 +436,18 @@ export function IdentityProviderPanel({ readOnly, onCountChange }: IdentityProvi
         </div>
       </div>
 
-      {formProviderType === "entra_id" && (
+      {/* Shown for every provider type. This was previously gated to Entra ID,
+          which meant an Okta or OIDC provider could not be given mappings at
+          all — and since the login path grants no scopes without them, such a
+          provider locks out everyone who authenticates through it. */}
       <div className="space-y-2">
         <Label className="text-xs">Group Mappings</Label>
-        <p className="text-[10px] text-muted-foreground">Map each Loom group to its external IdP group identifier (e.g. Entra security group Object ID).</p>
+        <p className="text-[10px] text-muted-foreground">
+          Map each Loom group to the value your IdP sends in the{" "}
+          <span className="font-mono">{formGroupClaimPath || GROUP_CLAIM_HINTS[formProviderType] || "groups"}</span>{" "}
+          claim. A provider with no mappings grants no scopes, so leaving these blank will lock out
+          anyone who signs in through it.
+        </p>
         {LOOM_GROUPS.map((group) => (
           <div key={group} className="flex gap-2 items-center">
             <span className="text-xs font-mono w-40 shrink-0">{group}</span>
@@ -431,13 +455,12 @@ export function IdentityProviderPanel({ readOnly, onCountChange }: IdentityProvi
             <Input
               value={formMappings[group] ?? ""}
               onChange={(e) => setFormMappings({ ...formMappings, [group]: e.target.value })}
-              placeholder="External group ID (e.g. UUID)"
+              placeholder={MAPPING_VALUE_HINTS[formProviderType] || "External group value"}
               className="flex-1 text-xs font-mono"
             />
           </div>
         ))}
       </div>
-      )}
 
       <div className="flex gap-2">
         <Button size="sm" className="min-w-[120px]" onClick={() => void handleSave()} disabled={saving || !formName.trim() || !formIssuerUrl.trim() || !formClientId.trim()}>

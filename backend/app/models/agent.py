@@ -57,6 +57,10 @@ class Agent(Base):
     vpc_security_group_ids = Column(Text, nullable=True)  # kept for migration; resolved via vpc_config_id at deploy time
     vpc_config_id = Column(Integer, ForeignKey("vpc_configs.id"), nullable=True)
     status_reason = Column(String, nullable=True)  # failureReason from AgentCore API on CREATE_FAILED/UPDATE_FAILED
+    # Kill switch: set while the agent is stopped (deny policy attached to its execution role)
+    stopped_at = Column(DateTime, nullable=True)
+    stopped_by = Column(String, nullable=True)
+    stop_reason = Column(Text, nullable=True)
 
     # Relationships
     sessions = relationship("InvocationSession", back_populates="agent", cascade="all, delete-orphan")
@@ -191,4 +195,7 @@ class Agent(Base):
             "code_interpreter_id": self.code_interpreter_id,
             "vpc_config_id": self.vpc_config_id,
             "status_reason": self.status_reason,
+            "stopped_at": (self.stopped_at.isoformat() + "Z") if self.stopped_at else None,
+            "stopped_by": self.stopped_by,
+            "stop_reason": self.stop_reason,
         }

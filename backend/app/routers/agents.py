@@ -75,6 +75,7 @@ from app.services.harness import (
     delete_harness as delete_harness_api,
 )
 from app.services.secrets import store_secret, get_secret, delete_secret
+from app.services.kill_switch import stopped_message
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,9 @@ class AgentResponse(BaseModel):
     code_interpreter_id: str | None = None
     code_interpreter_status: str | None = None
     status_reason: str | None = None
+    stopped_at: str | None = None
+    stopped_by: str | None = None
+    stop_reason: str | None = None
 
 
 class ConfigEntryResponse(BaseModel):
@@ -281,6 +285,13 @@ class AgentUpdateRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _refuse_if_stopped(agent: Agent) -> None:
+    """Refuse to redeploy a stopped agent: a redeploy can change its execution role and undo the stop."""
+    message = stopped_message(agent)
+    if message:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Cannot redeploy: {message}")
+
+
 def parse_arn(arn: str) -> tuple[str, str, str]:
     """
     Parse AgentCore Runtime ARN to extract region, account_id, and runtime_id.
@@ -3742,6 +3753,7 @@ def refresh_agent(agent_id: int, user: UserInfo = Depends(require_scopes("agent:
 def redeploy_agent_endpoint(agent_id: int, user: UserInfo = Depends(require_scopes("agent:write")), db: Session = Depends(get_db)) -> AgentResponse:
     """Redeploy an agent with its current code and config."""
     agent = get_agent_or_404(agent_id, db, user)
+    _refuse_if_stopped(agent)
 
     if agent.source != "deploy":
         raise HTTPException(
@@ -3825,6 +3837,7 @@ def redeploy_deploy_agent(
     """
     _validate_system_prompt_size(request)
     agent = get_agent_or_404(agent_id, db, user)
+    _refuse_if_stopped(agent)
 
     if agent.source != "deploy":
         raise HTTPException(
@@ -3983,6 +3996,7 @@ def redeploy_harness_agent(
     then updates the local agent record and config.
     """
     agent = get_agent_or_404(agent_id, db, user)
+    _refuse_if_stopped(agent)
 
     if agent.source != "harness":
         raise HTTPException(

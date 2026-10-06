@@ -40,6 +40,43 @@ role.delete:
 		--stack-name $(P_ROLE_STACK) \
 		--no-prompts
 
+# agent kill switch (one deny policy per account; the backend attaches it to stop an agent)
+kill-switch: kill-switch.package kill-switch.deploy
+kill-switch.package:
+	sam package \
+		--profile $(PROFILE) \
+		--region $(REGION) \
+		--template-file $(P_KILL_SWITCH_TEMPLATE) \
+		--output-template-file $(P_KILL_SWITCH_OUTPUT) \
+		--s3-bucket $(BUCKET) \
+		--s3-prefix $(P_KILL_SWITCH_STACK)
+
+kill-switch.deploy:
+	sam deploy \
+		--profile $(PROFILE) \
+		--region $(REGION) \
+		--template-file $(P_KILL_SWITCH_OUTPUT) \
+		--stack-name $(P_KILL_SWITCH_STACK) \
+		--s3-bucket $(BUCKET) \
+		--s3-prefix $(P_KILL_SWITCH_STACK) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--no-confirm-changeset
+
+kill-switch.outputs:
+	@aws cloudformation describe-stacks \
+		--profile $(PROFILE) \
+		--region $(REGION) \
+		--stack-name $(P_KILL_SWITCH_STACK) \
+		--query 'Stacks[0].Outputs' \
+		--output json | jq .
+
+kill-switch.delete:
+	sam delete \
+		--profile $(PROFILE) \
+		--region $(REGION) \
+		--stack-name $(P_KILL_SWITCH_STACK) \
+		--no-prompts
+
 # code interpreter role
 ci-role: ci-role.package ci-role.deploy
 ci-role.package:

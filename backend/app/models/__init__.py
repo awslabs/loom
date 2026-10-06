@@ -19,6 +19,7 @@ from app.models.approval_policy import ApprovalPolicy
 from app.models.approval_log import ApprovalLog
 from app.models.vpc_config import VpcConfig
 from app.models.evaluation import EvaluationTestCase, EvaluationRun
+from app.models.kill_switch import AgentKillSwitchEvent
 
 __all__ = [
     "Agent", "InvocationSession", "Invocation", "ConfigEntry",
@@ -28,5 +29,5 @@ __all__ = [
     "McpServer", "McpTool", "McpServerAccess", "SiteSetting",
     "AuditLogin", "AuditAction", "AuditPageView",
     "ApprovalPolicy", "ApprovalLog", "VpcConfig",
-    "EvaluationTestCase", "EvaluationRun",
+    "EvaluationTestCase", "EvaluationRun", "AgentKillSwitchEvent",
 ]

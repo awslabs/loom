@@ -65,6 +65,7 @@ backend/
 │   │   ├── tag_policy.py    # TagPolicy ORM model (configurable resource tagging)
 │   │   ├── tag_profile.py   # TagProfile ORM model (named tag presets)
 │   │   ├── site_setting.py    # SiteSetting ORM model (configurable site-wide settings)
+│   │   ├── kill_switch.py   # AgentKillSwitchEvent ORM model (audit trail of agent Stop / Resume; survives agent deletion)
 │   │   └── audit.py         # Audit ORM models: AuditLogin, AuditAction, AuditPageView
 │   ├── dependencies/
 │   │   ├── __init__.py
@@ -77,6 +78,7 @@ backend/
 │   │   ├── costs.py          # Cost dashboard: estimated costs + actuals from CloudWatch usage logs
 │   │   ├── traces.py        # Trace retrieval: OTEL log parsing for trace summaries and span detail
 │   │   ├── evaluations.py   # Evaluations: test case CRUD, on-demand scoring runs, plus read-only AgentCore sources/per-trace scores
+│   │   ├── kill_switch.py   # Agent kill switch: GET state, POST stop / resume (reason required, audited)
 │   │   ├── invocations.py   # SSE streaming invoke + session/invocation queries
 │   │   ├── logs.py          # CloudWatch log browsing with pagination + session log retrieval via stream-name matching
 │   │   ├── memories.py      # Memory resource CRUD + strategy mapping
@@ -95,6 +97,7 @@ backend/
 │       ├── deployment.py    # Agent artifact build, runtime CRUD, secret detection
 │       ├── harness.py       # AgentCore Harness API: create, get, delete, invoke stream
 │       ├── iam.py           # IAM role creation/deletion, Cognito pool listing
+│       ├── kill_switch.py   # Agent kill switch: deny policy attach/detach, runtime session stop, state
 │       ├── jwt_validator.py # JWT validation against Cognito JWKS (with caching)
 │       ├── latency.py       # Latency calculation helpers
 │       ├── mcp.py           # MCP server connection test and tool discovery stubs
@@ -237,6 +240,9 @@ uv pip install ".[postgres]"
 | `registered_at` | DATETIME | Timestamp of local registration |
 | `deployed_at` | DATETIME | Deployment timestamp |
 | `last_refreshed_at` | DATETIME | Last time metadata was fetched from AWS |
+| `stopped_at` | DATETIME | Set while the agent is stopped by the kill switch (null when running) |
+| `stopped_by` | VARCHAR | Who stopped the agent |
+| `stop_reason` | TEXT | Why the agent was stopped (required on Stop) |
 
 **Relationships:**
 - `credential_providers` — One-to-many relationship with credential providers created for MCP OAuth2 integrations. Cascade-deleted when agent is deleted.
@@ -421,6 +427,25 @@ A persona with no access rule for a given MCP server has no access (deny by defa
 | `created_at` | DATETIME | Creation timestamp |
 | `updated_at` | DATETIME | Last update timestamp |
 
+### `agent_kill_switch_events` table
+
+One row per Stop or Resume. No foreign key to `agents`, so the audit trail survives the agent's deletion.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER PK AUTOINCREMENT | Internal ID |
+| `agent_id` | INTEGER NOT NULL | Agent the action was taken on (indexed) |
+| `agent_name` / `agent_arn` | VARCHAR | Copied at the time of the action |
+| `action` | VARCHAR NOT NULL | `stop` or `resume` |
+| `reason` | TEXT NOT NULL | Required reason |
+| `actor` | VARCHAR NOT NULL | Who took the action |
+| `role_arn` / `policy_arn` | VARCHAR NOT NULL | Execution role and kill-switch policy |
+| `iam_change` | VARCHAR NOT NULL | `attached`, `already_attached`, `detached` or `already_detached` |
+| `iam_request_id` | VARCHAR | Request ID of the IAM call |
+| `sessions` | TEXT | JSON list of per-session `StopRuntimeSession` results |
+| `shared_with` | TEXT | JSON list of the other agent IDs on the same role |
+| `created_at` | DATETIME NOT NULL | When the action was taken (indexed) |
+
 ### `invocation_sessions` table
 
 | Column | Type | Description |
@@ -555,6 +580,9 @@ The `/api/auth/config` endpoint returns only the pool ID and region. The user cl
 | `POST` | `/api/agents/{agent_id}/refresh` | Re-fetch metadata from AgentCore and update the local record. |
 | `POST` | `/api/agents/{agent_id}/redeploy` | Redeploy an agent with current config. |
 | `PUT` | `/api/agents/{agent_id}/redeploy-harness` | Update and redeploy a harness agent with new configuration (UpdateHarness API). |
+| `GET` | `/api/agents/{agent_id}/kill-switch` | Kill-switch state: Loom's stop record compared with the execution role's attached policies, other agents on the same role, last 20 audit events (`agent:read`). |
+| `POST` | `/api/agents/{agent_id}/stop` | Stop the agent: attach the kill-switch deny policy to its execution role, then stop its recent runtime sessions. Body `{reason, acknowledge_shared_role}`; reason required (`agent:write`). |
+| `POST` | `/api/agents/{agent_id}/resume` | Resume the agent: detach the kill-switch policy; no redeploy. Same body (`agent:write`). |
 | `GET` | `/api/agents/roles` | List IAM roles suitable for AgentCore. |
 | `GET` | `/api/agents/cognito-pools` | List Cognito user pools. |
 | `GET` | `/api/agents/models` | List supported foundation models (with display name and group). Bedrock-only — the merged static/live Bedrock catalog from `model_catalog.get_bedrock_models()`, filtered by `enabled_model_ids`. |

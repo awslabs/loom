@@ -21,6 +21,11 @@ P_ROLE_STACK=loom-role-$(P_AGENT_NAME_SANITIZED)
 P_ROLE_TEMPLATE=iac/role.yaml
 P_ROLE_OUTPUT=iac/role_output.yaml
 
+# Agent kill switch stack configuration (one per account)
+P_KILL_SWITCH_STACK=loom-kill-switch
+P_KILL_SWITCH_TEMPLATE=iac/kill_switch.yaml
+P_KILL_SWITCH_OUTPUT=iac/kill_switch_output.yaml
+
 # Cognito configuration
 P_COGNITO_POOL_NAME=$(COGNITO_POOL_NAME)
 P_COGNITO_DOMAIN=$(COGNITO_DOMAIN)

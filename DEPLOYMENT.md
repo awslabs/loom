@@ -282,6 +282,15 @@ make role        # IAM execution roles (~1 min)
 
 Create IAM roles as needed for your agents.
 
+**Step 4: Deploy the agent kill switch** (optional, once per account)
+
+```bash
+cd shared
+make kill-switch  # One customer-managed deny policy used by Stop / Resume (~1 min)
+```
+
+Stop attaches this policy to an agent's execution role, which then refuses every AWS action except writing logs, traces and metrics, and ends the agent's active sessions. Resume detaches it, with no redeployment. After `make outputs`, `make ecs` passes the policy ARN (`O_KILL_SWITCH_POLICY_ARN`) to the backend and grants the task role `iam:AttachRolePolicy` / `iam:DetachRolePolicy` for that one policy only, on `loom-*` roles only. Without this stack, the Kill switch card on the agent page says the feature is not configured. For local development, set `LOOM_KILL_SWITCH_POLICY_ARN` in `backend/etc/environment.sh`.
+
 ### Phase 3.2 — Capture stack outputs
 
 All stack outputs are stored in `shared/etc/outputs.sh` and automatically sourced by environment files.

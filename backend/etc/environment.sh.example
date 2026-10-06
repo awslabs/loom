@@ -30,6 +30,9 @@ LOOM_ALLOWED_ORIGINS=
 # Agent Registry (from bedrock-agentcore-control list-registries output)
 LOOM_REGISTRY_ID=
 
+# Agent kill switch (from the loom-kill-switch stack output oKillSwitchPolicyArn; empty disables Stop/Resume)
+LOOM_KILL_SWITCH_POLICY_ARN=
+
 # Exports
 export AWS_PROFILE
 export AWS_REGION
@@ -42,6 +45,7 @@ export LOOM_COGNITO_USER_CLIENT_ID
 export LOOM_COGNITO_REGION
 export LOOM_ALLOWED_ORIGINS
 export LOOM_REGISTRY_ID
+export LOOM_KILL_SWITCH_POLICY_ARN
 
 # RDS stack configuration
 P_RDS_STACK=loom-rds

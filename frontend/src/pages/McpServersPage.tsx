@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { getRegistryConfig } from "@/api/settings";
+import { getRegistryRecord } from "@/api/registry";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -69,6 +70,10 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<number | null>(null);
   const [editingServer, setEditingServer] = useState<McpServer | null>(null);
   const [registryEnabled, setRegistryEnabled] = useState(false);
+  // The registry record's own statusReason — why an approver approved or
+  // rejected it. Lives on the record rather than the server row, so it needs
+  // its own fetch, same as the agent and skill detail views.
+  const [registryStatusReason, setRegistryStatusReason] = useState<string | null>(null);
 
   useEffect(() => {
     getRegistryConfig().then((c) => setRegistryEnabled(c.enabled)).catch(() => {});
@@ -92,6 +97,35 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
   };
 
   const selectedServer = servers.find((s) => s.id === selectedServerId) ?? null;
+
+  useEffect(() => {
+    if (!selectedServer?.registry_record_id) {
+      setRegistryStatusReason(null);
+      return;
+    }
+    getRegistryRecord(selectedServer.registry_record_id)
+      .then((rec) => setRegistryStatusReason(rec.status_reason ?? null))
+      .catch(() => setRegistryStatusReason(null));
+  }, [selectedServer?.registry_record_id]);
+
+  const canManageRegistry = !readOnly && registryEnabled;
+
+  const approvalContext = (() => {
+    switch (selectedServer?.registry_status) {
+      case "DRAFT":
+        return `Draft servers are usable only by their owner. Submit for approval to make ${selectedServer.name} attachable by other agents.`;
+      case "PENDING_APPROVAL":
+        return "Pending review by an administrator.";
+      case "APPROVED":
+        return "Approved — attachable by agents in the catalog.";
+      case "REJECTED":
+        return "Rejected. Address the feedback and resubmit for approval.";
+      case "DEPRECATED":
+        return "Deprecated.";
+      default:
+        return "Not yet registered in the catalog registry.";
+    }
+  })();
 
   const dependentsOf = (serverName: string) => agents.filter((a) => a.mcp_names?.includes(serverName));
 
@@ -157,15 +191,6 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
               </div>
             </div>
             <div className="ml-auto flex shrink-0 items-center gap-2">
-              {!readOnly && registryEnabled && (
-                <RegistryActions
-                  resourceType="mcp"
-                  resourceId={selectedServer.id}
-                  registryRecordId={selectedServer.registry_record_id}
-                  registryStatus={selectedServer.registry_status}
-                  onAction={() => void fetchServers()}
-                />
-              )}
               {!readOnly && (
                 <button
                   type="button"
@@ -274,6 +299,29 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
                 )}
               </CardContent>
             </Card>
+
+            {registryEnabled && (selectedServer.registry_status || canManageRegistry) && (
+              <Card className="gap-2.5 py-4">
+                <CardHeader className="px-[18px]">
+                  <CardTitle className="text-[13px] font-semibold">Registry</CardTitle>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-2.5 px-[18px]">
+                  <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{approvalContext}</p>
+                  {registryStatusReason && (
+                    <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{registryStatusReason}</p>
+                  )}
+                  {canManageRegistry && (
+                    <RegistryActions
+                      resourceType="mcp"
+                      resourceId={selectedServer.id}
+                      registryRecordId={selectedServer.registry_record_id}
+                      registryStatus={selectedServer.registry_status}
+                      onAction={() => void fetchServers()}
+                    />
+                  )}
+                </CardContent>
+              </Card>
+            )}
           </div>
         </TabsContent>
         <TabsContent value="access" className="pt-4">

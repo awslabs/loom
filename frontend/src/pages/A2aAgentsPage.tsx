@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { getRegistryConfig } from "@/api/settings";
+import { getRegistryRecord } from "@/api/registry";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -64,6 +65,10 @@ export function A2aAgentsPage({ viewMode, onViewModeChange, readOnly, initialSel
   const [editingAgent, setEditingAgent] = useState<A2aAgent | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [registryEnabled, setRegistryEnabled] = useState(false);
+  // The registry record's own statusReason — why an approver approved or
+  // rejected it. Lives on the record rather than the agent row, so it needs
+  // its own fetch, same as the agent and skill detail views.
+  const [registryStatusReason, setRegistryStatusReason] = useState<string | null>(null);
 
   useEffect(() => {
     getRegistryConfig().then((c) => setRegistryEnabled(c.enabled)).catch(() => {});
@@ -87,6 +92,35 @@ export function A2aAgentsPage({ viewMode, onViewModeChange, readOnly, initialSel
   };
 
   const selectedAgent = a2aAgents.find((a) => a.id === selectedAgentId) ?? null;
+
+  useEffect(() => {
+    if (!selectedAgent?.registry_record_id) {
+      setRegistryStatusReason(null);
+      return;
+    }
+    getRegistryRecord(selectedAgent.registry_record_id)
+      .then((rec) => setRegistryStatusReason(rec.status_reason ?? null))
+      .catch(() => setRegistryStatusReason(null));
+  }, [selectedAgent?.registry_record_id]);
+
+  const canManageRegistry = !readOnly && registryEnabled;
+
+  const approvalContext = (() => {
+    switch (selectedAgent?.registry_status) {
+      case "DRAFT":
+        return `Draft agents are usable only by their owner. Submit for approval to make ${selectedAgent.name} attachable by other agents.`;
+      case "PENDING_APPROVAL":
+        return "Pending review by an administrator.";
+      case "APPROVED":
+        return "Approved — attachable by agents in the catalog.";
+      case "REJECTED":
+        return "Rejected. Address the feedback and resubmit for approval.";
+      case "DEPRECATED":
+        return "Deprecated.";
+      default:
+        return "Not yet registered in the catalog registry.";
+    }
+  })();
 
   const dependentsOf = (agentName: string) => agents.filter((a) => a.a2a_names?.includes(agentName));
 
@@ -169,15 +203,6 @@ export function A2aAgentsPage({ viewMode, onViewModeChange, readOnly, initialSel
               <Button variant="outline" size="sm" onClick={() => void handleRefresh()} disabled={refreshing}>
                 {refreshing ? "Refetching…" : "Refetch card"}
               </Button>
-              {!readOnly && registryEnabled && (
-                <RegistryActions
-                  resourceType="a2a"
-                  resourceId={selectedAgent.id}
-                  registryRecordId={selectedAgent.registry_record_id}
-                  registryStatus={selectedAgent.registry_status}
-                  onAction={() => void fetchAgents()}
-                />
-              )}
               {!readOnly && (
                 <button
                   type="button"
@@ -270,6 +295,29 @@ export function A2aAgentsPage({ viewMode, onViewModeChange, readOnly, initialSel
                 </details>
               </CardContent>
             </Card>
+
+            {registryEnabled && (selectedAgent.registry_status || canManageRegistry) && (
+              <Card className="gap-2.5 py-4">
+                <CardHeader className="px-[18px]">
+                  <CardTitle className="text-[13px] font-semibold">Registry</CardTitle>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-2.5 px-[18px]">
+                  <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{approvalContext}</p>
+                  {registryStatusReason && (
+                    <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{registryStatusReason}</p>
+                  )}
+                  {canManageRegistry && (
+                    <RegistryActions
+                      resourceType="a2a"
+                      resourceId={selectedAgent.id}
+                      registryRecordId={selectedAgent.registry_record_id}
+                      registryStatus={selectedAgent.registry_status}
+                      onAction={() => void fetchAgents()}
+                    />
+                  )}
+                </CardContent>
+              </Card>
+            )}
           </div>
         </TabsContent>
         <TabsContent value="access" className="pt-4">

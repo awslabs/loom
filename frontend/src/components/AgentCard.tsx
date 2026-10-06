@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Loader2, Trash2, Pencil } from "lucide-react";
 import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatTimestamp, capitalize } from "@/lib/format";
 import { statusVariant } from "@/lib/status";
 import { StatusPill } from "@/components/StatusPill";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import type { AgentResponse, ModelOption } from "@/api/types";
 
 interface AgentCardProps {
@@ -75,7 +75,6 @@ function existsInAgentCore(agent: AgentResponse): boolean {
 export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, deleteStartTime, updateStartTime, userGroups = [], registryEnabled = true, maxCost, models = [] }: AgentCardProps) {
   const { timezone } = useTimezone();
   const [confirmingRemove, setConfirmingRemove] = useState(false);
-  const [cleanupAws, setCleanupAws] = useState(false);
   const [now, setNow] = useState(Date.now());
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -276,50 +275,26 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, deleteS
             Details
           </button>
         </div>
-        {confirmingRemove && (
-          <div
-            className="absolute inset-x-0 bottom-0 rounded-b-lg border-t bg-card px-4 py-2 space-y-1.5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {showCleanupOption && (
-              <label className="flex items-end justify-end gap-2 cursor-pointer select-none">
-                <span className="text-[11px] whitespace-nowrap">Also delete in AgentCore</span>
-                <input
-                  type="checkbox"
-                  checked={cleanupAws}
-                  onChange={(e) => setCleanupAws(e.target.checked)}
-                  className="h-3.5 w-3.5 shrink-0 mb-0.5"
-                />
-              </label>
-            )}
-            <div className="flex items-center justify-end gap-2">
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-6 text-xs"
-                onClick={() => {
-                  setConfirmingRemove(false);
-                  setCleanupAws(false);
-                }}
-              >
-                Cancel
-              </Button>
-              <Button
-                size="sm"
-                variant="destructive"
-                className="h-6 text-xs"
-                onClick={() => {
-                  onDelete(agent.id, cleanupAws);
-                  setConfirmingRemove(false);
-                  setCleanupAws(false);
-                }}
-              >
-                Confirm
-              </Button>
-            </div>
-          </div>
-        )}
       </CardContent>
+      <ConfirmDialog
+        open={confirmingRemove}
+        onOpenChange={(open) => {
+          if (!open) {
+            setConfirmingRemove(false);
+          }
+        }}
+        title="Remove agent"
+        description={
+          showCleanupOption
+            ? `Remove agent "${agent.name ?? agent.runtime_id}" from Loom and delete it from AgentCore? This cannot be undone.`
+            : `Remove agent "${agent.name ?? agent.runtime_id}" from Loom? This cannot be undone.`
+        }
+        confirmLabel="Confirm"
+        onConfirm={() => {
+          onDelete(agent.id, showCleanupOption);
+          setConfirmingRemove(false);
+        }}
+      />
     </Card>
   );
 }

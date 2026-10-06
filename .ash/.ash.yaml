@@ -86,6 +86,9 @@ global_settings:
     - path: backend/tests/test_deployment.py
       rule_id: SECRET-GITHUB-TOKEN
       reason: Fake GitHub token pattern used to test secret-pattern detection logic, not a real token.
+    - path: backend/tests/test_evaluations.py
+      rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+      reason: Synthetic AgentCore runtime-ID suffixes in fake log group names (test_agent-AbCdEf1234, other_agent-ZyXwVu9876); resource identifiers, not secret values.
     - path: backend/tests/test_agents_deploy.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using placeholder secret-like strings to exercise agent deployment logic.

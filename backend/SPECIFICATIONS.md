@@ -1640,6 +1640,56 @@ The `_OAuth2Auth` handler in `agents/strands_agent/src/integrations/mcp_client.p
 
 ---
 
+## 14a. Test Isolation Boundary
+
+`tests/conftest.py` keeps the suite independent of the machine it runs on. The
+suite previously ran green for months and then 335 of 893 tests failed at once
+— not from a regression, but because an external IdP had been registered in
+the developer's local `loom.db`. Each boundary below closes one way that
+dependency got in (issue #77).
+
+- **Database.** `LOOM_DATABASE_URL` is pointed at a throwaway SQLite file at
+  conftest *import* time, followed by `init_db()`. It has to be import time,
+  not a fixture: `app/db.py` resolves the URL and builds its engine as a side
+  effect of being imported. Overriding the `get_db` dependency is not
+  sufficient on its own — 18 call sites across `app/` construct a
+  `SessionLocal()` directly rather than taking the dependency, so
+  `dependency_overrides[get_db]` never reaches them.
+  `app/dependencies/auth.py` is one of those sites, which is why a local IdP
+  made every un-overridden router request fail closed with 401.
+- **Auth bypass.** `_default_auth_bypass` supplies the
+  `LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV` opt-in plus a loopback client, since
+  most tests don't care about auth semantics. `test_auth.py` and
+  `test_scopes.py` override it with a no-op to control auth state themselves.
+  `_reset_idp_cache` clears auth's module-level active-IdP cache around every
+  test — shared mutable state that otherwise outlives the test that populated
+  it. It deliberately does *not* force the lookup to return `None`: the
+  database isolation is the single mechanism, and a second fixture papering
+  over it is how the original problem stayed invisible.
+- **Clock.** `_no_real_sleeping` replaces the `time` reference in the modules
+  with polling/backoff loops (`routers/agents`, `services/registry`,
+  `services/cloudwatch`, `services/credential`, `services/evaluations`) with a
+  shim whose `sleep` is a no-op and every other attribute delegates to the
+  real module. Only the sleeping is removed, so the loops keep the
+  break/purge semantics their tests assert against. `_delete_agent_background`
+  alone slept up to 150 seconds per `DELETE /api/agents/{id}`, inside the
+  TestClient request, because FastAPI runs `BackgroundTasks` there — which
+  went unnoticed because auth was rejecting those requests first. Removing the
+  sleeps cut suite runtime roughly in half.
+- **Network.** `_no_outbound_network` denies `socket.getaddrinfo` for
+  hostnames and `socket.create_connection` outright, so a new test cannot
+  silently add egress. Resolving a *numeric* literal is still allowed: the
+  SSRF tests exercise their guard with addresses like `169.254.169.254` and
+  `127.0.0.1`, which `getaddrinfo` parses without touching DNS.
+  `socket.socket` itself is left alone — asyncio's selector event loop builds
+  its self-pipe with `socketpair()`, so denying it breaks every TestClient
+  request rather than catching real egress.
+
+Note that `boto3` is mocked throughout the suite; the leaks were to the local
+filesystem and the clock, not to AWS.
+
+---
+
 ## 15. Makefile Targets
 
 The backend `makefile` sources `etc/environment.sh` and provides:

@@ -31,7 +31,7 @@ import { A2aAccessControl } from "@/components/A2aAccessControl";
 import { SortableCardGrid, SortButton, loadSortDirection, toggleSortDirection, saveSortDirection, type SortDirection } from "@/components/SortableCardGrid";
 import { SortableTableHead, sortRows } from "@/components/SortableTableHead";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
-import { RegistryActions } from "@/components/RegistryActions";
+import { RegistryCard } from "@/components/RegistryCard";
 import type { A2aAgent, A2aAgentCreateRequest, AgentResponse } from "@/api/types";
 
 interface A2aAgentsPageProps {
@@ -104,23 +104,6 @@ export function A2aAgentsPage({ viewMode, onViewModeChange, readOnly, initialSel
   }, [selectedAgent?.registry_record_id]);
 
   const canManageRegistry = !readOnly && registryEnabled;
-
-  const approvalContext = (() => {
-    switch (selectedAgent?.registry_status) {
-      case "DRAFT":
-        return `Draft agents are usable only by their owner. Submit for approval to make ${selectedAgent.name} attachable by other agents.`;
-      case "PENDING_APPROVAL":
-        return "Pending review by an administrator.";
-      case "APPROVED":
-        return "Approved — attachable by agents in the catalog.";
-      case "REJECTED":
-        return "Rejected. Address the feedback and resubmit for approval.";
-      case "DEPRECATED":
-        return "Deprecated.";
-      default:
-        return "Not yet registered in the catalog registry.";
-    }
-  })();
 
   const dependentsOf = (agentName: string) => agents.filter((a) => a.a2a_names?.includes(agentName));
 
@@ -296,27 +279,16 @@ export function A2aAgentsPage({ viewMode, onViewModeChange, readOnly, initialSel
               </CardContent>
             </Card>
 
-            {registryEnabled && (selectedAgent.registry_status || canManageRegistry) && (
-              <Card className="gap-2.5 py-4">
-                <CardHeader className="px-[18px]">
-                  <CardTitle className="text-[13px] font-semibold">Registry</CardTitle>
-                </CardHeader>
-                <CardContent className="flex flex-col gap-2.5 px-[18px]">
-                  <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{approvalContext}</p>
-                  {registryStatusReason && (
-                    <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{registryStatusReason}</p>
-                  )}
-                  {canManageRegistry && (
-                    <RegistryActions
-                      resourceType="a2a"
-                      resourceId={selectedAgent.id}
-                      registryRecordId={selectedAgent.registry_record_id}
-                      registryStatus={selectedAgent.registry_status}
-                      onAction={() => void fetchAgents()}
-                    />
-                  )}
-                </CardContent>
-              </Card>
+            {registryEnabled && (
+              <RegistryCard
+                kind="a2a"
+                resourceId={selectedAgent.id}
+                registryRecordId={selectedAgent.registry_record_id}
+                registryStatus={selectedAgent.registry_status}
+                statusReason={registryStatusReason}
+                canManage={canManageRegistry}
+                onAction={() => void fetchAgents()}
+              />
             )}
           </div>
         </TabsContent>

@@ -32,7 +32,7 @@ import { Input } from "@/components/ui/input";
 import { SortableCardGrid, SortButton, loadSortDirection, toggleSortDirection, saveSortDirection, type SortDirection } from "@/components/SortableCardGrid";
 import { SortableTableHead, sortRows } from "@/components/SortableTableHead";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
-import { RegistryActions } from "@/components/RegistryActions";
+import { RegistryCard } from "@/components/RegistryCard";
 import type { McpServer, McpServerCreateRequest, AgentResponse } from "@/api/types";
 
 interface McpServersPageProps {
@@ -109,23 +109,6 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
   }, [selectedServer?.registry_record_id]);
 
   const canManageRegistry = !readOnly && registryEnabled;
-
-  const approvalContext = (() => {
-    switch (selectedServer?.registry_status) {
-      case "DRAFT":
-        return `Draft servers are usable only by their owner. Submit for approval to make ${selectedServer.name} attachable by other agents.`;
-      case "PENDING_APPROVAL":
-        return "Pending review by an administrator.";
-      case "APPROVED":
-        return "Approved — attachable by agents in the catalog.";
-      case "REJECTED":
-        return "Rejected. Address the feedback and resubmit for approval.";
-      case "DEPRECATED":
-        return "Deprecated.";
-      default:
-        return "Not yet registered in the catalog registry.";
-    }
-  })();
 
   const dependentsOf = (serverName: string) => agents.filter((a) => a.mcp_names?.includes(serverName));
 
@@ -300,27 +283,16 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
               </CardContent>
             </Card>
 
-            {registryEnabled && (selectedServer.registry_status || canManageRegistry) && (
-              <Card className="gap-2.5 py-4">
-                <CardHeader className="px-[18px]">
-                  <CardTitle className="text-[13px] font-semibold">Registry</CardTitle>
-                </CardHeader>
-                <CardContent className="flex flex-col gap-2.5 px-[18px]">
-                  <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{approvalContext}</p>
-                  {registryStatusReason && (
-                    <p className="text-[12.5px] leading-[1.55] text-muted-foreground">{registryStatusReason}</p>
-                  )}
-                  {canManageRegistry && (
-                    <RegistryActions
-                      resourceType="mcp"
-                      resourceId={selectedServer.id}
-                      registryRecordId={selectedServer.registry_record_id}
-                      registryStatus={selectedServer.registry_status}
-                      onAction={() => void fetchServers()}
-                    />
-                  )}
-                </CardContent>
-              </Card>
+            {registryEnabled && (
+              <RegistryCard
+                kind="mcp"
+                resourceId={selectedServer.id}
+                registryRecordId={selectedServer.registry_record_id}
+                registryStatus={selectedServer.registry_status}
+                statusReason={registryStatusReason}
+                canManage={canManageRegistry}
+                onAction={() => void fetchServers()}
+              />
             )}
           </div>
         </TabsContent>

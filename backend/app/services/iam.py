@@ -228,13 +228,31 @@ def build_base_policy(
                 f"arn:aws:bedrock-agentcore:{region}:{account_id}:workload-identity-directory/default/workload-identity/harness_{agent_name}-*",
             ],
         },
+        # Credential providers are scoped per agent, the same way the
+        # workload-identity and Secrets Manager statements around them are. A
+        # bare wildcard here let any agent's execution role read *every*
+        # credential provider in the account's token vault, not just its own
+        # (H1-3956464).
+        #
+        # The prefix has to match how Loom actually names providers:
+        # "loom-{agent_name}-{mcp,a2a}-{target}" and
+        # "loom-{agent_name}-litellm-key" (routers/agents.py). As with the
+        # sibling statements, this still works when agent_name is a shared
+        # role's common name prefix rather than one agent's exact name.
+        #
+        # Note there is deliberately no "harness_" variant here, unlike the
+        # log-group and workload-identity statements: that prefix is applied
+        # by AgentCore to the *runtime* name it auto-provisions for a harness,
+        # whereas provider names are built by Loom from the agent record's own
+        # name. A harness agent's providers are therefore "loom-{agent_name}-*"
+        # too, and a "loom-harness_{agent_name}-*" entry would match nothing.
         {
             "Effect": "Allow",
             "Action": [
                 "bedrock-agentcore:GetResourceOauth2Token",
             ],
             "Resource": [
-                f"arn:aws:bedrock-agentcore:{region}:{account_id}:token-vault/default/oauth2credentialprovider/*",
+                f"arn:aws:bedrock-agentcore:{region}:{account_id}:token-vault/default/oauth2credentialprovider/loom-{agent_name}-*",
             ],
         },
         {
@@ -243,7 +261,7 @@ def build_base_policy(
                 "bedrock-agentcore:GetResourceApiKey",
             ],
             "Resource": [
-                f"arn:aws:bedrock-agentcore:{region}:{account_id}:token-vault/default/apikeycredentialprovider/*",
+                f"arn:aws:bedrock-agentcore:{region}:{account_id}:token-vault/default/apikeycredentialprovider/loom-{agent_name}-*",
             ],
         },
         {
@@ -254,6 +272,12 @@ def build_base_policy(
                 "logs:PutLogEvents",
                 "logs:DescribeLogGroups",
                 "logs:DescribeLogStreams",
+                # Lets AgentCore put a resource policy on the agent's own log
+                # group granting X-Ray write access, which is what delivers
+                # this runtime's spans there (UNIFIED_TRACES_DESTINATION_ENABLED)
+                # instead of the shared aws/spans log group. Requires account-level
+                # CloudWatch Transaction Search to already be enabled.
+                "logs:PutResourcePolicy",
             ],
             "Resource": [
                 f"arn:aws:logs:{region}:{account_id}:log-group:/aws/bedrock-agentcore/runtimes/{agent_name}*",

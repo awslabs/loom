@@ -1265,3 +1265,64 @@ export interface EvaluatedExchangeResponse {
   prompt: string | null;
   answer: string | null;
 }
+
+export interface EvaluatorInfo {
+  id: string;
+  name: string | null;
+  description: string | null;
+  type: string | null;
+  group: string;
+}
+
+export interface EvaluationTestCaseRequest {
+  name: string;
+  prompt: string;
+  expected_response?: string | null;
+  evaluator_ids: string[];
+  pass_threshold: number;
+  model_id?: string | null;
+}
+
+export interface EvaluationTestCase {
+  id: number;
+  agent_id: number;
+  name: string;
+  prompt: string;
+  expected_response: string | null;
+  evaluator_ids: string[];
+  pass_threshold: number;
+  model_id: string | null;
+  last_batch_evaluation_id: string | null;
+  last_run_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface TestCaseScoreDetail {
+  evaluator: string | null;
+  value: number | null;
+  label: string | null;
+  explanation: string | null;
+  level: string | null;
+}
+
+export interface TestCaseRunDetailResponse {
+  status: string | null;
+  scores: TestCaseScoreDetail[];
+  errors: string[];
+  session_id: string | null;
+}
+
+export interface TestCaseRunSummary {
+  batch_evaluation_id: string;
+  status: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  errors: string[];
+}
+
+export interface RunTestCaseResponse {
+  batch_evaluation_id: string;
+  status: string;
+  agent_response: string | null;
+}

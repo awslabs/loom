@@ -19,6 +19,7 @@ from app.models.approval_policy import ApprovalPolicy
 from app.models.approval_log import ApprovalLog
 from app.models.vpc_config import VpcConfig
 from app.models.usage_limit import UsageLimit
+from app.models.evaluation import EvaluationTestCase, EvaluationRun
 
 __all__ = [
     "Agent", "InvocationSession", "Invocation", "ConfigEntry",
@@ -27,5 +28,6 @@ __all__ = [
     "AuthorizerCredential", "Memory", "TagPolicy", "TagProfile",
     "McpServer", "McpTool", "McpServerAccess", "SiteSetting",
     "AuditLogin", "AuditAction", "AuditPageView",
-    "ApprovalPolicy", "ApprovalLog", "VpcConfig","UsageLimit",
+    "ApprovalPolicy", "ApprovalLog", "VpcConfig", "UsageLimit",
+    "EvaluationTestCase", "EvaluationRun",
 ]

@@ -83,19 +83,37 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
+              # Workload identity. Split from the credential-provider
+              # statement below so the two can be scoped independently.
               - Effect: Allow
                 Action:
                   - bedrock-agentcore:CreateWorkloadIdentity
-                  - bedrock-agentcore:GetApiKeyCredential
-                  - bedrock-agentcore:GetResourceApiKey
-                  - bedrock-agentcore:GetResourceOauth2Token
                   - bedrock-agentcore:GetWorkloadAccessToken
                   - bedrock-agentcore:GetWorkloadAccessTokenForJWT
                   - bedrock-agentcore:GetWorkloadAccessTokenForUserId
                 Resource:
-                  - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:apikeycredentialprovider/*"
-                  - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:token-vault/*"
                   - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:workload-identity-directory/*"
+              # Credential providers, scoped per agent. A bare token-vault
+              # wildcard let this role read *every* credential provider in the
+              # account's token vault rather than only the agent's own
+              # (H1-3956464). Loom names every provider it creates
+              # "loom-{agent_name}-{mcp,a2a}-{target}" or
+              # "loom-{agent_name}-litellm-key", mirroring the per-agent
+              # scoping the Secrets Manager policy below already uses.
+              #
+              # The former "apikeycredentialprovider/*" entry is dropped
+              # rather than scoped: there is no top-level resource of that
+              # type, so it matched nothing. The real resource lives under
+              # "token-vault/default/", which is the form the backend builds
+              # when it hands an apiKeyArn to a runtime.
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetApiKeyCredential
+                  - bedrock-agentcore:GetResourceApiKey
+                  - bedrock-agentcore:GetResourceOauth2Token
+                Resource:
+                  - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:token-vault/default/oauth2credentialprovider/loom-${pAgentName}-*"
+                  - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:token-vault/default/apikeycredentialprovider/loom-${pAgentName}-*"
         - PolicyName: secretsmanager
           PolicyDocument:
             Version: "2012-10-17"
@@ -124,6 +142,7 @@ Resources:
                   - logs:FilterLogEvents
                   - logs:GetLogEvents
                   - logs:PutLogEvents
+                  - logs:PutResourcePolicy
                 Resource:
                   - !Sub "arn:aws:logs:${pLogsRegion}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/${pAgentName}*"
                   - !Sub "arn:aws:logs:${pLogsRegion}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/harness_${pAgentName}*"

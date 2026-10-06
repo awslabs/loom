@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,11 @@ import { RegistryActions } from "@/components/RegistryActions";
 import { getRegistryRecord } from "@/api/registry";
 import { ExternalIntegrationSection } from "@/components/ExternalIntegrationSection";
 import { AttachedSkillsSection } from "@/components/AttachedSkillsSection";
-import { AgentEvaluationsPanel } from "@/components/AgentEvaluationsPanel";
+import { EvaluationTestCases, type TestCaseRunSummary } from "@/components/EvaluationTestCases";
+import { LiveTrafficScores } from "@/components/LiveTrafficScores";
+import { EvaluationRail } from "@/components/EvaluationRail";
+import { getAgentEvaluations } from "@/api/evaluations";
+import type { EvaluationOverviewResponse } from "@/api/types";
 import { StatusPill } from "@/components/StatusPill";
 import { statusVariant } from "@/lib/status";
 import { useTimezone } from "@/contexts/TimezoneContext";
@@ -60,6 +64,13 @@ export function AgentDetailPage({
   userGroups = [],
   initialTab = "details",
 }: AgentDetailPageProps) {
+  const [failingCount, setFailingCount] = useState(0);
+  const [errorCount, setErrorCount] = useState(0);
+  const [runningCount, setRunningCount] = useState(0);
+  const [evalFormOpen, setEvalFormOpen] = useState(false);
+  const [testCaseSummary, setTestCaseSummary] = useState<TestCaseRunSummary | null>(null);
+  const [evalOverview, setEvalOverview] = useState<EvaluationOverviewResponse | null>(null);
+  const [evalOverviewLoading, setEvalOverviewLoading] = useState(true);
   const [editingDescription, setEditingDescription] = useState(false);
   const [descriptionDraft, setDescriptionDraft] = useState("");
   const [savingDescription, setSavingDescription] = useState(false);
@@ -134,6 +145,18 @@ export function AgentDetailPage({
       .then((rec) => setRegistryStatusReason(rec.status_reason ?? null))
       .catch(() => setRegistryStatusReason(null));
   }, [registryEnabled, canViewSkills, agent.registry_record_id, agent.registry_status]);
+
+  // Online evaluation configs that score this agent — shared by the Evaluations
+  // tab's "Live traffic scores" card and its rail's "Online evaluation" card,
+  // fetched once here rather than twice.
+  const loadEvalOverview = useCallback(() => {
+    setEvalOverviewLoading(true);
+    getAgentEvaluations(agent.id)
+      .then(setEvalOverview)
+      .catch(() => setEvalOverview({ online: [], batch: [] }))
+      .finally(() => setEvalOverviewLoading(false));
+  }, [agent.id]);
+  useEffect(() => { loadEvalOverview(); }, [loadEvalOverview]);
   const currentUserId = backendUserId ?? user?.username ?? user?.sub;
 
   const handleInvoke = async (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean) => {
@@ -216,7 +239,24 @@ export function AgentDetailPage({
         <TabsList variant="line" className="h-auto justify-start gap-5 rounded-none bg-transparent p-0">
           <TabsTrigger value="details" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">Details</TabsTrigger>
           <TabsTrigger value="invoke" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">Invoke</TabsTrigger>
-          <TabsTrigger value="evaluations" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">Evaluations</TabsTrigger>
+          <TabsTrigger value="evaluations" className="rounded-none px-0.5 pb-2.5 text-[13.5px] font-medium data-[state=active]:shadow-none">
+            <span className="flex items-center gap-1.5">
+              Evaluations
+              {failingCount > 0 ? (
+                <span className="rounded-full bg-destructive px-1.5 py-0 text-[10px] font-medium text-destructive-foreground">
+                  {failingCount} failing
+                </span>
+              ) : errorCount > 0 ? (
+                <span className="rounded-full bg-warning px-1.5 py-0 text-[10px] font-medium text-white">
+                  {errorCount} error
+                </span>
+              ) : runningCount > 0 ? (
+                <span className="rounded-full bg-primary/10 px-1.5 py-0 text-[10px] font-medium text-primary">
+                  {runningCount} running
+                </span>
+              ) : null}
+            </span>
+          </TabsTrigger>
         </TabsList>
       </div>
 
@@ -388,8 +428,40 @@ export function AgentDetailPage({
           <TokenInfoCard userToken={sessionStart?.user_token} oboTokens={tokenInfos} groupMappings={authConfig?.group_mappings} authorizerName={agent.authorizer_config?.name} />
         )}
       </TabsContent>
-      <TabsContent value="evaluations">
-        <AgentEvaluationsPanel agentId={agent.id} />
+      <TabsContent value="evaluations" className={evalFormOpen ? "pt-4" : "grid grid-cols-1 gap-4 pt-4 lg:grid-cols-[1fr_320px]"}>
+        {/* EvaluationTestCases must stay a single persistent element across the
+            evalFormOpen toggle — rendering it from two different branches would
+            remount it (and wipe its own in-progress form state) right as the
+            form opens. */}
+        <div className={evalFormOpen ? "" : "flex min-w-0 flex-col gap-4"}>
+          <EvaluationTestCases
+            agentId={agent.id}
+            agentName={agent.name ?? agent.runtime_id}
+            region={agent.region}
+            runtimeId={agent.runtime_id}
+            sessions={sessions}
+            onRunStarted={loadEvalOverview}
+            onFailingCountChange={setFailingCount}
+            onErrorCountChange={setErrorCount}
+            onRunningCountChange={setRunningCount}
+            onSummaryChange={setTestCaseSummary}
+            onFormOpenChange={setEvalFormOpen}
+            onOpenSession={onSelectSession}
+          />
+          {!evalFormOpen && (
+            <LiveTrafficScores agentId={agent.id} source={evalOverview?.online[0] ?? null} loading={evalOverviewLoading} />
+          )}
+        </div>
+        {!evalFormOpen && (
+          <EvaluationRail
+            region={agent.region}
+            runtimeId={agent.runtime_id}
+            summary={testCaseSummary}
+            onlineSource={evalOverview?.online[0] ?? null}
+            onRefresh={loadEvalOverview}
+            refreshing={evalOverviewLoading}
+          />
+        )}
       </TabsContent>
     </Tabs>
   );

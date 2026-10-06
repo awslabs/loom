@@ -15,6 +15,8 @@ from app.db import Base, get_db
 from app.dependencies.auth import UserInfo, derive_scopes, get_current_user
 from app.main import app
 from app.models.agent import Agent
+from app.models.evaluation import EvaluationTestCase, EvaluationRun
+from app.models.invocation import Invocation
 from app.routers.evaluations import _agent_target
 from app.services import evaluations as evals
 
@@ -294,6 +296,172 @@ class TestReadStreamAndNewest(unittest.TestCase):
         self.assertEqual(evals._newest_event_ms(logs, "/g"), 42)
 
 
+class TestFetchSessionSpans(unittest.TestCase):
+    """On-demand evaluation needs the actual span bodies, downloaded via a
+    Logs Insights query scoped to the session — not just a presence check."""
+
+    def _query_result(self, spans: list[dict]) -> dict:
+        return {
+            "status": "Complete",
+            "results": [
+                [{"field": "@timestamp", "value": "t"}, {"field": "@message", "value": json.dumps(s)}]
+                for s in spans
+            ],
+        }
+
+    @patch("boto3.client")
+    def test_parses_message_field_from_each_result_row(self, mock_boto_client):
+        logs = MagicMock()
+        mock_boto_client.return_value = logs
+        logs.start_query.return_value = {"queryId": "q1"}
+        span = {"name": "invoke_agent Strands Agents", "attributes": {"session.id": "s1"}}
+        logs.get_query_results.return_value = self._query_result([span])
+        result = evals.fetch_session_spans("/g", "s1", "us-east-1")
+        self.assertEqual(result, [span])
+        self.assertIn("s1", logs.start_query.call_args.kwargs["queryString"])
+
+    @patch("boto3.client")
+    def test_missing_log_group_is_empty_not_an_error(self, mock_boto_client):
+        logs = MagicMock()
+        mock_boto_client.return_value = logs
+        logs.start_query.side_effect = _not_found("StartQuery")
+        self.assertEqual(evals.fetch_session_spans("/g", "s1", "us-east-1"), [])
+
+    @patch("boto3.client")
+    def test_query_still_running_after_poll_budget_is_empty(self, mock_boto_client):
+        logs = MagicMock()
+        mock_boto_client.return_value = logs
+        logs.start_query.return_value = {"queryId": "q1"}
+        logs.get_query_results.return_value = {"status": "Running"}
+        with patch("app.services.evaluations.time.sleep"):
+            self.assertEqual(evals.fetch_session_spans("/g", "s1", "us-east-1"), [])
+
+
+def _span(name: str, scope: str = "strands.telemetry.tracer") -> dict:
+    return {"name": name, "scope": {"name": scope}}
+
+
+class TestWaitForSessionSpans(unittest.TestCase):
+    """Caller-controlled replacement for batch evaluation's internal (and
+    apparently too-short) span lookup — retries with mild backoff, and only
+    accepts a result once two consecutive polls see the same span count AND
+    at least one span carries a scope AgentCore's evaluators can read (spans
+    land incrementally and out of evaluator-relevant order, so a stable
+    non-empty result can still be an unevaluatable one)."""
+
+    @patch("app.services.evaluations.time.sleep")
+    @patch("app.services.evaluations.fetch_session_spans")
+    def test_waits_for_the_count_to_stop_growing_before_returning(self, mock_fetch, mock_sleep):
+        # First poll sees only the top-level span; second poll sees the full
+        # trace (now stable); result must be the stable (3-span) one, not
+        # the first non-empty (1-span) one.
+        full = [_span("a"), _span("b"), _span("c")]
+        mock_fetch.side_effect = [[_span("invoke_agent")], full, full]
+        result = evals.wait_for_session_spans("/g", "s1", "us-east-1", timeout_s=5, interval_s=0.01)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(mock_fetch.call_count, 3)
+
+    @patch("app.services.evaluations.time.sleep")
+    @patch("app.services.evaluations.fetch_session_spans")
+    def test_keeps_waiting_while_only_unsupported_scopes_have_landed(self, mock_fetch, mock_sleep):
+        # The HTTP/AWS-SDK spans flush first and can sit at a stable count for
+        # a poll or two before the framework spans Evaluate actually reads
+        # arrive. Returning there is what produced AgentCore's "no spans with
+        # supported scope" ValidationException, so a stable-but-unevaluatable
+        # set must not be accepted.
+        early = [_span("POST /invocations", scope="opentelemetry.instrumentation.starlette")]
+        ready = early + [_span("invoke_agent Strands Agents")]
+        mock_fetch.side_effect = [early, early, ready, ready]
+        result = evals.wait_for_session_spans("/g", "s1", "us-east-1", timeout_s=5, interval_s=0.01)
+        self.assertTrue(evals._has_evaluatable_span(result))
+        self.assertEqual(len(result), 2)
+
+    @patch("app.services.evaluations.time.sleep")
+    @patch("app.services.evaluations.fetch_session_spans")
+    def test_retries_until_timeout_then_gives_up(self, mock_fetch, mock_sleep):
+        mock_fetch.return_value = []
+        result = evals.wait_for_session_spans("/g", "s1", "us-east-1", timeout_s=0.03, interval_s=0.01)
+        self.assertEqual(result, [])
+        self.assertGreater(mock_fetch.call_count, 1)
+
+    @patch("app.services.evaluations.time.sleep")
+    @patch("app.services.evaluations.fetch_session_spans")
+    def test_returns_whatever_it_has_if_still_growing_at_timeout(self, mock_fetch, mock_sleep):
+        # Spans never stabilize within the window — return the last (partial)
+        # result instead of throwing it away, since on-demand evaluation can
+        # still score with a partial trace for some evaluators.
+        mock_fetch.side_effect = lambda *a, **kw: [_span("x")] * (mock_fetch.call_count)
+        result = evals.wait_for_session_spans("/g", "s1", "us-east-1", timeout_s=0.03, interval_s=0.01)
+        self.assertTrue(result)
+
+
+class TestRunOnDemandEvaluation(unittest.TestCase):
+    """Evaluate takes exactly one evaluatorId per call, unlike
+    StartBatchEvaluation's list — so this calls it once per evaluator."""
+
+    @patch("boto3.client")
+    def test_calls_evaluate_once_per_evaluator_with_the_spans(self, mock_boto_client):
+        client = MagicMock()
+        mock_boto_client.return_value = client
+        client.evaluate.side_effect = [
+            {"evaluationResults": [{"evaluatorId": "Builtin.Helpfulness", "value": 0.9, "label": "Great", "explanation": "..."}]},
+            {"evaluationResults": [{"evaluatorId": "Builtin.Correctness", "value": 0.8, "label": "Good", "explanation": "..."}]},
+        ]
+        spans = [{"name": "invoke_agent"}]
+        scores, errors = evals.run_on_demand_evaluation(
+            ["Builtin.Helpfulness", "Builtin.Correctness"], spans, "us-east-1",
+        )
+        self.assertEqual(client.evaluate.call_count, 2)
+        self.assertEqual(client.evaluate.call_args_list[0].kwargs["evaluatorId"], "Builtin.Helpfulness")
+        self.assertEqual(client.evaluate.call_args_list[0].kwargs["evaluationInput"], {"sessionSpans": spans})
+        self.assertEqual(len(scores), 2)
+        self.assertEqual(errors, [])
+
+    @patch("boto3.client")
+    def test_multiple_results_for_the_same_evaluator_are_averaged_into_one_score(self, mock_boto_client):
+        """A trajectory/tool-use evaluator can return one evaluationResult per
+        tool call rather than one for the whole session — those must collapse
+        into a single score row, not be mistaken for extra evaluators."""
+        client = MagicMock()
+        mock_boto_client.return_value = client
+        client.evaluate.return_value = {"evaluationResults": [
+            {"evaluatorId": "Builtin.ToolSelectionAccuracy", "value": 1.0, "label": "Good", "explanation": "call 1"},
+            {"evaluatorId": "Builtin.ToolSelectionAccuracy", "value": 0.0, "label": "Bad", "explanation": "call 2"},
+        ]}
+        scores, errors = evals.run_on_demand_evaluation(["Builtin.ToolSelectionAccuracy"], [{}], "us-east-1")
+        self.assertEqual(len(scores), 1)
+        self.assertEqual(scores[0]["evaluator"], "Builtin.ToolSelectionAccuracy")
+        self.assertEqual(scores[0]["value"], 0.5)
+        self.assertEqual(errors, [])
+
+    @patch("boto3.client")
+    def test_per_result_error_message_goes_to_errors_not_scores(self, mock_boto_client):
+        client = MagicMock()
+        mock_boto_client.return_value = client
+        client.evaluate.return_value = {"evaluationResults": [
+            {"evaluatorId": "Builtin.Helpfulness", "errorMessage": "model timeout", "errorCode": "Timeout"},
+        ]}
+        scores, errors = evals.run_on_demand_evaluation(["Builtin.Helpfulness"], [{}], "us-east-1")
+        self.assertEqual(scores, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("model timeout", errors[0])
+
+    @patch("boto3.client")
+    def test_one_evaluator_failing_does_not_stop_the_others(self, mock_boto_client):
+        client = MagicMock()
+        mock_boto_client.return_value = client
+        client.evaluate.side_effect = [
+            _not_found("Evaluate"),
+            {"evaluationResults": [{"evaluatorId": "Builtin.Correctness", "value": 0.8}]},
+        ]
+        scores, errors = evals.run_on_demand_evaluation(
+            ["Builtin.Helpfulness", "Builtin.Correctness"], [{}], "us-east-1",
+        )
+        self.assertEqual(len(scores), 1)
+        self.assertEqual(scores[0]["evaluator"], "Builtin.Correctness")
+        self.assertEqual(len(errors), 1)
+
+
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
@@ -534,6 +702,536 @@ class TestEvaluationsRouter(unittest.TestCase):
         resp = self.client.get(f"/api/agents/{self.agent.id}/evaluations/traces/{'a' * 32}/exchange")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"prompt": None, "answer": None})
+
+
+class TestEvaluationTestCases(unittest.TestCase):
+    """Tests for saved test cases and running them (create -> invoke -> StartBatchEvaluation)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False},
+                                   poolclass=StaticPool)
+
+        @event.listens_for(cls.engine, "connect")
+        def _set_sqlite_pragma(dbapi_conn, connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        Base.metadata.create_all(bind=cls.engine)
+        cls.TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    def setUp(self):
+        self.session = self.TestingSessionLocal()
+
+        def override_get_db():
+            yield self.session
+
+        app.dependency_overrides[get_db] = override_get_db
+        self.client = TestClient(app)
+        self.agent = Agent(arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test_agent-AbCdEf1234",
+                           runtime_id="test_agent-AbCdEf1234", name="Test Agent", status="READY",
+                           region="us-east-1", account_id="123456789012", log_group=LOG_GROUP)
+        self.agent.set_available_qualifiers(["DEFAULT"])
+        self.session.add(self.agent)
+        self.session.commit()
+        self.session.refresh(self.agent)
+        self._as_admin()
+
+        # _execute_run opens its own DB session (SessionLocal()) rather than
+        # using the get_db dependency override above — without this, its
+        # background task would hit the real app database instead of this
+        # test's in-memory one (and silently operate on whatever agent
+        # happens to share this test's agent id there).
+        self.session_local_patcher = patch("app.routers.evaluations.SessionLocal", self.TestingSessionLocal)
+        self.session_local_patcher.start()
+        self.addCleanup(self.session_local_patcher.stop)
+
+        # _execute_run (which /run and /rescore hand off to BackgroundTasks)
+        # waits for spans itself; short-circuit it everywhere in this class to
+        # "the spans landed immediately", so individual tests only need to
+        # care about this when testing the wait itself. BackgroundTasks run
+        # synchronously (and in-process) under TestClient, so by the time
+        # self.client.post(...) returns, this has already run to completion —
+        # tests check the final state via last-run, not the /run response
+        # body (which is always PENDING, since it's built before the
+        # background task starts).
+        self.wait_patcher = patch("app.routers.evaluations.evals.wait_for_session_spans", return_value=[{"name": "invoke_agent"}])
+        self.wait_patcher.start()
+        self.addCleanup(self.wait_patcher.stop)
+
+        # Default: one evaluator scores 0.9 — PASS. Tests that care about a
+        # specific score, failure, or ERROR outcome override this per-test.
+        eval_patcher = patch(
+            "app.routers.evaluations.evals.run_on_demand_evaluation",
+            return_value=([{"evaluator": "Builtin.Helpfulness", "value": 0.9, "label": "Great", "explanation": "ok", "level": None}], []),
+        )
+        eval_patcher.start()
+        self.addCleanup(eval_patcher.stop)
+
+    def tearDown(self):
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_current_user, None)
+        self.session.rollback()
+        self.session.close()
+        Base.metadata.drop_all(bind=self.engine)
+        Base.metadata.create_all(bind=self.engine)
+
+    def _as_admin(self) -> None:
+        user = UserInfo(sub="u", username="u", groups=["t-admin", "g-admins-super"],
+                        scopes=derive_scopes(["t-admin", "g-admins-super"]))
+        app.dependency_overrides[get_current_user] = lambda: user
+
+    def _as_read_only_user(self) -> None:
+        user = UserInfo(sub="u2", username="u2", groups=["t-user", "g-users-demo"],
+                        scopes=derive_scopes(["t-user", "g-users-demo"]))
+        app.dependency_overrides[get_current_user] = lambda: user
+
+    def _create_test_case(self, **overrides) -> dict:
+        body = {
+            "name": "Greets politely",
+            "prompt": "Say hello",
+            "evaluator_ids": ["Builtin.Helpfulness"],
+        }
+        body.update(overrides)
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases", json=body)
+        self.assertEqual(resp.status_code, 201, resp.text)
+        return resp.json()
+
+    @patch("app.routers.evaluations.evals.list_evaluators")
+    def test_list_evaluators(self, mock_list):
+        mock_list.return_value = [{"id": "Builtin.Helpfulness", "name": "Helpfulness", "description": "d", "type": "Builtin", "group": "Response quality"}]
+        resp = self.client.get(f"/api/agents/{self.agent.id}/evaluations/evaluators")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()[0]["id"], "Builtin.Helpfulness")
+
+    def test_create_and_list_test_case(self):
+        created = self._create_test_case()
+        self.assertEqual(created["name"], "Greets politely")
+        self.assertEqual(created["evaluator_ids"], ["Builtin.Helpfulness"])
+        self.assertIsNone(created["last_batch_evaluation_id"])
+
+        resp = self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()), 1)
+
+    def test_create_requires_at_least_one_evaluator(self):
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases", json={
+            "name": "x", "prompt": "y", "evaluator_ids": [],
+        })
+        self.assertEqual(resp.status_code, 422)
+
+    def test_update_test_case(self):
+        created = self._create_test_case()
+        resp = self.client.put(
+            f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}",
+            json={"name": "Renamed", "prompt": "New prompt", "evaluator_ids": ["Builtin.Correctness"]},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["name"], "Renamed")
+        self.assertEqual(resp.json()["evaluator_ids"], ["Builtin.Correctness"])
+
+    def test_update_unknown_test_case_is_404(self):
+        resp = self.client.put(
+            f"/api/agents/{self.agent.id}/evaluations/test-cases/9999",
+            json={"name": "x", "prompt": "y", "evaluator_ids": ["Builtin.Correctness"]},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_delete_test_case(self):
+        created = self._create_test_case()
+        resp = self.client.delete(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}")
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases").json(), [])
+
+    def test_read_only_user_cannot_create_or_run(self):
+        created = self._create_test_case()
+        self._as_read_only_user()
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases", json={
+            "name": "x", "prompt": "y", "evaluator_ids": ["Builtin.Correctness"],
+        })
+        self.assertEqual(resp.status_code, 403)
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run")
+        self.assertEqual(resp.status_code, 403)
+
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_run_invokes_agent_then_evaluates_the_session(self, mock_invoke):
+        mock_invoke.return_value = iter([
+            {"type": "text", "content": "Hel"},
+            {"type": "text", "content": "lo!"},
+            {"type": "structured", "content": {"ignored": True}},
+        ])
+        created = self._create_test_case(expected_response="A friendly greeting")
+
+        # /run returns almost immediately — the actual work happens in a
+        # BackgroundTask, which TestClient runs synchronously before handing
+        # back the response, so the DB already reflects the final state by
+        # the time this call returns even though the response body itself
+        # was built beforehand and is always PENDING/no agent_response.
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertEqual(body["status"], "PENDING")
+        self.assertIsNone(body["agent_response"])
+
+        # Invoked with this test case's own prompt against the agent's runtime.
+        self.assertEqual(mock_invoke.call_args.kwargs["prompt"], "Say hello")
+        self.assertEqual(mock_invoke.call_args.kwargs["arn"], self.agent.arn)
+
+        # Spans were scored (setUp's run_on_demand_evaluation mock) and that
+        # result is readable back for this test case.
+        last_run = self.client.get(
+            f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/last-run"
+        ).json()
+        self.assertEqual(last_run["status"], "COMPLETED")
+        self.assertTrue(last_run["scores"])
+
+        # The agent's response was persisted as a real invocation.
+        invocation = self.session.query(Invocation).filter(Invocation.session_id == last_run["session_id"]).first()
+        self.assertEqual(invocation.response_text, "Hello!")
+
+        # The test case remembers its latest run for the UI to link to.
+        updated = self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases").json()[0]
+        self.assertIsNotNone(updated["last_batch_evaluation_id"])
+        self.assertIsNotNone(updated["last_run_at"])
+
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_run_invoke_failure_ends_the_run_as_error(self, mock_invoke):
+        # The agent is invoked in the background now, so a failure there
+        # can't 502 the (already-sent) /run response — it just means the run
+        # ends up ERROR, readable back via last-run.
+        mock_invoke.side_effect = Exception("runtime unreachable")
+        created = self._create_test_case()
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        last_run = self.client.get(
+            f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/last-run"
+        ).json()
+        self.assertEqual(last_run["status"], "ERROR")
+        self.assertIn("runtime unreachable", last_run["errors"][0])
+
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_run_with_no_scores_from_any_evaluator_is_error_not_a_502(self, mock_invoke):
+        # On-demand evaluation never raises up to the endpoint for a scoring
+        # failure — a per-evaluator error (or every evaluator failing) just
+        # means the run has no scores. There's no AWS call left in /run that
+        # can itself 502 the way StartBatchEvaluation could.
+        mock_invoke.return_value = iter([])
+        with patch("app.routers.evaluations.evals.run_on_demand_evaluation", return_value=([], ["No spans were found"])):
+            created = self._create_test_case()
+            resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        last_run = self.client.get(
+            f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/last-run"
+        ).json()
+        self.assertEqual(last_run["status"], "ERROR")
+
+    def test_run_unknown_test_case_is_404(self):
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/9999/run")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_create_defaults_pass_threshold(self):
+        created = self._create_test_case()
+        self.assertEqual(created["pass_threshold"], 0.7)
+
+    def test_create_defaults_model_id_to_none(self):
+        created = self._create_test_case()
+        self.assertIsNone(created["model_id"])
+
+    def test_create_with_model_override(self):
+        created = self._create_test_case(model_id="anthropic.claude-3-5-sonnet")
+        self.assertEqual(created["model_id"], "anthropic.claude-3-5-sonnet")
+
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_run_passes_model_override_to_invoke(self, mock_invoke):
+        mock_invoke.return_value = iter([])
+        created = self._create_test_case(model_id="anthropic.claude-3-5-sonnet")
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mock_invoke.call_args.kwargs["runtime_model_id"], "anthropic.claude-3-5-sonnet")
+
+    def test_create_with_custom_pass_threshold(self):
+        created = self._create_test_case(pass_threshold=0.9)
+        self.assertEqual(created["pass_threshold"], 0.9)
+
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_run_without_authorizer_passes_no_access_token(self, mock_invoke):
+        mock_invoke.return_value = iter([])
+        created = self._create_test_case()
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(mock_invoke.call_args.kwargs["access_token"])
+
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_run_with_authorizer_forwards_caller_bearer_token(self, mock_invoke):
+        self.agent.set_authorizer_config({"type": "cognito", "pool_id": "us-east-1_test"})
+        self.session.commit()
+        mock_invoke.return_value = iter([])
+        created = self._create_test_case()
+        resp = self.client.post(
+            f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run",
+            headers={"Authorization": "Bearer my-test-token"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mock_invoke.call_args.kwargs["access_token"], "my-test-token")
+
+    @patch("app.routers.evaluations.get_cognito_token")
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_run_with_authorizer_falls_back_to_agent_m2m_credentials(self, mock_invoke, mock_token):
+        self.agent.set_authorizer_config({"type": "cognito", "pool_id": "us-east-1_test"})
+        self.session.commit()
+        from app.models.config_entry import ConfigEntry
+        self.session.add(ConfigEntry(agent_id=self.agent.id, key="COGNITO_CLIENT_ID", value="client-123"))
+        self.session.add(ConfigEntry(agent_id=self.agent.id, key="COGNITO_CLIENT_SECRET_ARN", value="arn:aws:secretsmanager:us-east-1:123456789012:secret:x"))
+        self.session.commit()
+        mock_token.return_value = {"access_token": "m2m-token"}
+        mock_invoke.return_value = iter([])
+        created = self._create_test_case()
+
+        with patch("app.routers.evaluations.get_secret", return_value="shh"):
+            resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mock_invoke.call_args.kwargs["access_token"], "m2m-token")
+
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_rescore_reuses_session_without_invoking_agent(self, mock_invoke):
+        created = self._create_test_case()
+        first = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run")
+        self.assertEqual(first.status_code, 200, first.text)
+        first_run_id = first.json()["batch_evaluation_id"]
+        mock_invoke.reset_mock()
+
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/rescore")
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertNotEqual(resp.json()["batch_evaluation_id"], first_run_id)  # a new EvaluationRun row
+        mock_invoke.assert_not_called()  # no re-invocation — same session rescored
+
+        listed = self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases").json()
+        updated = next(tc for tc in listed if tc["id"] == created["id"])
+        self.assertEqual(updated["last_batch_evaluation_id"], resp.json()["batch_evaluation_id"])
+
+    def test_rescore_without_prior_run_is_400(self):
+        created = self._create_test_case()
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/rescore")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_pass_threshold_out_of_range_is_422(self):
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases", json={
+            "name": "x", "prompt": "y", "evaluator_ids": ["Builtin.Correctness"], "pass_threshold": 1.5,
+        })
+        self.assertEqual(resp.status_code, 422)
+
+    def test_last_run_with_no_run_yet_is_empty(self):
+        created = self._create_test_case()
+        resp = self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/last-run")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": None, "scores": [], "errors": [], "session_id": None})
+
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_last_run_returns_status_and_scores(self, mock_invoke):
+        mock_invoke.return_value = iter([])
+        with patch(
+            "app.routers.evaluations.evals.run_on_demand_evaluation",
+            return_value=([{"evaluator": "Builtin.Helpfulness", "value": 0.9, "label": "Good", "explanation": "e", "level": None}], []),
+        ):
+            created = self._create_test_case()
+            self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run")
+
+        resp = self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/last-run")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "COMPLETED")
+        self.assertEqual(resp.json()["scores"][0]["evaluator"], "Builtin.Helpfulness")
+        self.assertTrue(resp.json()["session_id"])
+
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_run_ends_as_error_when_spans_never_show_up(self, mock_invoke):
+        mock_invoke.return_value = iter([])
+        with patch("app.routers.evaluations.evals.wait_for_session_spans", return_value=[]) as mock_wait:
+            created = self._create_test_case()
+            resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["status"], "PENDING")  # response is built before the background task runs
+        mock_wait.assert_called_once()
+        last_run = self.client.get(
+            f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/last-run"
+        ).json()
+        self.assertEqual(last_run["status"], "ERROR")
+        self.assertIn("No trace spans", last_run["errors"][0])
+
+    def test_last_run_unknown_test_case_is_404(self):
+        resp = self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases/9999/last-run")
+        self.assertEqual(resp.status_code, 404)
+
+
+class TestExecuteRun(unittest.TestCase):
+    """_execute_run is the BackgroundTask /run and /rescore hand everything
+    off to — it opens its own DB session (SessionLocal), so these patch that
+    to the test's in-memory engine rather than going through the FastAPI
+    dependency override the HTTP-level tests use."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        Base.metadata.create_all(bind=cls.engine)
+        cls.TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    def setUp(self):
+        self.session = self.TestingSessionLocal()
+        self.agent = Agent(arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test_agent-AbCdEf1234",
+                           runtime_id="test_agent-AbCdEf1234", name="Test Agent", status="READY",
+                           region="us-east-1", account_id="123456789012", log_group=LOG_GROUP)
+        self.agent.set_available_qualifiers(["DEFAULT"])
+        self.session.add(self.agent)
+        self.session.commit()
+        self.session.refresh(self.agent)
+        self.tc = EvaluationTestCase(agent_id=self.agent.id, name="t", prompt="p")
+        self.tc.set_evaluator_ids(["Builtin.Helpfulness"])
+        self.session.add(self.tc)
+        self.session.commit()
+        self.session.refresh(self.tc)
+        self.run = EvaluationRun(test_case_id=self.tc.id, session_id="s1", status="PENDING")
+        self.session.add(self.run)
+        self.session.commit()
+        self.session.refresh(self.run)
+
+        self.session_local_patcher = patch("app.routers.evaluations.SessionLocal", self.TestingSessionLocal)
+        self.session_local_patcher.start()
+
+    def tearDown(self):
+        self.session_local_patcher.stop()
+        self.session.rollback()
+        self.session.close()
+        Base.metadata.drop_all(bind=self.engine)
+        Base.metadata.create_all(bind=self.engine)
+
+    @patch("app.routers.evaluations.evals.run_on_demand_evaluation")
+    @patch("app.routers.evaluations.evals.wait_for_session_spans")
+    def test_moves_through_phases_and_completes(self, mock_wait, mock_evaluate):
+        mock_wait.return_value = [{"name": "invoke_agent"}]
+        mock_evaluate.return_value = ([{"evaluator": "Builtin.Helpfulness", "value": 0.9, "label": None, "explanation": None, "level": None}], [])
+        from app.routers.evaluations import _execute_run
+        # prompt=None skips invocation, as a rescore would.
+        _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", None, None, None, None)
+        mock_wait.assert_called_once()
+        self.session.expire_all()
+        updated = self.session.query(EvaluationRun).filter_by(id=self.run.id).first()
+        self.assertEqual(updated.status, "COMPLETED")
+        self.assertEqual(updated.get_results()[0]["evaluator"], "Builtin.Helpfulness")
+
+    @patch("app.routers.evaluations.evals.wait_for_session_spans")
+    def test_no_spans_ends_as_error(self, mock_wait):
+        mock_wait.return_value = []
+        from app.routers.evaluations import _execute_run
+        _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", None, None, None, None)
+        self.session.expire_all()
+        updated = self.session.query(EvaluationRun).filter_by(id=self.run.id).first()
+        self.assertEqual(updated.status, "ERROR")
+        self.assertTrue(updated.get_errors())
+
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_invoke_failure_ends_as_error_without_waiting_for_spans(self, mock_invoke):
+        mock_invoke.side_effect = Exception("runtime unreachable")
+        from app.routers.evaluations import _execute_run
+        _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", "say hi", None, None, "u")
+        self.session.expire_all()
+        updated = self.session.query(EvaluationRun).filter_by(id=self.run.id).first()
+        self.assertEqual(updated.status, "ERROR")
+        self.assertIn("runtime unreachable", updated.get_errors()[0])
+
+    def test_missing_run_returns_quietly(self):
+        from app.routers.evaluations import _execute_run
+        _execute_run(999999, self.tc.id, self.agent.id, "s1", None, None, None, None)  # must not raise
+
+
+class TestFinishEvaluationRun(unittest.TestCase):
+    """Status logic: COMPLETED needs at least one real score; a per-evaluator
+    error alone (with no scores at all) is ERROR."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        Base.metadata.create_all(bind=cls.engine)
+        cls.TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    def setUp(self):
+        self.session = self.TestingSessionLocal()
+        agent = Agent(arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test_agent-AbCdEf1234",
+                     runtime_id="test_agent-AbCdEf1234", name="Test Agent", status="READY",
+                     region="us-east-1", account_id="123456789012", log_group=LOG_GROUP)
+        agent.set_available_qualifiers(["DEFAULT"])
+        self.session.add(agent)
+        self.session.commit()
+        self.tc = EvaluationTestCase(agent_id=agent.id, name="t", prompt="p")
+        self.tc.set_evaluator_ids(["Builtin.Helpfulness"])
+        self.session.add(self.tc)
+        self.session.commit()
+        self.run = EvaluationRun(test_case_id=self.tc.id, session_id="s1", status="PENDING")
+        self.session.add(self.run)
+        self.session.commit()
+
+    def tearDown(self):
+        self.session.rollback()
+        self.session.close()
+        Base.metadata.drop_all(bind=self.engine)
+        Base.metadata.create_all(bind=self.engine)
+
+    @patch("app.routers.evaluations.evals.run_on_demand_evaluation")
+    def test_one_score_is_completed_but_keeps_the_other_evaluators_errors(self, mock_evaluate):
+        mock_evaluate.return_value = ([{"evaluator": "Builtin.Helpfulness", "value": 0.9, "label": None, "explanation": None, "level": None}], ["Builtin.Correctness: timeout"])
+        from app.routers.evaluations import _finish_evaluation_run
+        _finish_evaluation_run(self.session, self.run, self.tc, [{"name": "invoke_agent"}], "us-east-1")
+        self.assertEqual(self.run.status, "COMPLETED")
+        # Kept, not discarded — a run that scored with one evaluator but
+        # silently failed on others used to look like a clean result.
+        self.assertEqual(self.run.get_errors(), ["Builtin.Correctness: timeout"])
+
+    @patch("app.routers.evaluations.evals.run_on_demand_evaluation")
+    def test_zero_scores_is_error(self, mock_evaluate):
+        mock_evaluate.return_value = ([], ["No spans were found"])
+        from app.routers.evaluations import _finish_evaluation_run
+        _finish_evaluation_run(self.session, self.run, self.tc, [{"name": "invoke_agent"}], "us-east-1")
+        self.assertEqual(self.run.status, "ERROR")
+        self.assertEqual(self.run.get_errors(), ["No spans were found"])
+
+
+class TestEvaluatorGroups(unittest.TestCase):
+    """Tests for the evaluator category grouping used by the picker UI."""
+
+    def test_every_real_evaluator_id_maps_to_a_named_group(self):
+        all_ids = [eid for _, ids in evals.EVALUATOR_GROUPS for eid in ids]
+        self.assertEqual(len(all_ids), len(set(all_ids)), "an evaluator ID appears in more than one group")
+        self.assertIn("Builtin.Helpfulness", all_ids)
+        self.assertIn("ThirdParty.DeepEval.Bias", all_ids)
+
+    @patch("app.services.evaluations._paginate")
+    @patch("boto3.client")
+    def test_list_evaluators_tags_group_and_falls_back_to_other(self, mock_boto_client, mock_paginate):
+        mock_paginate.return_value = [
+            {"evaluatorId": "Builtin.Helpfulness", "evaluatorName": "Helpfulness", "status": "ACTIVE", "evaluatorType": "Builtin"},
+            {"evaluatorId": "Custom.my-eval", "evaluatorName": None, "status": "ACTIVE", "evaluatorType": "Custom"},
+            {"evaluatorId": "Builtin.Disabled", "status": "DISABLED"},
+        ]
+        result = evals.list_evaluators("us-east-1")
+        self.assertEqual(len(result), 2)  # the DISABLED one is excluded
+        self.assertEqual(result[0]["group"], "Response quality")
+        self.assertEqual(result[1]["group"], "Other")
+        self.assertEqual(result[1]["name"], "my-eval")  # falls back to the short ID when evaluatorName is absent
+
+    @patch("app.services.evaluations._paginate")
+    @patch("boto3.client")
+    def test_list_evaluators_excludes_third_party(self, mock_boto_client, mock_paginate):
+        mock_paginate.return_value = [
+            {"evaluatorId": "Builtin.Helpfulness", "evaluatorName": "Helpfulness", "status": "ACTIVE", "evaluatorType": "Builtin"},
+            {"evaluatorId": "ThirdParty.DeepEval.Bias", "evaluatorName": "Bias", "status": "ACTIVE", "evaluatorType": "ThirdParty"},
+            {"evaluatorId": "Custom.my-eval", "evaluatorName": None, "status": "ACTIVE", "evaluatorType": "Custom"},
+        ]
+        result = evals.list_evaluators("us-east-1")
+        ids = [e["id"] for e in result]
+        self.assertIn("Builtin.Helpfulness", ids)
+        self.assertIn("Custom.my-eval", ids)
+        self.assertNotIn("ThirdParty.DeepEval.Bias", ids)
 
 
 if __name__ == "__main__":

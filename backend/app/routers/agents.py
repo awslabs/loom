@@ -41,9 +41,11 @@ from app.services.deployment import (
     create_runtime,
     delete_runtime,
     delete_runtime_endpoint,
+    env_vars_total_bytes,
     get_runtime,
     get_runtime_endpoint,
-    MAX_INLINE_CONFIG_JSON_LENGTH,
+    MAX_ENV_VARS_TOTAL_BYTES,
+    MAX_SYSTEM_PROMPT_BYTES,
     update_runtime,
 )
 from app.services.iam import (
@@ -598,12 +600,19 @@ def _sync_attached_skills(agent_id: int, skill_ids: list[str], db: Session) -> N
     db.commit()
 
 
-def _config_json_env_var(config_json: str, artifact_bucket: str, artifact_key: str, region: str) -> dict[str, str]:
+def _config_json_env_var(config_json: str, other_env_vars: dict[str, str], artifact_bucket: str, artifact_key: str, region: str) -> dict[str, str]:
     """Return the single env var entry that carries AGENT_CONFIG_JSON to the
-    runtime — inline if it fits within CreateAgentRuntime's 5000-char
-    environmentVariables value limit, otherwise baked into the artifact zip
-    and referenced via AGENT_CONFIG_PATH instead (see bake_config_into_artifact)."""
-    if len(config_json) <= MAX_INLINE_CONFIG_JSON_LENGTH:
+    runtime — inline if the *total* environmentVariables payload (this value
+    plus every other env var already being sent) fits under AgentCore Runtime
+    V2's aggregate cap, otherwise baked into the artifact zip and referenced
+    via AGENT_CONFIG_PATH instead (see bake_config_into_artifact).
+
+    other_env_vars must NOT include AGENT_CONFIG_JSON/AGENT_CONFIG_PATH —
+    callers pass the rest of the env var set so the total can be computed
+    accurately rather than checking this one value in isolation.
+    """
+    total = env_vars_total_bytes(other_env_vars) + len("AGENT_CONFIG_JSON") + len(config_json.encode("utf-8"))
+    if total <= MAX_ENV_VARS_TOTAL_BYTES:
         return {"AGENT_CONFIG_JSON": config_json}
     bake_config_into_artifact(artifact_bucket, artifact_key, config_json, region)
     return {"AGENT_CONFIG_PATH": "agent_config.json"}
@@ -658,6 +667,33 @@ def _get_attached_skill_prompt_text(agent_id: int, db: Session) -> str:
     if not sections:
         return ""
     return "## Attached Skills\n\n" + "\n\n---\n\n".join(sections)
+
+
+def _validate_system_prompt_size(request: AgentCreateRequest) -> None:
+    """Fail fast, before any AWS work, if the user-authored system prompt
+    alone is big enough to risk blowing CreateAgentRuntime/UpdateAgentRuntime's
+    V2 environmentVariables payload cap — see MAX_SYSTEM_PROMPT_BYTES.
+
+    Deliberately checks only agent_description/behavioral_guidelines/
+    output_expectations (what the deploy form's prompt field controls), not
+    the final system_prompt after skill content is folded in — a large
+    attached skill is expected and already handled by baking the config into
+    the artifact, not by blocking the deploy.
+    """
+    total = (
+        len((request.agent_description or "").encode("utf-8"))
+        + len((request.behavioral_guidelines or "").encode("utf-8"))
+        + len((request.output_expectations or "").encode("utf-8"))
+    )
+    if total > MAX_SYSTEM_PROMPT_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"System prompt is too large ({total} bytes, limit {MAX_SYSTEM_PROMPT_BYTES}). "
+                "AgentCore Runtime V2 caps the total environmentVariables payload at 1536 bytes, "
+                "and the prompt shares that budget with fixed config and integrations. Shorten it and try again."
+            ),
+        )
 
 
 def _build_system_prompt(request: AgentCreateRequest, skill_prompt_text: str = "") -> str:
@@ -1014,6 +1050,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     heavy work (credential providers, IAM role, artifact build, runtime creation)
     as a background task so the API returns immediately.
     """
+    _validate_system_prompt_size(request)
     if not request.name:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1623,19 +1660,19 @@ def _deploy_agent_background(
         env_vars = {
             "AGENT_CONFIG_JSON": config_json,
             "OTEL_SERVICE_NAME": request.name,
-            "OTEL_TRACES_EXPORTER": "otlp",
-            "OTEL_PROPAGATORS": "xray,tracecontext,b3",
+            "OTEL_PROPAGATORS": "xray,tracecontext,b3,baggage",
             "WORKLOAD_IDENTITY_NAME": f"loom-{request.name}",
             "AGENT_OBSERVABILITY_ENABLED": "true",
             "AWS_REGION": region,
         }
         # env_vars (above) is persisted to ConfigEntry as Loom's own record of
         # this agent's config — runtime_env_vars is what actually goes to
-        # CreateAgentRuntime, which caps each environmentVariables value at
-        # 5000 chars; swap the inline JSON for a baked-artifact file path
-        # when it's too large (see _config_json_env_var).
+        # CreateAgentRuntime, which (on V2, the default platform version) caps
+        # the *total* environmentVariables payload at 1536 bytes; swap the
+        # inline JSON for a baked-artifact file path when it's too large
+        # (see _config_json_env_var).
         runtime_env_vars = {k: v for k, v in env_vars.items() if k != "AGENT_CONFIG_JSON"}
-        runtime_env_vars.update(_config_json_env_var(config_json, artifact_bucket, artifact_key, region))
+        runtime_env_vars.update(_config_json_env_var(config_json, runtime_env_vars, artifact_bucket, artifact_key, region))
 
         for key, value in env_vars.items():
             db.add(ConfigEntry(
@@ -1994,14 +2031,13 @@ def _update_deploy_agent_background(
         env_vars = {
             "AGENT_CONFIG_JSON": config_json,
             "OTEL_SERVICE_NAME": request.name,
-            "OTEL_TRACES_EXPORTER": "otlp",
-            "OTEL_PROPAGATORS": "xray,tracecontext,b3",
+            "OTEL_PROPAGATORS": "xray,tracecontext,b3,baggage",
             "WORKLOAD_IDENTITY_NAME": f"loom-{request.name}",
             "AGENT_OBSERVABILITY_ENABLED": "true",
             "AWS_REGION": region,
         }
         runtime_env_vars = {k: v for k, v in env_vars.items() if k != "AGENT_CONFIG_JSON"}
-        runtime_env_vars.update(_config_json_env_var(config_json, artifact_bucket, artifact_key, region))
+        runtime_env_vars.update(_config_json_env_var(config_json, runtime_env_vars, artifact_bucket, artifact_key, region))
 
         # Replace config entries
         db.query(ConfigEntry).filter(ConfigEntry.agent_id == agent_id).delete()
@@ -3324,6 +3360,8 @@ def get_agent_status(
     return response
 
 
+
+
 @router.delete("/{agent_id}", response_model=AgentResponse)
 def delete_agent(
     agent_id: int,
@@ -3347,6 +3385,11 @@ def delete_agent(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Demo admins can only delete agents in the 'demo' group"
             )
+
+    # Test cases and their EvaluationRun history cascade-delete with the
+    # agent — on-demand evaluation (unlike the batch evaluation this used to
+    # call StartBatchEvaluation+DeleteBatchEvaluation for) never creates a
+    # persisted AWS-side resource, so there's nothing to clean up there.
 
     # Extract credential provider names from agent config for cleanup
     config_map = {e.key: e.value for e in agent.config_entries}
@@ -3719,13 +3762,13 @@ def redeploy_agent_endpoint(agent_id: int, user: UserInfo = Depends(require_scop
     db.commit()
 
     # This endpoint reuses the existing artifact unchanged — but if the
-    # stored AGENT_CONFIG_JSON grew too large for environmentVariables
-    # (e.g. a skill was attached since the last full redeploy), the
+    # stored env vars now exceed AgentCore Runtime V2's total environmentVariables
+    # payload cap (e.g. a skill was attached since the last full redeploy), the
     # artifact needs a fresh rebuild just to bake the config file into it.
     artifact_bucket: str | None = None
     artifact_key: str | None = None
     config_json = env_vars.get("AGENT_CONFIG_JSON")
-    if config_json and len(config_json) > MAX_INLINE_CONFIG_JSON_LENGTH:
+    if config_json and env_vars_total_bytes(env_vars) > MAX_ENV_VARS_TOTAL_BYTES:
         try:
             artifact_bucket, artifact_key = build_agent_artifact(
                 agent.region, agent_framework=agent.agent_framework or "strands"
@@ -3738,8 +3781,8 @@ def redeploy_agent_endpoint(agent_id: int, user: UserInfo = Depends(require_scop
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Failed to rebuild artifact: {str(e)}"
             )
-        env_vars = {k: v for k, v in env_vars.items() if k != "AGENT_CONFIG_JSON"}
-        env_vars.update(_config_json_env_var(config_json, artifact_bucket, artifact_key, agent.region))
+        other_env_vars = {k: v for k, v in env_vars.items() if k != "AGENT_CONFIG_JSON"}
+        env_vars = other_env_vars | _config_json_env_var(config_json, other_env_vars, artifact_bucket, artifact_key, agent.region)
 
     try:
         response = update_runtime(
@@ -3780,6 +3823,7 @@ def redeploy_deploy_agent(
     Rebuilds the artifact and calls update_agent_runtime in-place so the
     existing runtime ID and ARN are preserved.
     """
+    _validate_system_prompt_size(request)
     agent = get_agent_or_404(agent_id, db, user)
 
     if agent.source != "deploy":

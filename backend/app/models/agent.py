@@ -63,6 +63,7 @@ class Agent(Base):
     config_entries = relationship("ConfigEntry", back_populates="agent", cascade="all, delete-orphan")
     credential_providers = relationship("CredentialProvider", back_populates="agent", cascade="all, delete-orphan")
     integrations = relationship("Integration", back_populates="agent", cascade="all, delete-orphan")
+    evaluation_test_cases = relationship("EvaluationTestCase", back_populates="agent", cascade="all, delete-orphan")
 
     def get_available_qualifiers(self) -> list[str]:
         """Parse available_qualifiers from JSON text."""

@@ -76,7 +76,7 @@ backend/
 │   │   ├── settings.py      # Settings endpoints (tag policy CRUD, tag profile CRUD)
 │   │   ├── costs.py          # Cost dashboard: estimated costs + actuals from CloudWatch usage logs
 │   │   ├── traces.py        # Trace retrieval: OTEL log parsing for trace summaries and span detail
-│   │   ├── evaluations.py   # Read-only AgentCore Evaluations results: sources, per-trace scores, evaluated exchange
+│   │   ├── evaluations.py   # Evaluations: test case CRUD, on-demand scoring runs, plus read-only AgentCore sources/per-trace scores
 │   │   ├── invocations.py   # SSE streaming invoke + session/invocation queries
 │   │   ├── logs.py          # CloudWatch log browsing with pagination + session log retrieval via stream-name matching
 │   │   ├── memories.py      # Memory resource CRUD + strategy mapping
@@ -970,7 +970,7 @@ At agent create/update/redeploy time, `_get_attached_skill_prompt_text(agent_id,
 
 `AgentCreateRequest.skill_ids` (list of registry record IDs) lets skills be attached at initial deploy/harness-create time too, not just afterward via `AttachedSkillsSection.tsx` — validated against `APPROVED` status the same way as MCP/A2A, then reconciled onto `Integration` rows by `_sync_attached_skills()` (add missing, remove deselected) immediately after the agent row exists but before the system prompt is built, so a skill picked at creation time is included in that agent's very first deployed system prompt. `_sync_attached_skills()` is also called from both full-redeploy paths, so the "Update Agent" form's skill checklist and `AttachedSkillsSection.tsx`'s attach/detach both converge on the same rows.
 
-**CreateAgentRuntime/UpdateAgentRuntime's `environmentVariables` map caps every value at 5000 characters** — `AGENT_CONFIG_JSON` (system prompt + integrations) can exceed that once a skill's SKILL.md content is folded in. `_config_json_env_var()` guards this: if the JSON fits under `MAX_INLINE_CONFIG_JSON_LENGTH` (4500, leaving headroom) it's sent inline as before; otherwise `bake_config_into_artifact()` (`services/deployment.py`) injects it as `agent_config.json` into the already-built artifact zip in S3, and `AGENT_CONFIG_PATH=agent_config.json` is sent instead of the inline JSON — the runtime's `config.py` (`load_config()`) already supported this file-path fallback (relative to the artifact root, which is the process's CWD since `entryPoint` runs `src/handler.py` relative to it), so no runtime code changes were needed, and no new IAM permissions either. Loom's own `ConfigEntry` bookkeeping always keeps the full inline JSON regardless of what was actually sent to AWS. The lightweight `POST /{agent_id}/redeploy` (which normally reuses the existing artifact untouched) rebuilds the artifact only in this oversized-config case, purely to bake the file in.
+**CreateAgentRuntime/UpdateAgentRuntime's `environmentVariables` has two caps that matter here**: a per-value max of 5000 characters (the API shape's declared limit, any platform version), and — the binding one in practice — AgentCore Runtime V2 (the default platform version for every agent, see `platformVersion="V2"` in `create_runtime`/`update_runtime`) enforces a much smaller **aggregate payload cap of 1536 bytes across every key+value combined**, confirmed from a live error ("The environment variable payload is 2835 bytes, exceeding the 1536-byte maximum supported for V2 agents"). `AGENT_CONFIG_JSON` (system prompt + integrations) blows past that total on almost any real system prompt, let alone one with a skill folded in. `_config_json_env_var()` guards this: it sums the UTF-8 byte length of every other env var plus the candidate `AGENT_CONFIG_JSON` value (`env_vars_total_bytes()`, `services/deployment.py`) and sends it inline only if the total fits under `MAX_ENV_VARS_TOTAL_BYTES` (1200, leaving headroom below AWS's 1536); otherwise `bake_config_into_artifact()` injects it as `agent_config.json` into the already-built artifact zip in S3, and `AGENT_CONFIG_PATH=agent_config.json` is sent instead of the inline JSON — the runtime's `config.py` (`load_config()`) already supported this file-path fallback (relative to the artifact root, which is the process's CWD since `entryPoint` runs `src/handler.py` relative to it), so no runtime code changes were needed, and no new IAM permissions either. Loom's own `ConfigEntry` bookkeeping always keeps the full inline JSON regardless of what was actually sent to AWS. The lightweight `POST /{agent_id}/redeploy` (which normally reuses the existing artifact untouched) rebuilds the artifact only when the stored env vars' total now exceeds the cap, purely to bake the file in.
 
 ### Agent Invocation (SSE Streaming)
 
@@ -1240,6 +1240,18 @@ Core authentication and authorization module. Provides:
   - **`admin:read`/`admin:write`** (global deployment configuration — site settings, registry config, LiteLLM proxy config, enabled models, VPC configs): held only by `g-admins-super`. No domain-scoped admin group holds these, since none of the actions they gate are scoped to a `loom:group` — a write by any domain admin would apply to the whole deployment.
 - `UserInfo` dataclass — `sub`, `username`, `groups`, `scopes` (derived from groups).
 - `get_current_user(request: Request) -> UserInfo` — validates JWT, extracts `cognito:groups`, derives scopes. In bypass mode (no `LOOM_COGNITO_USER_POOL_ID`), returns a super-admin with all scopes. Raises 401 on missing/invalid token.
+
+**Local-dev bypass: defence in depth around an open-admin-panel risk.** The bypass returns every scope with no authentication, and its precondition — neither Cognito nor an active external IdP configured — is also the state of a *fresh deployment that intends to use an external IdP but has not registered it yet*. The two remaining gates are therefore all that separate such a deployment from an open admin panel, and neither was robust alone:
+
+- `LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV` is a boolean that can be left behind in a task definition.
+- `_is_loopback_request()` reads `request.client`, which is only as trustworthy as the proxy config in front of the app. uvicorn ships with `proxy_headers=True` and `forwarded_allow_ips` defaulting to `FORWARDED_ALLOW_IPS` or `127.0.0.1`; widening that past loopback — a common change behind a load balancer, made to recover real client IPs, and one that looks unrelated to auth — lets a remote caller send `X-Forwarded-For: 127.0.0.1` and have `request.client.host` read back as loopback.
+
+Two defences, both verified by mutation testing in `tests/test_auth_bypass_hardening.py`:
+
+- `assert_local_dev_bypass_not_deployed()` is called as the **first** step of the application lifespan and raises, refusing to serve any request, when the opt-in is set alongside a container-runtime signal (`ECS_CONTAINER_METADATA_URI_V4`, `ECS_CONTAINER_METADATA_URI`, `AWS_EXECUTION_ENV` — injected by ECS into every task, absent on a developer machine) or a `FORWARDED_ALLOW_IPS` value that trusts non-loopback peers. Misconfiguration is a config-time event, so it fails at config time, in front of whoever deployed it.
+- `_bypass_allowed_for_request()` additionally refuses the bypass for any request carrying a proxy forwarding header (`X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP`, `Forwarded`). The spoof above cannot work *without* one of those headers, and uvicorn leaves them readable after rewriting `request.client`, while a genuine direct-to-loopback dev request never carries one.
+
+Note `get_current_user_token()` has the same no-IdP precondition and returns the caller's token *unvalidated* in that state. It grants no scopes, so it does not escalate privilege, but it is the remaining instance of this pattern — tracked for removal alongside the bypass itself.
 - `require_scopes(*required: str)` — factory returning a FastAPI dependency that checks the user has ALL required scopes. Raises 403 on missing scope. Used as `Depends(require_scopes("scope:name"))` on all guarded endpoints.
 - `oauth2_scheme` — `OAuth2AuthorizationCodeBearer` for OpenAPI docs with all 21 scopes.
 - `get_current_user_token(request: Request) -> str | None` — legacy helper for token forwarding to AgentCore invocations.
@@ -1344,6 +1356,15 @@ Dynamic model catalog merging the static list with live Bedrock and LiteLLM sour
 - `delete_execution_role(role_arn: str)` — deletes an IAM execution role.
 - `list_agentcore_roles() -> list[dict]` — lists IAM roles suitable for AgentCore.
 - `list_cognito_pools() -> list[dict]` — lists Cognito user pools.
+- `build_base_policy(region, account_id, agent_name, ...) -> dict` — the inline policy attached to an agent's execution role. **Every statement is scoped per agent by `agent_name`**, which may be one agent's exact name or, for a shared managed role, the common name prefix of a family of agents:
+  - Workload identity — `workload-identity-directory/default/workload-identity/{agent_name}-*` plus a `harness_{agent_name}-*` variant.
+  - Credential providers — `token-vault/default/oauth2credentialprovider/loom-{agent_name}-*` and `.../apikeycredentialprovider/loom-{agent_name}-*`.
+  - CloudWatch Logs — the agent's own runtime log groups, plus `harness_` variants.
+  - Secrets Manager — `secret:loom/agents/{agent_name}*`, plus a `harness_` variant.
+
+**Credential-provider scoping (H1-3956464).** The two credential-provider statements previously used a bare `.../{oauth2,apikey}credentialprovider/*`, so any agent's execution role could read *every* credential provider in the account's token vault — other agents' OAuth tokens and API keys — while the workload-identity and Secrets Manager statements beside them were already per-agent. Both are now scoped, in `build_base_policy()` and in the equivalent `bedrock-agentcore` policy in `shared/iac/role.yaml` (where the single mixed statement was split in two so credential providers could be scoped without touching workload-identity grants).
+
+The `loom-` prefix is load-bearing: Loom names providers `loom-{agent_name}-mcp-{server}`, `loom-{agent_name}-a2a-{agent}` and `loom-{agent_name}-litellm-key` (`routers/agents.py`), so scoping to a bare `{agent_name}-*` would look correct and match nothing, breaking every OAuth integration at runtime rather than at deploy time. There is deliberately **no** `harness_` variant for providers, unlike log groups and workload identities: that prefix is applied by AgentCore to the runtime name it auto-provisions for a harness, whereas provider names are built by Loom from the agent record's own name, so a harness agent's providers are `loom-{agent_name}-*` as well.
 
 ### `services/memory.py`
 
@@ -1659,6 +1680,56 @@ The `_OAuth2Auth` handler in `agents/strands_agent/src/integrations/mcp_client.p
 - `session_start` SSE includes `delegation_mode` and `has_user_access_token` (when OBO).
 - Agent runtime logs OBO exchange attempts at INFO level (provider name, user sub, success/failure).
 - OBO failures surface as user-friendly SSE errors, not 500s.
+
+---
+
+## 14a. Test Isolation Boundary
+
+`tests/conftest.py` keeps the suite independent of the machine it runs on. The
+suite previously ran green for months and then 335 of 893 tests failed at once
+— not from a regression, but because an external IdP had been registered in
+the developer's local `loom.db`. Each boundary below closes one way that
+dependency got in (issue #77).
+
+- **Database.** `LOOM_DATABASE_URL` is pointed at a throwaway SQLite file at
+  conftest *import* time, followed by `init_db()`. It has to be import time,
+  not a fixture: `app/db.py` resolves the URL and builds its engine as a side
+  effect of being imported. Overriding the `get_db` dependency is not
+  sufficient on its own — 18 call sites across `app/` construct a
+  `SessionLocal()` directly rather than taking the dependency, so
+  `dependency_overrides[get_db]` never reaches them.
+  `app/dependencies/auth.py` is one of those sites, which is why a local IdP
+  made every un-overridden router request fail closed with 401.
+- **Auth bypass.** `_default_auth_bypass` supplies the
+  `LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV` opt-in plus a loopback client, since
+  most tests don't care about auth semantics. `test_auth.py` and
+  `test_scopes.py` override it with a no-op to control auth state themselves.
+  `_reset_idp_cache` clears auth's module-level active-IdP cache around every
+  test — shared mutable state that otherwise outlives the test that populated
+  it. It deliberately does *not* force the lookup to return `None`: the
+  database isolation is the single mechanism, and a second fixture papering
+  over it is how the original problem stayed invisible.
+- **Clock.** `_no_real_sleeping` replaces the `time` reference in the modules
+  with polling/backoff loops (`routers/agents`, `services/registry`,
+  `services/cloudwatch`, `services/credential`, `services/evaluations`) with a
+  shim whose `sleep` is a no-op and every other attribute delegates to the
+  real module. Only the sleeping is removed, so the loops keep the
+  break/purge semantics their tests assert against. `_delete_agent_background`
+  alone slept up to 150 seconds per `DELETE /api/agents/{id}`, inside the
+  TestClient request, because FastAPI runs `BackgroundTasks` there — which
+  went unnoticed because auth was rejecting those requests first. Removing the
+  sleeps cut suite runtime roughly in half.
+- **Network.** `_no_outbound_network` denies `socket.getaddrinfo` for
+  hostnames and `socket.create_connection` outright, so a new test cannot
+  silently add egress. Resolving a *numeric* literal is still allowed: the
+  SSRF tests exercise their guard with addresses like `169.254.169.254` and
+  `127.0.0.1`, which `getaddrinfo` parses without touching DNS.
+  `socket.socket` itself is left alone — asyncio's selector event loop builds
+  its self-pipe with `socketpair()`, so denying it breaks every TestClient
+  request rather than catching real egress.
+
+Note that `boto3` is mocked throughout the suite; the leaks were to the local
+filesystem and the clock, not to AWS.
 
 ---
 

@@ -26,6 +26,13 @@ const DEPLOY_IN_PROGRESS = new Set([
 function needsPolling(agent: AgentResponse): boolean {
   return (
     agent.status === "DELETING" ||
+    // Auto-registration flips registry_status from null to "REGISTERING"
+    // synchronously the moment deployment_status reaches READY, then settles
+    // it to DRAFT (or back to null on failure) via a background task a few
+    // seconds later — keep polling until that settles, or the UI is left
+    // showing a stale "unregistered"/"REGISTERING" state after the agent
+    // itself has already finished deploying.
+    agent.registry_status === "REGISTERING" ||
     (agent.source === "deploy" &&
       (agent.status === "CREATING" || agent.status === "UPDATING" ||
         DEPLOY_IN_PROGRESS.has(agent.deployment_status ?? "") ||

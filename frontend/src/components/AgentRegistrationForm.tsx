@@ -48,6 +48,19 @@ function estimateTokens(text: string): number {
   return Math.round(text.length / 4);
 }
 
+// Mirrors backend/app/services/deployment.py's MAX_SYSTEM_PROMPT_BYTES — a
+// custom-deploy agent's system prompt shares AgentCore Runtime V2's 1536-byte
+// total environmentVariables budget with fixed OTEL/workload-identity vars
+// and the AGENT_CONFIG_JSON skeleton, so it's capped well below 1536 itself.
+// Only applies to deploymentType === "custom" (CreateAgentRuntime) — managed/
+// harness agents pass their system prompt via CreateHarness's dedicated
+// systemPrompt field instead and aren't subject to this limit.
+const MAX_SYSTEM_PROMPT_BYTES = 500;
+
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
 function truncateMiddle(value: string, keep = 8): string {
   if (value.length <= keep * 2 + 1) return value;
   return `${value.slice(0, keep)}…${value.slice(-keep)}`;
@@ -508,6 +521,11 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   };
 
   const hasValidationErrors = nameError !== "" || idleTimeoutError !== "" || maxLifetimeError !== "";
+  // Only custom-deploy agents share AgentCore Runtime V2's environmentVariables
+  // budget for their system prompt — managed/harness agents pass it via
+  // CreateHarness's dedicated systemPrompt field and aren't capped by this.
+  const systemPromptBytes = utf8ByteLength(systemPrompt);
+  const systemPromptTooLarge = deploymentType === "custom" && systemPromptBytes > MAX_SYSTEM_PROMPT_BYTES;
 
   // Shared by the "View / Paste JSON" disclosure and manifest import (R5/R6):
   // parses a manifest and applies it to form state. Returns an error string on
@@ -651,7 +669,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   // (jumping directly to a step) stays unrestricted — steps show state, not gates.
   const stepValid = (i: number): boolean => {
     switch (i) {
-      case 1: return !!name.trim() && !nameError && !!modelId;
+      case 1: return !!name.trim() && !nameError && !!modelId && !systemPromptTooLarge;
       case 2: return !!selectedRoleId;
       case 4: return !idleTimeoutError && !maxLifetimeError;
       default: return true;
@@ -866,7 +884,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       };
       await onDeployHarness(request);
     } else {
-      if (!name.trim() || !modelId || !selectedRoleId || !onDeploy || hasValidationErrors) return;
+      if (!name.trim() || !modelId || !selectedRoleId || !onDeploy || hasValidationErrors || systemPromptTooLarge) return;
 
       // Resolve managed role to role_arn
       const roleArn = selectedRole?.role_arn ?? null;
@@ -1167,11 +1185,22 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                   <label className="text-sm font-medium">System prompt</label>
                   <div className="ml-auto flex items-center gap-3 font-mono text-[10.5px] text-muted-foreground">
                     <span>{systemPrompt.length} chars · ~{estimateTokens(systemPrompt)} tokens</span>
+                    {deploymentType === "custom" && (
+                      <span className={systemPromptTooLarge ? "text-destructive font-medium" : ""}>
+                        {systemPromptBytes} / {MAX_SYSTEM_PROMPT_BYTES} bytes
+                      </span>
+                    )}
                     <button type="button" onClick={() => setSystemPromptExpanded(!systemPromptExpanded)} className="text-primary hover:underline">
                       {systemPromptExpanded ? "collapse" : "expand"}
                     </button>
                   </div>
                 </div>
+                {systemPromptTooLarge && (
+                  <p className="text-xs text-destructive">
+                    System prompt is too large ({systemPromptBytes} bytes, limit {MAX_SYSTEM_PROMPT_BYTES}). AgentCore Runtime V2
+                    caps the total environment variable payload at 1536 bytes, shared with fixed config and integrations — shorten the prompt to deploy.
+                  </p>
+                )}
                 <div className={`flex rounded-md border bg-muted/30 ${systemPromptExpanded ? "h-[28rem]" : "h-56"}`}>
                   <div
                     ref={promptGutterRef}
@@ -1649,45 +1678,47 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                 })()}
               </section>
 
-              <section className="flex items-center gap-3 rounded-md border px-3 py-2.5">
-                <span className="space-y-0.5">
-                  <span className="block text-sm font-medium">Code interpreter</span>
-                  <span className="block text-[11.5px] text-muted-foreground">Sandboxed Python execution. Turn on to pick a network mode and role.</span>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setCodeInterpreterEnabled(!codeInterpreterEnabled)}
-                  className={`ml-auto flex h-[17px] w-[30px] shrink-0 items-center rounded-full px-0.5 transition-colors ${codeInterpreterEnabled ? "justify-end bg-primary" : "justify-start bg-muted"}`}
-                >
-                  <span className="h-3.5 w-3.5 rounded-full bg-white shadow" />
-                </button>
-              </section>
-              {codeInterpreterEnabled && (
-                <div className="-mt-2 grid grid-cols-3 gap-2">
-                  <Select value={codeInterpreterNetworkMode} onValueChange={setCodeInterpreterNetworkMode}>
-                    <SelectTrigger className="text-sm"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="SANDBOX">Sandbox</SelectItem>
-                      <SelectItem value="PUBLIC">Public</SelectItem>
-                      <SelectItem value="VPC" disabled>VPC (coming soon)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <Select value={codeInterpreterRegion} onValueChange={setCodeInterpreterRegion}>
-                    <SelectTrigger className="text-sm font-mono"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="us-east-1">us-east-1 — N. Virginia</SelectItem>
-                      <SelectItem value="us-west-2">us-west-2 — Oregon</SelectItem>
-                      <SelectItem value="eu-west-1">eu-west-1 — Ireland</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <SearchableSelect
-                    options={managedRoles.filter((r) => r.role_type === "code_interpreter").map((r) => ({ value: r.id.toString(), label: r.role_name }))}
-                    value={codeInterpreterRoleId}
-                    onValueChange={setCodeInterpreterRoleId}
-                    placeholder="Execution role (optional)"
-                  />
+              <section className="rounded-md border px-3 py-2.5 space-y-2.5">
+                <div className="flex items-center gap-3">
+                  <span className="space-y-0.5">
+                    <span className="block text-sm font-medium">Code interpreter</span>
+                    <span className="block text-[11.5px] text-muted-foreground">Sandboxed Python execution. Turn on to pick a network mode and role.</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCodeInterpreterEnabled(!codeInterpreterEnabled)}
+                    className={`ml-auto flex h-[17px] w-[30px] shrink-0 items-center rounded-full px-0.5 transition-colors ${codeInterpreterEnabled ? "justify-end bg-primary" : "justify-start bg-muted"}`}
+                  >
+                    <span className="h-3.5 w-3.5 rounded-full bg-white shadow" />
+                  </button>
                 </div>
-              )}
+                {codeInterpreterEnabled && (
+                  <div className="grid grid-cols-3 gap-2 border-t pt-2.5">
+                    <Select value={codeInterpreterNetworkMode} onValueChange={setCodeInterpreterNetworkMode}>
+                      <SelectTrigger className="text-sm"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="SANDBOX">Sandbox</SelectItem>
+                        <SelectItem value="PUBLIC">Public</SelectItem>
+                        <SelectItem value="VPC" disabled>VPC (coming soon)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Select value={codeInterpreterRegion} onValueChange={setCodeInterpreterRegion}>
+                      <SelectTrigger className="text-sm font-mono"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="us-east-1">us-east-1 — N. Virginia</SelectItem>
+                        <SelectItem value="us-west-2">us-west-2 — Oregon</SelectItem>
+                        <SelectItem value="eu-west-1">eu-west-1 — Ireland</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <SearchableSelect
+                      options={managedRoles.filter((r) => r.role_type === "code_interpreter").map((r) => ({ value: r.id.toString(), label: r.role_name }))}
+                      value={codeInterpreterRoleId}
+                      onValueChange={setCodeInterpreterRoleId}
+                      placeholder="Execution role (optional)"
+                    />
+                  </div>
+                )}
+              </section>
 
               <section className="space-y-2">
                 <div className="flex items-center gap-2">
@@ -1725,9 +1756,12 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
               </div>
               )}
 
-              {/* Lifecycle & tags (16e) */}
-              {step === 4 && (
-              <div className="rounded-lg border bg-card">
+              {/* Lifecycle & tags (16e). Always mounted (just hidden off-step) rather
+                  than conditionally rendered — ResourceTagFields resolves tagValues
+                  from the selected profile in a mount-time effect, and manifest
+                  import can jump straight to the review step without this step
+                  ever rendering, which left tagValues stuck empty. */}
+              <div className={step === 4 ? "rounded-lg border bg-card" : "hidden"}>
               <div className="space-y-5 p-4">
               <div className="space-y-0.5">
                 <h3 className="text-sm font-semibold">Lifecycle &amp; tags</h3>
@@ -1820,7 +1854,6 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                 </Button>
               </div>
               </div>
-              )}
 
               {/* R7/R8: shared review + deploy step for both the guided wizard and manifest import (16f). */}
               {step === REVIEW_STEP && (() => {
@@ -1858,6 +1891,11 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                                 return <span key={id} className="rounded border px-1.5 py-0.5 text-[11px]">{chipLabel(m?.display_name ?? id)}</span>;
                               })}
                             </div>
+                          )}
+                          {systemPromptTooLarge && (
+                            <p className="text-[11.5px] text-destructive">
+                              System prompt is too large ({systemPromptBytes} / {MAX_SYSTEM_PROMPT_BYTES} bytes) — shorten it to deploy.
+                            </p>
                           )}
                         </div>
                         <button type="button" onClick={() => setStep(1)} className="text-right text-xs text-primary hover:underline">Edit</button>
@@ -1915,7 +1953,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                           type="submit"
                           size="sm"
                           className="flex-1"
-                          disabled={isLoading || !name.trim() || !modelId || !selectedRoleId || (deploymentType === "custom" ? !onDeploy : !onDeployHarness) || hasValidationErrors}
+                          disabled={isLoading || !name.trim() || !modelId || !selectedRoleId || (deploymentType === "custom" ? !onDeploy : !onDeployHarness) || hasValidationErrors || systemPromptTooLarge}
                         >
                           {isLoading ? "Deploying..." : (exportAgentId ? "Update agent" : (deploymentType === "managed" ? "Deploy harness" : "Deploy agent"))}
                         </Button>

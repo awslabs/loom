@@ -158,6 +158,8 @@ def _migrate_add_columns(eng) -> None:
         ("a2a_agents", "resource_tags", "TEXT"),
         ("usage_limits", "cached_usage", "FLOAT"),
         ("usage_limits", "cached_usage_updated_at", "DATETIME"),
+        ("evaluation_test_cases", "pass_threshold", "REAL DEFAULT 0.7"),
+        ("evaluation_test_cases", "model_id", "VARCHAR"),
     ]
 
     is_postgres = eng.dialect.name == "postgresql"

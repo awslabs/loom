@@ -91,7 +91,8 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 ### Observability and UX
 - OpenTelemetry observability with ADOT auto-instrumentation and OTEL trace visualization
 - Interactive waterfall timeline for inspecting per-span events from OTEL log records
-- Read-only AgentCore Evaluations results per agent (Evaluations tab): online evaluation configs and batch evaluation runs that score the agent, when each last ran, and every evaluated session or test case with its scores, judge explanations, and the prompt and answer
+- Agent evaluations (Evaluations tab): save a prompt plus a selection of AgentCore's built-in evaluators as a test case, run it to invoke the agent for real and score that session on demand, and review per-evaluator scores with judge explanations, PASS/FAIL against a per-test-case threshold, and run history. Re-score an existing session without re-invoking the agent
+- Live-traffic evaluation results per agent: online evaluation configs and batch evaluation runs that score the agent, when each last ran, and every evaluated session with its scores, judge explanations, and the prompt and answer
 - Card/table view toggle on all listing pages
 - Estimated cost column in agent and memory table views; consistent 5-column layout for MCP and A2A tables
 - Drag-to-reorder cards with persistent ordering

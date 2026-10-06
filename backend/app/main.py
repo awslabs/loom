@@ -44,6 +44,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     logger.info("Initializing Loom backend...")
 
+    # Refuse to serve at all if the local-dev auth bypass is enabled somewhere
+    # that looks deployed. Deliberately the very first thing in startup: the
+    # failure this guards against is an open admin panel, so it must not be
+    # possible to serve a single request while it holds.
+    from app.dependencies.auth import assert_local_dev_bypass_not_deployed
+    assert_local_dev_bypass_not_deployed()
+
     # Initialize database (create tables if they don't exist)
     try:
         init_db()
@@ -81,7 +88,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="Loom Backend API",
     description="Backend API for the Loom agent platform",
-    version="1.7.4",
+    version="1.8.1",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
@@ -131,7 +138,7 @@ async def root() -> dict:
     """Root endpoint - health check."""
     return {
         "service": "Loom Backend API",
-        "version": "1.7.4",
+        "version": "1.8.1",
         "status": "running"
     }
 

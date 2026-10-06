@@ -1218,6 +1218,18 @@ Core authentication and authorization module. Provides:
   - **`admin:read`/`admin:write`** (global deployment configuration — site settings, registry config, LiteLLM proxy config, enabled models, VPC configs): held only by `g-admins-super`. No domain-scoped admin group holds these, since none of the actions they gate are scoped to a `loom:group` — a write by any domain admin would apply to the whole deployment.
 - `UserInfo` dataclass — `sub`, `username`, `groups`, `scopes` (derived from groups).
 - `get_current_user(request: Request) -> UserInfo` — validates JWT, extracts `cognito:groups`, derives scopes. In bypass mode (no `LOOM_COGNITO_USER_POOL_ID`), returns a super-admin with all scopes. Raises 401 on missing/invalid token.
+
+**Local-dev bypass: defence in depth around an open-admin-panel risk.** The bypass returns every scope with no authentication, and its precondition — neither Cognito nor an active external IdP configured — is also the state of a *fresh deployment that intends to use an external IdP but has not registered it yet*. The two remaining gates are therefore all that separate such a deployment from an open admin panel, and neither was robust alone:
+
+- `LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV` is a boolean that can be left behind in a task definition.
+- `_is_loopback_request()` reads `request.client`, which is only as trustworthy as the proxy config in front of the app. uvicorn ships with `proxy_headers=True` and `forwarded_allow_ips` defaulting to `FORWARDED_ALLOW_IPS` or `127.0.0.1`; widening that past loopback — a common change behind a load balancer, made to recover real client IPs, and one that looks unrelated to auth — lets a remote caller send `X-Forwarded-For: 127.0.0.1` and have `request.client.host` read back as loopback.
+
+Two defences, both verified by mutation testing in `tests/test_auth_bypass_hardening.py`:
+
+- `assert_local_dev_bypass_not_deployed()` is called as the **first** step of the application lifespan and raises, refusing to serve any request, when the opt-in is set alongside a container-runtime signal (`ECS_CONTAINER_METADATA_URI_V4`, `ECS_CONTAINER_METADATA_URI`, `AWS_EXECUTION_ENV` — injected by ECS into every task, absent on a developer machine) or a `FORWARDED_ALLOW_IPS` value that trusts non-loopback peers. Misconfiguration is a config-time event, so it fails at config time, in front of whoever deployed it.
+- `_bypass_allowed_for_request()` additionally refuses the bypass for any request carrying a proxy forwarding header (`X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP`, `Forwarded`). The spoof above cannot work *without* one of those headers, and uvicorn leaves them readable after rewriting `request.client`, while a genuine direct-to-loopback dev request never carries one.
+
+Note `get_current_user_token()` has the same no-IdP precondition and returns the caller's token *unvalidated* in that state. It grants no scopes, so it does not escalate privilege, but it is the remaining instance of this pattern — tracked for removal alongside the bypass itself.
 - `require_scopes(*required: str)` — factory returning a FastAPI dependency that checks the user has ALL required scopes. Raises 403 on missing scope. Used as `Depends(require_scopes("scope:name"))` on all guarded endpoints.
 - `oauth2_scheme` — `OAuth2AuthorizationCodeBearer` for OpenAPI docs with all 21 scopes.
 - `get_current_user_token(request: Request) -> str | None` — legacy helper for token forwarding to AgentCore invocations.

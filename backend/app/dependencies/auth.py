@@ -33,6 +33,105 @@ def _is_loopback_request(request: Request) -> bool:
     return bool(client) and client.host in _LOOPBACK_HOSTS
 
 
+# Headers that only appear once a request has traversed a proxy or load
+# balancer. A genuine direct-to-loopback development request carries none.
+_FORWARDING_HEADERS = (
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-real-ip",
+    "forwarded",
+)
+
+
+def _has_forwarding_headers(request: Request) -> bool:
+    return any(header in request.headers for header in _FORWARDING_HEADERS)
+
+
+def _bypass_allowed_for_request(request: Request) -> bool:
+    """Whether the local-dev bypass may even be considered for this request.
+
+    ``request.client`` is only as trustworthy as the proxy configuration in
+    front of the app, which is the weak point: uvicorn ships with
+    ``proxy_headers=True``, so if ``FORWARDED_ALLOW_IPS`` is ever widened
+    past loopback — a common change behind a load balancer, made to recover
+    real client IPs for logging or rate limiting, and one that looks entirely
+    unrelated to auth — then a remote caller can send
+    ``X-Forwarded-For: 127.0.0.1`` and have ``request.client.host`` read back
+    as loopback.
+
+    Requiring that no forwarding header is present closes that off, because
+    the spoof cannot work *without* the very header this rejects, while a real
+    direct-to-loopback request never carries one. Note this is the second line
+    of defence: ``assert_local_dev_bypass_not_deployed`` is what stops the
+    process from serving at all in that configuration.
+    """
+    if not _bypass_auth_enabled():
+        return False
+    if _has_forwarding_headers(request):
+        logger.error(
+            "Local-dev auth bypass refused: request carries proxy forwarding headers, "
+            "so its client address cannot be trusted to be loopback"
+        )
+        return False
+    return _is_loopback_request(request)
+
+
+# Variables that only exist inside a container runtime. ECS injects these into
+# every task; a developer's machine has none of them.
+_DEPLOYMENT_SIGNAL_VARS = (
+    "ECS_CONTAINER_METADATA_URI_V4",
+    "ECS_CONTAINER_METADATA_URI",
+    "AWS_EXECUTION_ENV",
+)
+
+# Values of FORWARDED_ALLOW_IPS that keep uvicorn's proxy-header handling
+# restricted to loopback peers, and so leave request.client trustworthy.
+_SAFE_FORWARDED_ALLOW_IPS = {"", "127.0.0.1", "::1", "localhost"}
+
+
+def assert_local_dev_bypass_not_deployed() -> None:
+    """Refuse to serve if the local-dev auth bypass is enabled in a deployment.
+
+    Called from the application lifespan so that this combination fails at
+    startup, in front of whoever deployed it, instead of quietly serving an
+    open admin panel. Misconfiguration is a config-time event, so it should be
+    caught at config time rather than left to be discovered at request time.
+
+    The exposure being guarded is narrow but plausible: the bypass requires
+    neither Cognito nor an external IdP to be configured, which is exactly the
+    state of a fresh deployment that intends to use an external IdP but has
+    not registered it yet. Add a stale
+    ``LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV`` in the task definition and a
+    widened ``FORWARDED_ALLOW_IPS``, and an unauthenticated caller reaches
+    every scope.
+    """
+    if not _bypass_auth_enabled():
+        return
+
+    reasons = []
+    for var in _DEPLOYMENT_SIGNAL_VARS:
+        value = os.getenv(var)
+        if value:
+            reasons.append(f"{var}={value!r} indicates a container runtime")
+
+    forwarded = os.getenv("FORWARDED_ALLOW_IPS", "").strip()
+    if forwarded not in _SAFE_FORWARDED_ALLOW_IPS:
+        reasons.append(
+            f"FORWARDED_ALLOW_IPS={forwarded!r} makes uvicorn trust proxy headers "
+            "from non-loopback peers, so a spoofed X-Forwarded-For can masquerade "
+            "as a loopback client"
+        )
+
+    if reasons:
+        raise RuntimeError(
+            f"{LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV} is enabled, but this looks like a "
+            f"deployed environment ({'; '.join(reasons)}). In that combination every "
+            "request would be served as super-admin with no authentication. Unset "
+            f"{LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV} before deploying."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Group-to-scope mapping (must match frontend GROUP_SCOPES)
 # ---------------------------------------------------------------------------
@@ -240,7 +339,7 @@ def get_current_user(request: Request) -> UserInfo:
     # Bypass mode — no Cognito and no external IdP configured. Requires explicit
     # opt-in and a loopback client; otherwise fail closed with 401.
     if not user_pool_id and not active_idp:
-        if _bypass_auth_enabled() and _is_loopback_request(request):
+        if _bypass_allowed_for_request(request):
             logger.warning("No identity provider configured; bypassing auth for loopback request")
             return UserInfo(
                 sub="local",

@@ -415,12 +415,28 @@ def _build_user_from_external_claims(claims: dict[str, Any], idp: dict) -> UserI
     if isinstance(external_groups, str):
         external_groups = [external_groups]
 
-    # Map external groups to Loom groups
+    # Map external groups to Loom groups. An empty or missing mapping table
+    # means "nothing is authorised yet", never "trust whatever the IdP says":
+    # falling back to the raw claim here handed an external token direct
+    # control over Loom group names, so a caller who could stand up an IdP
+    # (security:write alone) could mint a JWT claiming g-admins-super and
+    # authenticate as full super-admin. _assert_group_mappings_within_caller_scopes
+    # guards the mapping *table*, but an empty table bypassed it entirely by
+    # never putting the group name in the table in the first place.
+    #
+    # _map_external_groups already resolves an empty table to no groups, so the
+    # user still authenticates and simply holds no scopes — every guarded route
+    # returns 403. An IdP configured without mappings is now a visible
+    # misconfiguration instead of a silent grant of everything.
     group_mappings = idp.get("group_mappings", {})
-    if group_mappings:
-        loom_groups = _map_external_groups(external_groups, group_mappings)
-    else:
-        loom_groups = external_groups
+    loom_groups = _map_external_groups(external_groups, group_mappings)
+    if external_groups and not loom_groups:
+        logger.warning(
+            "External IdP %s returned groups %s, none of which are mapped to a Loom "
+            "group; user has no scopes. Configure the provider's group_mappings.",
+            idp.get("id"),
+            external_groups,
+        )
 
     return UserInfo(
         sub=sub,

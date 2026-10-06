@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, NamedTuple
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -575,3 +575,300 @@ def extract_exchange(events: Iterable[dict]) -> dict[str, str | None]:
             if text:
                 answer = text
     return {"prompt": prompt, "answer": answer}
+
+
+# ---------------------------------------------------------------------------
+# Creating evaluations (test cases -> on-demand Evaluate calls)
+# ---------------------------------------------------------------------------
+#
+# Loom never scores anything itself. Running a test case invokes the agent
+# (producing a real session), downloads that session's OTEL spans from
+# CloudWatch once they're available, and hands them directly to AgentCore's
+# on-demand Evaluate API. This is deliberately not StartBatchEvaluation
+# (used elsewhere in this module for discover_sources/read_results, which
+# cover *existing* AgentCore-managed evaluation sources, not Loom's own test
+# cases): batch evaluation has AgentCore look the session up itself through
+# an internal path that, empirically, times out well before the data it
+# depends on is actually ready — see app/routers/evaluations.py for the
+# full writeup. On-demand evaluation sidesteps that entirely by taking the
+# span data directly, so the only waiting left is Loom's own, which it
+# controls and can simply wait longer on if needed.
+
+# Category groupings for the evaluator picker UI. Matches the real
+# Builtin/ThirdParty evaluator IDs ListEvaluators returns in this account —
+# anything not listed here (a future evaluator AWS adds) falls into "Other"
+# rather than being silently dropped.
+EVALUATOR_GROUPS: list[tuple[str, list[str]]] = [
+    ("Response quality", [
+        "Builtin.Correctness", "Builtin.Faithfulness", "Builtin.Helpfulness",
+        "Builtin.ResponseRelevance", "Builtin.Conciseness", "Builtin.Coherence",
+        "Builtin.InstructionFollowing", "Builtin.GoalSuccessRate",
+    ]),
+    ("Safety", ["Builtin.Refusal", "Builtin.Harmfulness", "Builtin.Stereotyping"]),
+    ("Tool use & trajectory", [
+        "Builtin.ToolSelectionAccuracy", "Builtin.ToolParameterAccuracy",
+        "Builtin.TrajectoryExactOrderMatch", "Builtin.TrajectoryInOrderMatch",
+        "Builtin.TrajectoryAnyOrderMatch",
+    ]),
+    ("Skills", ["Builtin.SkillSelectionAccuracy", "Builtin.SkillInstructionFollowing"]),
+    ("DeepEval (third party)", [
+        "ThirdParty.DeepEval.Bias", "ThirdParty.DeepEval.Toxicity", "ThirdParty.DeepEval.PIILeakage",
+        "ThirdParty.DeepEval.Summarization", "ThirdParty.DeepEval.TaskCompletion",
+        "ThirdParty.DeepEval.ConversationCompleteness", "ThirdParty.DeepEval.KnowledgeRetention",
+        "ThirdParty.DeepEval.TurnRelevancy", "ThirdParty.DeepEval.GoalAccuracy", "ThirdParty.DeepEval.ToolUse",
+    ]),
+    ("AutoEval (third party)", ["ThirdParty.AutoEval.Security", "ThirdParty.AutoEval.Humor", "ThirdParty.AutoEval.Possible"]),
+]
+_EVALUATOR_GROUP_BY_ID: dict[str, str] = {eid: group for group, ids in EVALUATOR_GROUPS for eid in ids}
+
+
+def evaluator_short_name(evaluator_id: str) -> str:
+    """The last dotted segment of an evaluator ID, e.g. 'Helpfulness' for 'Builtin.Helpfulness'."""
+    return evaluator_id.rsplit(".", 1)[-1]
+
+
+def list_evaluators(region: str) -> list[dict[str, Any]]:
+    """List evaluators available to pick for a test case (built-in + custom, for now).
+
+    AgentCore also offers third-party evaluators (DeepEval, AutoEval), but
+    those need their own judge-model/API-key setup outside Loom; until that's
+    wired up, only AWS's built-in evaluators (and any account-defined custom
+    ones) are offered, to avoid test cases silently picking an evaluator that
+    can't actually run.
+    """
+    control = boto3.client("bedrock-agentcore-control", region_name=region)
+    evaluators = _paginate(control.list_evaluators, "evaluators", maxResults=100)
+    return [
+        {
+            "id": e.get("evaluatorId"),
+            "name": e.get("evaluatorName") or evaluator_short_name(e.get("evaluatorId", "")),
+            "description": e.get("description"),
+            "type": e.get("evaluatorType"),
+            "group": _EVALUATOR_GROUP_BY_ID.get(e.get("evaluatorId", ""), "Other"),
+        }
+        for e in evaluators
+        if e.get("status") == "ACTIVE" and not (e.get("evaluatorId") or "").startswith("ThirdParty.")
+    ]
+
+
+AWS_SPANS_LOG_GROUP = "aws/spans"
+
+# Instrumentation scopes AgentCore's evaluators know how to read. Evaluate
+# rejects a span set containing none of these outright ("Provided input has no
+# spans with supported scope"), so a set without one isn't worth sending —
+# see wait_for_session_spans.
+EVALUATABLE_SCOPES = frozenset({
+    "strands.telemetry.tracer",
+    "strands-agents",
+    "opentelemetry.instrumentation.langchain",
+    "amazon.opentelemetry.distro.instrumentation.langchain",
+    "@aws/aws-distro-opentelemetry-instrumentation-langchain",
+    "openinference.instrumentation.langchain",
+    "@arizeai/openinference-instrumentation-langchain",
+    "opentelemetry.instrumentation.openai_agents",
+    "amazon.opentelemetry.distro.instrumentation.openai_agents",
+    "@aws/aws-distro-opentelemetry-instrumentation-openai-agents",
+    "@aws/aws-distro-opentelemetry-instrumentation-vercel-ai",
+    "opentelemetry.instrumentation.llamaindex",
+    "@traceloop/instrumentation-langchain",
+    "amazon.opentelemetry.distro.instrumentation.llama_index",
+    "openinference.instrumentation.llama_index",
+    "openinference.instrumentation.google_adk",
+    "openinference.instrumentation.openai_agents",
+    "@arizeai/openinference-instrumentation-openai-agents",
+    "openinference.instrumentation.claude_agent_sdk",
+})
+
+
+def _has_evaluatable_span(spans: Iterable[dict[str, Any]]) -> bool:
+    """Whether any span carries a scope AgentCore's evaluators can read."""
+    return any((s.get("scope") or {}).get("name") in EVALUATABLE_SCOPES for s in spans)
+
+
+def _query_log_group_for_spans(logs: Any, log_group: str, session_id: str,
+                               start_s: int, end_s: int) -> list[dict[str, Any]]:
+    """Run one Logs Insights query for a session's OTEL spans in one log group.
+
+    The filter mirrors AWS's own documented approach for this exact API
+    (``ispresent(scope.name)`` plus ``traceId``/``spanId`` selects span
+    records specifically; the ``gen_ai.evaluation.result`` records this
+    module's other read path parses don't have those top-level fields, so
+    they're naturally excluded).
+    """
+    query = (
+        "fields @timestamp, @message\n"
+        "| filter ispresent(scope.name) and ispresent(attributes.session.id)\n"
+        f'| filter attributes.session.id = "{session_id}"\n'
+        "| filter ispresent(traceId)\n"
+        "| filter ispresent(spanId)\n"
+        "| sort @timestamp asc"
+    )
+    try:
+        query_id = logs.start_query(
+            logGroupName=log_group,
+            startTime=start_s,
+            endTime=end_s,
+            queryString=query,
+            limit=1000,
+        )["queryId"]
+    except ClientError as exc:
+        if _is_not_found(exc):
+            return []
+        raise
+
+    result: dict[str, Any] = {"status": "Running"}
+    for _ in range(30):
+        result = logs.get_query_results(queryId=query_id)
+        if result.get("status") in ("Complete", "Failed", "Cancelled", "Timeout"):
+            break
+        time.sleep(1)
+    if result.get("status") != "Complete":
+        return []
+
+    spans: list[dict[str, Any]] = []
+    for row in result.get("results", []):
+        message = next((f["value"] for f in row if f.get("field") == "@message"), None)
+        if not message:
+            continue
+        try:
+            spans.append(json.loads(message))
+        except json.JSONDecodeError:
+            continue
+    return spans
+
+
+def fetch_session_spans(log_group: str, session_id: str, region: str,
+                        lookback_minutes: int = 60) -> list[dict[str, Any]]:
+    """Download a session's OTEL spans from CloudWatch via Logs Insights.
+
+    On-demand evaluation (see run_on_demand_evaluation) takes spans directly
+    in the request rather than looking a session up itself — this is the
+    "query to ensure logs are available" step that makes that possible.
+
+    AgentCore Runtime's ADOT sidecar writes spans to the shared ``aws/spans``
+    log group, not the agent's own runtime log group — only app-level log
+    records land there. Both are queried and combined (matching the AWS SDK's
+    own ``CloudWatchAgentSpanCollector``), or every session's spans would be
+    missed and Evaluate would reject the call with "no spans with supported
+    scope"/"no spans to evaluate".
+    """
+    logs = boto3.client("logs", region_name=region)
+    now = int(time.time())
+    start_s, end_s = now - lookback_minutes * 60, now
+    aws_spans = _query_log_group_for_spans(logs, AWS_SPANS_LOG_GROUP, session_id, start_s, end_s)
+    own_spans = _query_log_group_for_spans(logs, log_group, session_id, start_s, end_s)
+
+    seen: set[tuple[Any, Any]] = set()
+    spans: list[dict[str, Any]] = []
+    for span in aws_spans + own_spans:
+        key = (span.get("traceId"), span.get("spanId"))
+        if key in seen:
+            continue
+        seen.add(key)
+        spans.append(span)
+    spans.sort(key=lambda s: s.get("endTimeUnixNano", 0))
+    return spans
+
+
+def wait_for_session_spans(log_group: str, session_id: str, region: str,
+                           timeout_s: float = 45.0, interval_s: float = 5.0) -> list[dict[str, Any]]:
+    """Poll fetch_session_spans with mild exponential backoff until the
+    session's spans look like they've finished arriving, or the window
+    elapses.
+
+    This is the direct, caller-controlled replacement for AgentCore batch
+    evaluation's internal span lookup — which turned out to give up (after a
+    consistent ~60-65s) sooner than AWS's own documented expectation for how
+    long CloudWatch log propagation can take ("a couple of minutes"). Waiting
+    longer here is safe rather than racing anything, because on-demand
+    evaluation only runs once *we* decide the data has arrived.
+
+    "Available" means stable *and* evaluatable, not just non-empty. A
+    session's spans land in CloudWatch incrementally, and not in the order
+    an evaluator needs: the short-lived HTTP and AWS-SDK spans
+    (``POST /invocations``, ``Bedrock AgentCore.*``) end and flush as soon as
+    their call returns, while the agent-framework spans Evaluate actually
+    reads (``invoke_agent``, ``chat``, ``execute_event_loop_cycle``) only end
+    once the agent finishes, so they arrive seconds later. Count stability
+    alone can therefore settle on an early plateau of exclusively
+    unsupported-scope spans, and Evaluate rejects that set outright with
+    "Provided input has no spans with supported scope" even though the real
+    trace shows up moments afterwards. Waiting for both conditions — an
+    unchanged count and at least one evaluator-readable scope — is what
+    makes the handoff reliable without having to model each evaluator's own
+    span requirements.
+    """
+    deadline = time.time() + timeout_s
+    delay = interval_s
+    previous_count = -1
+    spans: list[dict[str, Any]] = []
+    while True:
+        spans = fetch_session_spans(log_group, session_id, region)
+        if spans and len(spans) == previous_count and _has_evaluatable_span(spans):
+            return spans
+        previous_count = len(spans)
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return spans
+        time.sleep(min(delay, remaining))
+        delay = min(delay * 1.5, 15.0)
+
+
+def run_on_demand_evaluation(evaluator_ids: list[str], session_spans: list[dict[str, Any]],
+                             region: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Score a session's spans directly via the on-demand Evaluate API.
+
+    Evaluate takes exactly one evaluatorId per call (no batch-of-evaluators
+    shape like StartBatchEvaluation has), so this calls it once per evaluator
+    and collects results. A per-evaluator failure lands in ``errors`` rather
+    than aborting the rest. All of Loom's evaluators are used at the session
+    level (no per-trace/per-tool targeting), so no ``evaluationTarget`` is
+    set — AWS's own docs note this is unnecessary when "the service supports
+    only one session per evaluation."
+
+    Ground truth (expected_response) isn't wired up here: AgentCore's
+    documented ``evaluationTarget``/``evaluationInput`` shape for Evaluate
+    doesn't show an equivalent to StartBatchEvaluation's
+    ``evaluationMetadata.sessionMetadata[].groundTruth``, and guessing at an
+    undocumented field risks a ValidationException on every call rather than
+    just losing one feature.
+
+    A single evaluatorId call can come back with *more than one*
+    ``evaluationResults`` entry — trajectory/tool-use evaluators like
+    ToolSelectionAccuracy score per tool call, not once for the whole
+    session, so a session with two tool calls returns two results for that
+    one evaluator. Averaging them here keeps the "N evaluators selected ->
+    N score rows" invariant the frontend relies on (evaluator_ids.length vs.
+    scores.length) instead of silently inflating the row/average count with
+    what looks like a duplicate evaluator.
+    """
+    client = boto3.client("bedrock-agentcore", region_name=region)
+    errors: list[str] = []
+    per_evaluator: dict[str, list[dict[str, Any]]] = {}
+    for evaluator_id in evaluator_ids:
+        try:
+            response = client.evaluate(
+                evaluatorId=evaluator_id,
+                evaluationInput={"sessionSpans": session_spans},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            errors.append(f"{evaluator_id}: {exc}")
+            continue
+        for result in response.get("evaluationResults", []):
+            if result.get("errorMessage"):
+                errors.append(f"{evaluator_id}: {result['errorMessage']}")
+                continue
+            per_evaluator.setdefault(result.get("evaluatorId", evaluator_id), []).append(result)
+
+    scores: list[dict[str, Any]] = []
+    for eid, results in per_evaluator.items():
+        values = [r.get("value") for r in results if isinstance(r.get("value"), (int, float))]
+        explanations = [r.get("explanation") for r in results if r.get("explanation")]
+        scores.append({
+            "evaluator": eid,
+            "value": sum(values) / len(values) if values else results[0].get("value"),
+            "label": results[0].get("label"),
+            "explanation": " ".join(explanations) if len(explanations) > 1 else (explanations[0] if explanations else None),
+            "level": None,
+        })
+    return scores, errors

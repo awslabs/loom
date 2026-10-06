@@ -143,6 +143,12 @@ def invoke_agent(
         "payload": payload_bytes,
         "contentType": "application/json",
         "accept": "application/json",
+        # W3C baggage header — ADOT's baggage propagator (see OTEL_PROPAGATORS
+        # in agents.py) extracts this into the request's OTEL context, which
+        # is what actually gets session.id onto spans AgentCore Evaluations
+        # can filter by. runtimeSessionId alone only drives AgentCore's own
+        # session routing, not span attributes.
+        "baggage": f"session.id={session_id}",
     }
 
     if access_token:

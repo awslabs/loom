@@ -492,15 +492,50 @@ class TestAgentsRouter(unittest.TestCase):
         self.assertEqual(data[0]["active_session_count"], 0)
 
 
+class TestValidateSystemPromptSize(unittest.TestCase):
+    """Test cases for _validate_system_prompt_size — the pre-flight guardrail
+    that blocks a deploy/update before any AWS work if the user-authored
+    prompt alone risks blowing CreateAgentRuntime V2's environmentVariables cap."""
+
+    def _request(self, **overrides):
+        from app.routers.agents import AgentCreateRequest
+        defaults = dict(source="deploy", agent_description="", behavioral_guidelines="", output_expectations="")
+        defaults.update(overrides)
+        return AgentCreateRequest(**defaults)
+
+    def test_short_prompt_passes(self) -> None:
+        from app.routers.agents import _validate_system_prompt_size
+        _validate_system_prompt_size(self._request(agent_description="Be helpful."))  # should not raise
+
+    def test_long_prompt_is_rejected(self) -> None:
+        from app.routers.agents import _validate_system_prompt_size
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            _validate_system_prompt_size(self._request(agent_description="a" * 600))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("too large", ctx.exception.detail)
+
+    def test_sums_all_three_prompt_fields(self) -> None:
+        from app.routers.agents import _validate_system_prompt_size
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException):
+            _validate_system_prompt_size(self._request(
+                agent_description="a" * 200,
+                behavioral_guidelines="b" * 200,
+                output_expectations="c" * 200,
+            ))
+
+
 class TestConfigJsonEnvVar(unittest.TestCase):
     """Test cases for _config_json_env_var — the CreateAgentRuntime
-    environmentVariables 5000-char-per-value size guard."""
+    environmentVariables total-payload size guard (AgentCore Runtime V2 caps
+    the aggregate environmentVariables payload at 1536 bytes)."""
 
     def test_small_config_passes_through_inline(self) -> None:
         from app.routers.agents import _config_json_env_var
 
         with patch("app.routers.agents.bake_config_into_artifact") as mock_bake:
-            result = _config_json_env_var('{"system_prompt": "hi"}', "bucket", "key", "us-east-1")
+            result = _config_json_env_var('{"system_prompt": "hi"}', {"AWS_REGION": "us-east-1"}, "bucket", "key", "us-east-1")
 
         mock_bake.assert_not_called()
         self.assertEqual(result, {"AGENT_CONFIG_JSON": '{"system_prompt": "hi"}'})
@@ -508,13 +543,26 @@ class TestConfigJsonEnvVar(unittest.TestCase):
     def test_large_config_is_baked_into_artifact(self) -> None:
         from app.routers.agents import _config_json_env_var
 
-        large_config = '{"system_prompt": "%s"}' % ("a" * 5000)
+        large_config = '{"system_prompt": "%s"}' % ("a" * 1500)
         with patch("app.routers.agents.bake_config_into_artifact") as mock_bake:
-            result = _config_json_env_var(large_config, "bucket", "key", "us-east-1")
+            result = _config_json_env_var(large_config, {"AWS_REGION": "us-east-1"}, "bucket", "key", "us-east-1")
 
         mock_bake.assert_called_once_with("bucket", "key", large_config, "us-east-1")
         self.assertEqual(result, {"AGENT_CONFIG_PATH": "agent_config.json"})
         self.assertNotIn("AGENT_CONFIG_JSON", result)
+
+    def test_other_env_vars_count_toward_the_total(self) -> None:
+        """A config_json that would fit alone can still need baking once the
+        other env vars (OTEL_*, WORKLOAD_IDENTITY_NAME, etc.) are counted in."""
+        from app.routers.agents import _config_json_env_var
+
+        small_config = '{"system_prompt": "hi"}'
+        bulky_others = {f"VAR_{i}": "x" * 100 for i in range(20)}  # ~2100 bytes alone
+        with patch("app.routers.agents.bake_config_into_artifact") as mock_bake:
+            result = _config_json_env_var(small_config, bulky_others, "bucket", "key", "us-east-1")
+
+        mock_bake.assert_called_once_with("bucket", "key", small_config, "us-east-1")
+        self.assertEqual(result, {"AGENT_CONFIG_PATH": "agent_config.json"})
 
 
 if __name__ == "__main__":

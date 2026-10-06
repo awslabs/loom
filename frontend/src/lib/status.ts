@@ -1,4 +1,4 @@
-export type BadgeVariant = "default" | "secondary" | "destructive" | "outline" | "neutral" | "warning" | "success";
+export type BadgeVariant = "default" | "secondary" | "destructive" | "outline" | "neutral" | "warning" | "success" | "info";
 
 export function statusVariant(status: string | null): BadgeVariant {
   switch (status) {
@@ -61,6 +61,7 @@ export function statusDotClass(variant: BadgeVariant): string {
     case "success": return "bg-success";
     case "warning": return "bg-warning";
     case "destructive": return "bg-destructive";
+    case "info": return "bg-primary";
     default: return "bg-status-neutral";
   }
 }

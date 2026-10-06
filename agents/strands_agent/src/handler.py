@@ -370,6 +370,10 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
             try:
                 with trace_invocation(invocation_id=session_id) as span:
                     span.set_attribute("agent.session_id", session_id)
+                    # AgentCore Evaluations filters CloudWatch spans by this exact
+                    # key (session.id) to scope a batch evaluation to one session —
+                    # see https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html.
+                    span.set_attribute("session.id", session_id)
                     result = None
                     stream = agent.stream_async(agent_input, invocation_state={"session_id": session_id, "actor_id": actor_id})
                     async for event in stream:
@@ -423,6 +427,10 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
         # Simple path: no elicitation, stream directly
         with trace_invocation(invocation_id=session_id) as span:
             span.set_attribute("agent.session_id", session_id)
+            # AgentCore Evaluations filters CloudWatch spans by this exact
+            # key (session.id) to scope a batch evaluation to one session —
+            # see https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html.
+            span.set_attribute("session.id", session_id)
             try:
                 result = None
                 stream = agent.stream_async(agent_input, invocation_state={"session_id": session_id, "actor_id": actor_id})

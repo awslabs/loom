@@ -179,12 +179,40 @@ def build_agent_artifact(region: str, agent_framework: str = "strands") -> tuple
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-# CreateAgentRuntime/UpdateAgentRuntime's environmentVariables map caps each
-# value at 5000 characters. AGENT_CONFIG_JSON (system_prompt + integrations)
-# can exceed that once e.g. an attached skill's SKILL.md content is folded
-# into the system prompt — leave headroom below the hard limit.
-MAX_INLINE_CONFIG_JSON_LENGTH = 4500
+# CreateAgentRuntime/UpdateAgentRuntime's environmentVariables has two
+# separate caps that both matter here:
+#   - Per-value: 5000 characters (the API shape's declared max; applies to
+#     any platform version).
+#   - Total payload: AgentCore Runtime V2 enforces a much smaller aggregate
+#     cap across every key+value combined — confirmed from a live error:
+#     "The environment variable payload is 2835 bytes, exceeding the
+#     1536-byte maximum supported for V2 agents." V2 is the default platform
+#     version for every agent now (see platformVersion="V2" in create_runtime/
+#     update_runtime below), so the 1536-byte total is the binding constraint
+#     in practice — AGENT_CONFIG_JSON (system_prompt + integrations) blows
+#     past it on almost any real system prompt, let alone one with an
+#     attached skill folded in. Leave headroom below the documented limit.
+MAX_ENV_VARS_TOTAL_BYTES = 1200
 BAKED_CONFIG_FILENAME = "agent_config.json"
+
+# Guardrail on the user-authored portion of the system prompt specifically
+# (agent_description + behavioral_guidelines + output_expectations — what the
+# "Agent Behavior" textarea in the deploy form actually controls), checked
+# before any AWS work starts. This is deliberately conservative: it reserves
+# ~700 bytes out of the 1200-byte safety target above for the fixed OTEL/
+# workload-identity env vars plus the AGENT_CONFIG_JSON skeleton (model_id,
+# max_tokens, integrations, etc.), which varies per agent but rarely exceeds
+# that. It does NOT cover skill content folded into the prompt later —
+# that's expected to be large and is already handled by baking the config
+# into the artifact (bake_config_into_artifact), not by blocking the deploy.
+MAX_SYSTEM_PROMPT_BYTES = 500
+
+
+def env_vars_total_bytes(env_vars: dict[str, str]) -> int:
+    """Approximate the aggregate size AgentCore counts against the V2
+    environmentVariables payload cap: every key's and value's UTF-8 byte
+    length, summed."""
+    return sum(len(k.encode("utf-8")) + len(v.encode("utf-8")) for k, v in env_vars.items())
 
 
 def bake_config_into_artifact(bucket: str, key: str, config_json: str, region: str) -> None:

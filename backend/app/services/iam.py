@@ -254,6 +254,12 @@ def build_base_policy(
                 "logs:PutLogEvents",
                 "logs:DescribeLogGroups",
                 "logs:DescribeLogStreams",
+                # Lets AgentCore put a resource policy on the agent's own log
+                # group granting X-Ray write access, which is what delivers
+                # this runtime's spans there (UNIFIED_TRACES_DESTINATION_ENABLED)
+                # instead of the shared aws/spans log group. Requires account-level
+                # CloudWatch Transaction Search to already be enabled.
+                "logs:PutResourcePolicy",
             ],
             "Resource": [
                 f"arn:aws:logs:{region}:{account_id}:log-group:/aws/bedrock-agentcore/runtimes/{agent_name}*",

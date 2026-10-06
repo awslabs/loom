@@ -124,6 +124,7 @@ Resources:
                   - logs:FilterLogEvents
                   - logs:GetLogEvents
                   - logs:PutLogEvents
+                  - logs:PutResourcePolicy
                 Resource:
                   - !Sub "arn:aws:logs:${pLogsRegion}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/${pAgentName}*"
                   - !Sub "arn:aws:logs:${pLogsRegion}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/harness_${pAgentName}*"

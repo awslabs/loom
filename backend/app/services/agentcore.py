@@ -247,9 +247,11 @@ async def invoke_agent_ws(
         JSON string with elicitation response to resume tool execution
     """
     import websockets
-    from botocore.auth import SigV4Auth
-    from botocore.credentials import Credentials
-    import boto3
+
+    # No SigV4 signing here: this path authenticates only with a caller-supplied
+    # OAuth bearer, so SigV4-authorized runtimes reject the connection. The
+    # unused SigV4Auth/Credentials/boto3 imports that used to sit here implied
+    # protection that was never applied.
 
     runtime_id = arn.split('/')[-1]
     encoded_arn = arn.replace(":", "%3A").replace("/", "%2F")

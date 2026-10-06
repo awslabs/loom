@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 import threading
 
 from app.db import get_db, SessionLocal
-from app.dependencies.auth import UserInfo, require_scopes
+from app.dependencies.auth import UserInfo, authenticate_bearer_token, require_scopes
 from app.models.agent import Agent
 from app.models.session import InvocationSession
 from app.models.invocation import Invocation
@@ -1772,19 +1772,64 @@ async def invoke_agent_websocket(
 
     db = SessionLocal()
     try:
+        # Authenticate from the first frame, before touching the database.
+        #
+        # This endpoint previously accepted the socket and served invocations
+        # with no authentication at all (CWE-306): no identity, no invoke
+        # scope, and no loom:group check, while the HTTP invoke route next door
+        # required all three. The SPA has always sent the Loom JWT as `token`
+        # on its first frame — the handler just never read it.
+        #
+        # Authenticating before the agent lookup also stops the "Agent N not
+        # found" reply from being an unauthenticated oracle for which agent IDs
+        # exist.
+        try:
+            first_message = await websocket.receive_json()
+        except (WebSocketDisconnect, ValueError):
+            await websocket.close(code=1008)
+            return
+
+        try:
+            user = authenticate_bearer_token(str(first_message.get("token") or ""), websocket)
+        except HTTPException:
+            logger.warning("Rejected unauthenticated websocket invoke for agent %d", agent_id)
+            await websocket.send_json({"type": "error", "content": "Unauthorized"})
+            await websocket.close(code=1008)
+            return
+
+        if "invoke" not in user.scopes:
+            logger.warning("Websocket invoke for agent %d denied: %s lacks the invoke scope",
+                           agent_id, user.username)
+            await websocket.send_json({"type": "error", "content": "Missing required scope: invoke"})
+            await websocket.close(code=1008)
+            return
+
         agent = db.query(Agent).filter(Agent.id == agent_id).first()
         if not agent:
             await websocket.send_json({"type": "error", "content": f"Agent {agent_id} not found"})
             await websocket.close()
             return
 
+        # Same loom:group rule the HTTP invoke route applies. This route
+        # queried Agent directly and so was missed when fetch-by-ID was routed
+        # through check_resource_group_access.
+        try:
+            check_resource_group_access(agent, user, resource_label="agent")
+        except HTTPException as exc:
+            logger.warning("Websocket invoke for agent %d denied by group check for %s",
+                           agent_id, user.username)
+            await websocket.send_json({"type": "error", "content": str(exc.detail)})
+            await websocket.close(code=1008)
+            return
+
         region = agent.region or os.environ.get("AWS_REGION", "us-east-1")
 
+        data = first_message
         while True:
-            data = await websocket.receive_json()
             msg_type = data.get("type", "prompt")
 
             if msg_type != "prompt":
+                data = await websocket.receive_json()
                 continue
 
             prompt = data.get("prompt", "")
@@ -1806,7 +1851,10 @@ async def invoke_agent_websocket(
                     }
                     dynamic_mcp_servers.append(server_data)
 
-            # Resolve access token (simplified — reuses same logic as HTTP path)
+            # Runtime bearer for JWT/OAuth-authorized agents, supplied by the
+            # caller. Note this is NOT the Loom session token authenticated
+            # above, and unlike the HTTP path it does not run the full
+            # resolution chain (manual token / credential ID / linked user).
             access_token = data.get("bearer_token")
 
             await websocket.send_json({"type": "session_start", "session_id": session_id})
@@ -1842,6 +1890,10 @@ async def invoke_agent_websocket(
             except Exception as e:
                 logger.error("WebSocket invocation error: %s", e)
                 await websocket.send_json({"type": "error", "content": str(e)})
+
+            # The first frame was consumed for authentication, so the loop
+            # reads the next one here rather than at the top.
+            data = await websocket.receive_json()
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for agent %d", agent_id)

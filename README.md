@@ -93,6 +93,7 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 - Interactive waterfall timeline for inspecting per-span events from OTEL log records
 - Agent evaluations (Evaluations tab): save a prompt plus a selection of AgentCore's built-in evaluators as a test case, run it to invoke the agent for real and score that session on demand, and review per-evaluator scores with judge explanations, PASS/FAIL against a per-test-case threshold, and run history. Re-score an existing session without re-invoking the agent
 - Live-traffic evaluation results per agent: online evaluation configs and batch evaluation runs that score the agent, when each last ran, and every evaluated session with its scores, judge explanations, and the prompt and answer
+- Agent kill switch (Details tab): Stop an agent with a required reason, and its execution role is denied every AWS action except writing logs, traces and metrics, while the sessions Loom knows about are ended; Resume detaches the deny with no redeployment. Every action is kept with who, when, why and the AWS request ids, and while an agent is stopped Loom refuses to invoke it, redeploy it or run its evaluation test cases.
 - Card/table view toggle on all listing pages
 - Estimated cost column in agent and memory table views; consistent 5-column layout for MCP and A2A tables
 - Drag-to-reorder cards with persistent ordering

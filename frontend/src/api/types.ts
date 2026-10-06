@@ -49,6 +49,10 @@ export interface AgentResponse {
   code_interpreter_status?: string | null;
   vpc_config_id: number | null;
   status_reason?: string | null;
+  /** Kill switch: set while the agent is stopped. */
+  stopped_at?: string | null;
+  stopped_by?: string | null;
+  stop_reason?: string | null;
 }
 
 export interface AgentHarnessDeployRequest {
@@ -1309,4 +1313,75 @@ export interface RunTestCaseResponse {
   batch_evaluation_id: string;
   status: string;
   agent_response: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Agent kill switch
+// ---------------------------------------------------------------------------
+
+/** running: not stopped · stopped: stopped and the deny policy is attached ·
+ * stop_not_enforced: Loom records a stop but the policy is not attached ·
+ * stopped_outside_loom: the policy is attached but Loom recorded no stop ·
+ * unknown: the role's policies could not be read · unavailable: not configured
+ * or no execution role. */
+export type KillSwitchState =
+  | "running"
+  | "stopped"
+  | "stop_not_enforced"
+  | "stopped_outside_loom"
+  | "unknown"
+  | "unavailable";
+
+export interface KillSwitchSessionResult {
+  session_id: string;
+  qualifier: string | null;
+  result: "stopped" | "not_running" | "failed" | "skipped";
+  request_id: string | null;
+  error: string | null;
+}
+
+export interface KillSwitchEvent {
+  id: number;
+  agent_id: number;
+  agent_name: string | null;
+  action: "stop" | "resume";
+  reason: string;
+  actor: string;
+  role_arn: string;
+  policy_arn: string;
+  iam_change: "attached" | "already_attached" | "detached" | "already_detached";
+  iam_request_id: string | null;
+  sessions: KillSwitchSessionResult[];
+  shared_with: number[];
+  created_at: string | null;
+}
+
+export interface KillSwitchSharedAgent {
+  id: number;
+  name: string | null;
+  stopped: boolean;
+}
+
+export interface KillSwitchStatus {
+  configured: boolean;
+  unavailable_reason: string | null;
+  policy_arn: string | null;
+  role_arn: string | null;
+  state: KillSwitchState;
+  stopped: boolean;
+  stopped_at: string | null;
+  stopped_by: string | null;
+  stop_reason: string | null;
+  deny_attached: boolean | null;
+  iam_error: string | null;
+  shared_with: KillSwitchSharedAgent[];
+  shared_outside_access: number;
+  events: KillSwitchEvent[];
+}
+
+export interface KillSwitchActionResponse {
+  changed: boolean;
+  message: string;
+  status: KillSwitchStatus;
+  events: KillSwitchEvent[];
 }

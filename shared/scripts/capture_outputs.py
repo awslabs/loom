@@ -15,6 +15,7 @@ STACKS = [
     "loom-cognito",
     "loom-rds",
     "loom-ec2",
+    "loom-kill-switch",
 ]
 
 # Mapping: (stack, output_key) → env_variable
@@ -42,6 +43,8 @@ OUTPUT_MAP: dict[tuple[str, str], str] = {
     ("loom-rds", "oSecretsKmsKeyArn"): "O_RDS_SECRETS_KMS_KEY_ARN",
     # loom-ec2
     ("loom-ec2", "oInstanceId"): "O_EC2_INSTANCE_ID",
+    # loom-kill-switch
+    ("loom-kill-switch", "oKillSwitchPolicyArn"): "O_KILL_SWITCH_POLICY_ARN",
 }
 
 

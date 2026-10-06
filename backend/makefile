@@ -232,6 +232,7 @@ ecs.deploy:
 			$(if $(P_LITELLM_DISCOVERY_BASE_URL),pLitellmDiscoveryBaseUrl=$(P_LITELLM_DISCOVERY_BASE_URL)) \
 			$(if $(P_LITELLM_PROXY_API_KEY_SECRET_ARN),pLitellmProxyApiKeySecretArn=$(P_LITELLM_PROXY_API_KEY_SECRET_ARN)) \
 			$(if $(P_LITELLM_PROXY_API_KEY_SECRET_KMS_KEY_ARN),pLitellmProxyApiKeySecretKmsKeyArn=$(P_LITELLM_PROXY_API_KEY_SECRET_KMS_KEY_ARN)) \
+			$(if $(O_KILL_SWITCH_POLICY_ARN),pKillSwitchPolicyArn=$(O_KILL_SWITCH_POLICY_ARN)) \
 			pTagApplication=$(P_TAG_APPLICATION) \
 			pTagGroup=$(P_TAG_GROUP) \
 			pTagOwner=$(P_TAG_OWNER) \

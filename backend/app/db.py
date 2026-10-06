@@ -153,6 +153,9 @@ def _migrate_add_columns(eng) -> None:
         ("a2a_agents", "resource_tags", "TEXT"),
         ("evaluation_test_cases", "pass_threshold", "REAL DEFAULT 0.7"),
         ("evaluation_test_cases", "model_id", "VARCHAR"),
+        ("agents", "stopped_at", "DATETIME"),
+        ("agents", "stopped_by", "VARCHAR"),
+        ("agents", "stop_reason", "TEXT"),
     ]
 
     is_postgres = eng.dialect.name == "postgresql"

@@ -81,6 +81,10 @@ Parameters:
   pSecretsKmsKeyArn:
     Type: String
     Description: ARN of the KMS key used to encrypt Secrets Manager secrets (from rds stack output oSecretsKmsKeyArn)
+  pKillSwitchPolicyArn:
+    Type: String
+    Description: ARN of the agent kill-switch deny policy (from kill-switch stack output oKillSwitchPolicyArn; leave empty to disable Stop/Resume)
+    Default: ""
   pTagApplication:
     Type: String
     Description: Value for the loom:application tag
@@ -95,6 +99,7 @@ Conditions:
   CognitoRegionEmpty: !Equals [!Ref pCognitoRegion, ""]
   HasLitellmProxyApiKey: !Not [!Equals [!Ref pLitellmProxyApiKeySecretArn, ""]]
   HasLitellmProxyApiKeySecretKmsKey: !Not [!Equals [!Ref pLitellmProxyApiKeySecretKmsKeyArn, ""]]
+  HasKillSwitchPolicy: !Not [!Equals [!Ref pKillSwitchPolicyArn, ""]]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -490,6 +495,28 @@ Resources:
                   - cloudformation:DescribeStackEvents
                   - cloudformation:ListStacks
                 Resource: !Sub "arn:aws:cloudformation:*:${AWS::AccountId}:stack/loom-role-*"
+        - !If
+          - HasKillSwitchPolicy
+          - PolicyName: KillSwitchPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                # @secure_recommendation: least privilege for the agent kill
+                # switch. Loom may attach and detach exactly one policy (the
+                # kill-switch deny, pinned by the iam:PolicyARN condition) and
+                # only on Loom-managed roles; it gains no other IAM write. The
+                # read it needs (iam:ListAttachedRolePolicies) is granted above,
+                # and bedrock-agentcore:StopRuntimeSession is covered by
+                # BedrockAgentCorePolicy.
+                - Effect: Allow
+                  Action:
+                    - iam:AttachRolePolicy
+                    - iam:DetachRolePolicy
+                  Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/loom-*"
+                  Condition:
+                    ArnEquals:
+                      iam:PolicyARN: !Ref pKillSwitchPolicyArn
+          - !Ref AWS::NoValue
       Tags:
         - Key: loom:application
           Value: !Ref pTagApplication
@@ -545,6 +572,8 @@ Resources:
               Value: !Ref pLitellmProxyBaseUrl
             - Name: LOOM_LITELLM_DISCOVERY_BASE_URL
               Value: !Ref pLitellmDiscoveryBaseUrl
+            - Name: LOOM_KILL_SWITCH_POLICY_ARN
+              Value: !Ref pKillSwitchPolicyArn
             - Name: LOG_LEVEL
               Value: info
           Secrets: !If

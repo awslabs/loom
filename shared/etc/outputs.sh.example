@@ -24,3 +24,5 @@ O_RDS_PROXY_ENDPOINT=<oConnectEndpoint>
 O_RDS_PORT=5432
 # loom-ec2: oInstanceId
 O_EC2_INSTANCE_ID=<oInstanceId>
+# loom-kill-switch: oKillSwitchPolicyArn
+O_KILL_SWITCH_POLICY_ARN=<oKillSwitchPolicyArn>

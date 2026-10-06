@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Loom agent kill switch. One customer-managed deny policy per account. Loom
+  attaches it to an agent's execution role to stop the agent and detaches it to
+  resume; the policy itself never changes at run time.
+
+Parameters:
+  pPolicyName:
+    Type: String
+    Description: Name of the kill-switch policy (set LOOM_KILL_SWITCH_POLICY_ARN on the backend to its ARN)
+    Default: loom-agent-kill-switch
+    AllowedPattern: "[\\w+=,.@-]{1,128}"
+
+Resources:
+  KillSwitchPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Ref pPolicyName
+      Description: >-
+        Attached by Loom to stop an agent: denies everything except writing
+        logs, traces and metrics, so the stopped agent can still be observed.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # @secure_recommendation: an explicit Deny overrides every Allow on the
+          # role, so a stopped agent's next model, memory, gateway or credential
+          # call fails. NotAction leaves telemetry to the role's own allows; this
+          # list must match TELEMETRY_ACTIONS in backend/app/services/kill_switch.py.
+          - Sid: DenyEverythingButTelemetry
+            Effect: Deny
+            NotAction:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+              - xray:PutTraceSegments
+              - xray:PutTelemetryRecords
+              - xray:GetSamplingRules
+              - xray:GetSamplingTargets
+              - cloudwatch:PutMetricData
+            Resource: "*"
+
+Outputs:
+  oKillSwitchPolicyArn:
+    Description: ARN of the kill-switch policy (LOOM_KILL_SWITCH_POLICY_ARN)
+    Value: !Ref KillSwitchPolicy

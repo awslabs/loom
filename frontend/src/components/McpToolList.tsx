@@ -9,10 +9,24 @@ import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { trackAction } from "@/api/audit";
 import { useTimezone } from "@/contexts/TimezoneContext";
-import { formatTimestamp } from "@/lib/format";
+import { formatTimestamp, formatRelativeDateTime } from "@/lib/format";
 import { getServerTools, refreshServerTools, invokeServerTool } from "@/api/mcp";
-import { SortableCardGrid, SortButton, loadSortDirection, toggleSortDirection, saveSortDirection, type SortDirection } from "./SortableCardGrid";
-import type { McpTool, ToolInvokeResult } from "@/api/types";
+import { listApprovalPolicies } from "@/api/approvals";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { SortButton, loadSortDirection, toggleSortDirection, type SortDirection } from "./SortableCardGrid";
+import type { McpTool, ToolInvokeResult, ApprovalPolicy } from "@/api/types";
+
+/** Does an approval policy's tool_match_rules entry match this tool name?
+ *  Rules are globs such as "delete_*", so only "*" is special. */
+function matchesRule(rule: string, toolName: string): boolean {
+  const pattern = rule
+    .split("*")
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${pattern}$`, "i").test(toolName);
+}
 
 /** Collapsible wrapper for nested arrays/objects in tool results. */
 function CollapsibleValue({ label, summary, children }: { label?: string; summary: string; children: React.ReactNode }) {
@@ -56,6 +70,16 @@ export function McpToolList({ serverId, readOnly }: McpToolListProps) {
   const [invokeArgs, setInvokeArgs] = useState("");
   const [invoking, setInvoking] = useState(false);
   const [invokeResult, setInvokeResult] = useState<ToolInvokeResult | null>(null);
+  const [filter, setFilter] = useState("");
+  const [segment, setSegment] = useState<"all" | "approval">("all");
+  const [showAll, setShowAll] = useState(false);
+  const [policies, setPolicies] = useState<ApprovalPolicy[]>([]);
+
+  // Approval policies are what make a tool "needs approval". Best-effort: the
+  // list still renders if the caller lacks the scope to read them.
+  useEffect(() => {
+    listApprovalPolicies().then(setPolicies).catch(() => setPolicies([]));
+  }, []);
 
   const fetchTools = useCallback(async () => {
     try {
@@ -373,58 +397,155 @@ export function McpToolList({ serverId, readOnly }: McpToolListProps) {
     );
   }
 
+  const approvalRule = (tool: McpTool): string | null => {
+    for (const policy of policies) {
+      if (!policy.enabled) continue;
+      for (const rule of policy.tool_match_rules ?? []) {
+        if (matchesRule(rule, tool.tool_name)) return rule;
+      }
+    }
+    return null;
+  };
+
+  const approvalCount = tools.filter((t) => approvalRule(t) !== null).length;
+  const query = filter.trim().toLowerCase();
+  const filtered = tools
+    .filter((t) => (segment === "all" ? true : approvalRule(t) !== null))
+    .filter((t) =>
+      !query ||
+      t.tool_name.toLowerCase().includes(query) ||
+      (t.description ?? "").toLowerCase().includes(query)
+    )
+    .sort((a, b) =>
+      sortDir === "desc"
+        ? b.tool_name.localeCompare(a.tool_name)
+        : a.tool_name.localeCompare(b.tool_name)
+    );
+
+  // Long tool lists are mostly scanned for one name, so only the first page is
+  // rendered until asked for the rest.
+  const VISIBLE_ROWS = 7;
+  const shown = showAll ? filtered : filtered.slice(0, VISIBLE_ROWS);
+  const hidden = filtered.length - shown.length;
+
+  const segmentClass = (active: boolean) =>
+    `rounded-[5px] px-2.5 py-1 transition-colors ${
+      active ? "bg-card shadow-sm" : "text-muted-foreground hover:text-foreground"
+    }`;
+
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <h4 className="text-sm font-medium">Tools ({tools.length})</h4>
-          {lastRefreshed && (
-            <span className="text-[10px] text-muted-foreground">
-              Last refreshed: {formatTimestamp(lastRefreshed, timezone)}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <SortButton direction={sortDir} onClick={() => setSortDir(toggleSortDirection(`mcp-tools-${serverId}`, sortDir))} />
+    <Card className="gap-0 overflow-hidden p-0">
+      <div className="flex flex-wrap items-center gap-2.5 border-b px-3.5 py-2.5">
+        <Input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter tools…"
+          className="h-8 max-w-[280px] flex-1 text-[13px]"
+        />
+        {approvalCount > 0 && (
+          <div className="flex gap-1 rounded-[7px] bg-muted p-[3px] text-xs">
+            <button type="button" onClick={() => setSegment("all")} className={segmentClass(segment === "all")}>
+              All
+            </button>
+            <button
+              type="button"
+              onClick={() => setSegment("approval")}
+              className={segmentClass(segment === "approval")}
+            >
+              Needs approval <span className="font-mono">{approvalCount}</span>
+            </button>
+          </div>
+        )}
+        <div className="ml-auto flex items-center gap-2">
+          <span
+            className="text-xs text-muted-foreground"
+            title={lastRefreshed ? formatTimestamp(lastRefreshed, timezone) : undefined}
+          >
+            {tools.length} tool{tools.length === 1 ? "" : "s"}
+            {lastRefreshed && ` · Refreshed ${formatRelativeDateTime(lastRefreshed, timezone)}`}
+          </span>
+          <SortButton
+            direction={sortDir}
+            onClick={() => setSortDir(toggleSortDirection(`mcp-tools-${serverId}`, sortDir))}
+          />
           {!readOnly && (
             <Button size="sm" variant="outline" onClick={handleRefresh} disabled={refreshing}>
               {refreshing ? (
-                <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
               ) : (
-                <RefreshCw className="h-3.5 w-3.5 mr-1" />
+                <RefreshCw className="mr-1 h-3.5 w-3.5" />
               )}
-              Refresh Tools
+              Refresh tools
             </Button>
           )}
         </div>
       </div>
 
       {tools.length === 0 ? (
-        <p className="text-sm text-muted-foreground py-4">
-          No tools discovered. Click &apos;Refresh Tools&apos; to fetch from the MCP server.
+        <p className="px-4 py-6 text-sm text-muted-foreground">
+          No tools discovered. Use &apos;Refresh tools&apos; to fetch them from the MCP server.
         </p>
+      ) : filtered.length === 0 ? (
+        <p className="px-4 py-6 text-sm text-muted-foreground">No tools match that filter.</p>
       ) : (
-        <SortableCardGrid
-          items={tools}
-          getId={(t) => String(t.id)}
-          getName={(t) => t.tool_name}
-          storageKey={`mcp-tools-${serverId}`}
-          sortDirection={sortDir}
-          onSortDirectionChange={(d) => { if (d) { setSortDir(d); saveSortDirection(`mcp-tools-${serverId}`, d); } }}
-          className="grid gap-2 grid-cols-1"
-          renderItem={(tool) => (
-            <div
-              className="rounded border bg-input-bg px-3 py-2 cursor-pointer transition-colors hover:bg-accent/50"
-              onClick={() => handleSelectTool(tool)}
+        <>
+          <Table className="table-fixed">
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="w-[220px] font-mono text-[10px] tracking-[0.12em] uppercase">Tool</TableHead>
+                <TableHead className="font-mono text-[10px] tracking-[0.12em] uppercase">Description</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {shown.map((tool) => {
+                const rule = approvalRule(tool);
+                return (
+                  <TableRow
+                    key={tool.id}
+                    onClick={() => handleSelectTool(tool)}
+                    className={`cursor-pointer align-top ${rule ? "bg-warning-bg/50" : ""}`}
+                  >
+                    <TableCell className="w-[220px] align-top whitespace-normal break-words">
+                      <div className="flex flex-col items-start gap-1.5">
+                        <span className="font-mono text-[13px] font-medium">{tool.tool_name}</span>
+                        {rule && (
+                          <span className="rounded-[5px] border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase text-destructive">
+                            Destructive · needs approval
+                          </span>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="align-top text-[13px] leading-[1.55] break-words whitespace-normal text-muted-foreground">
+                      {/* Gated tools show in full: the policy is the reason the
+                          row is tinted, so truncating it hides the explanation. */}
+                      <span className={rule ? undefined : "line-clamp-2"}>
+                        {tool.description ?? <span className="italic">No description provided.</span>}
+                      </span>
+                      {rule && (
+                        <>
+                          {" "}
+                          Gated by approval policy{" "}
+                          <code className="rounded-[4px] bg-muted px-1.5 py-0.5 font-mono text-xs">{rule}</code>, so a
+                          person has to approve each call before it runs.
+                        </>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+          {hidden > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowAll(true)}
+              className="w-full px-4 py-2.5 text-left text-[12.5px] text-primary hover:underline"
             >
-              <span className="text-sm font-medium">{tool.tool_name}</span>
-              {tool.description && (
-                <span className="text-xs text-muted-foreground"> — {tool.description}</span>
-              )}
-            </div>
+              Show {hidden} more tool{hidden === 1 ? "" : "s"}
+            </button>
           )}
-        />
+        </>
       )}
-    </div>
+    </Card>
   );
 }

@@ -24,6 +24,7 @@ from app.models.evaluation import EvaluationTestCase, EvaluationRun
 # table. Same latent bug that was fixed for evaluation.py.
 from app.models.a2a import A2aAgent, A2aAgentSkill, A2aAgentAccess
 from app.models.identity_provider import IdentityProvider
+from app.models.kill_switch import AgentKillSwitchEvent
 
 __all__ = [
     "Agent", "InvocationSession", "Invocation", "ConfigEntry",
@@ -33,6 +34,6 @@ __all__ = [
     "McpServer", "McpTool", "McpServerAccess", "SiteSetting",
     "AuditLogin", "AuditAction", "AuditPageView",
     "ApprovalPolicy", "ApprovalLog", "VpcConfig",
-    "EvaluationTestCase", "EvaluationRun",
+    "EvaluationTestCase", "EvaluationRun", "AgentKillSwitchEvent",
     "A2aAgent", "A2aAgentSkill", "A2aAgentAccess", "IdentityProvider",
 ]

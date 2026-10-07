@@ -698,7 +698,7 @@ Cognito client secrets are password-masked in forms. Secrets are sent to the bac
 - Two-dimensional group architecture:
   - **Type groups**: `t-admin` (admin UI), `t-user` (user UI) — determine layout and default navigation
   - **Resource groups**:
-    - `g-admins-super`: All 21 scopes (full access, including `admin:read`/`admin:write` for global deployment configuration)
+    - `g-admins-super`: All 22 scopes (full access, including `admin:read`/`admin:write` for global deployment configuration)
     - `g-admins-demo`: Read/write to most pages including MCP and A2A + demo group resources
     - `g-admins-security`, `g-admins-memory`, `g-admins-mcp`, `g-admins-a2a`: Domain-specific admin scopes
     - `g-admins-registry`: `mcp:read`, `a2a:read`, `registry:read`, `registry:write`, `tagging:read`

@@ -14,6 +14,7 @@ from app.models.a2a import A2aAgent
 from app.models.agent import Agent
 from app.models.integration import Integration
 from app.models.mcp import McpServer, McpTool
+from app.routers.utils import check_resource_group_access, filter_visible_resources
 from app.services.registry import get_registry_client
 
 logger = logging.getLogger(__name__)
@@ -235,6 +236,10 @@ def create_record(
                 detail=f"namespace must be one of: {', '.join(MCP_NAMESPACES)}",
             )
         server = db.query(McpServer).filter(McpServer.id == request.resource_id).first()
+        if server:
+            # resource_id is caller-supplied; registry:write must not let one
+            # group submit another group's resource into the registry.
+            check_resource_group_access(server, user, resource_label="mcp server")
         if not server:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -249,6 +254,8 @@ def create_record(
 
     elif request.resource_type == "a2a":
         agent = db.query(A2aAgent).filter(A2aAgent.id == request.resource_id).first()
+        if agent:
+            check_resource_group_access(agent, user, resource_label="a2a agent")
         if not agent:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -262,6 +269,8 @@ def create_record(
 
     elif request.resource_type == "agent":
         agent_record = db.query(Agent).filter(Agent.id == request.resource_id).first()
+        if agent_record:
+            check_resource_group_access(agent_record, user, resource_label="agent")
         if not agent_record:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -544,6 +553,10 @@ def get_skill_dependents(
         return SkillDependentsResponse(dependents=[])
 
     agents = db.query(Agent).filter(Agent.id.in_(agent_ids)).all()
+    # A reverse lookup is still a read of other groups' agents: unfiltered, it
+    # named every agent using the skill regardless of who asked. Dropped rather
+    # than refused, since a dependents list is a listing.
+    agents = filter_visible_resources(agents, user, resource_label="agent")
     return SkillDependentsResponse(dependents=[
         SkillDependent(agent_id=a.id, agent_name=a.name or a.runtime_id) for a in agents
     ])

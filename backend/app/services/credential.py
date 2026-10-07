@@ -8,6 +8,8 @@ through the AgentCore control plane for agent integrations.
 import logging
 import re
 import time
+
+from app.services.redaction import redacted_error
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,10 @@ _BASE_DELAY = 2.0  # seconds
 # The apiKeyArn regex AgentCore Harness applies to the provider-name segment
 # only allows these characters, so every provider name is built from this set.
 _UNSAFE_NAME_CHARS = re.compile(r"[^a-zA-Z0-9.-]")
+
+
+class CredentialProviderError(RuntimeError):
+    """A credential provider call failed. Message is scrubbed of the secret."""
 
 
 class CredentialProviderNameInUse(Exception):
@@ -140,7 +146,7 @@ def create_oauth2_credential_provider(
         list(custom_config.keys()),
     )
 
-    last_exc: Exception | None = None
+    last_exc: str | None = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
             response = client.create_oauth2_credential_provider(**kwargs)
@@ -161,22 +167,28 @@ def create_oauth2_credential_provider(
                 return response
             raise
         except Exception as e:
-            last_exc = e
+            # kwargs carried clientSecret, and AWS validation errors can echo
+            # an offending parameter back, so the message is scrubbed before
+            # it is logged or re-raised. Callers across agents.py log this
+            # exception on the deploy path.
+            last_exc = redacted_error(e, client_secret)
             if attempt < _MAX_RETRIES:
                 delay = _BASE_DELAY * (2 ** attempt)
                 logger.warning(
                     "Credential provider '%s' creation failed (attempt %d/%d), "
                     "retrying in %.1fs: %s",
-                    name, attempt + 1, _MAX_RETRIES + 1, delay, e,
+                    name, attempt + 1, _MAX_RETRIES + 1, delay, last_exc,
                 )
                 time.sleep(delay)
             else:
                 logger.error(
                     "Credential provider '%s' creation failed after %d attempts: %s",
-                    name, _MAX_RETRIES + 1, e,
+                    name, _MAX_RETRIES + 1, last_exc,
                 )
 
-    raise last_exc  # type: ignore[misc]
+    raise CredentialProviderError(
+        f"Credential provider '{name}' creation failed: {last_exc}"
+    ) from None
 
 
 def delete_credential_provider(provider_name: str, region: str) -> None:
@@ -227,6 +239,20 @@ def create_api_key_credential_provider(
 
     client = boto3.client('bedrock-agentcore-control', region_name=region)
 
+    try:
+        return _create_api_key_provider(client, name, api_key, allow_update)
+    except client.exceptions.ValidationException:
+        raise
+    except CredentialProviderNameInUse:
+        raise
+    except Exception as e:
+        raise CredentialProviderError(
+            f"API key credential provider '{name}' creation failed: "
+            f"{redacted_error(e, api_key)}"
+        ) from None
+
+
+def _create_api_key_provider(client, name: str, api_key: str, allow_update: bool) -> dict[str, Any]:
     try:
         return client.create_api_key_credential_provider(name=name, apiKey=api_key)
     except client.exceptions.ValidationException as e:

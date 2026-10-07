@@ -327,7 +327,7 @@ class TestCredentialsDoNotFollowAMovedEndpoint(McpSecretTestCase):
 
     def test_moving_the_endpoint_clears_the_oauth_client_secret(self) -> None:
         self._as(["t-admin", "g-admins-super"])
-        created = self.client.post("/api/mcp/servers", json={
+        created = self.client.post("/api/mcp/servers", json={  # nosec B105 — placeholder secrets in the payload below
             "name": "oauth-server", "description": "d",
             "endpoint_url": "https://original.example.com/mcp",
             "transport_type": "streamable_http", "auth_type": "oauth2",
@@ -397,7 +397,7 @@ class TestOauth2ClientSecretsLiveInSecretsManager(McpSecretTestCase):
 
     def _create_oauth2_server(self, group: str = "demo", name: str = "oauth-srv"):
         self._as(["t-admin", "g-admins-super"])
-        resp = self.client.post("/api/mcp/servers", json={
+        resp = self.client.post("/api/mcp/servers", json={  # nosec B105 — placeholder secrets in the payload below
             "name": name, "description": "d",
             "endpoint_url": "https://srv.example.com/mcp",
             "transport_type": "streamable_http", "auth_type": "oauth2",

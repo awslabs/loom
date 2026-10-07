@@ -26,8 +26,27 @@ def store_secret(name: str, secret_value: str, region: str, description: str = "
     """
     import boto3
 
+    from app.services.redaction import redacted_error
+
     client = boto3.client("secretsmanager", region_name=region)
 
+    try:
+        return _write_secret(client, name, secret_value, description)
+    except Exception as e:
+        # The request body carried the secret, and AWS validation errors can
+        # echo an offending parameter back. Re-raise with the value scrubbed
+        # and the original suppressed, so none of the ~20 callers that log
+        # this exception can write the secret to CloudWatch.
+        raise SecretWriteError(
+            f"Failed to store secret {name}: {redacted_error(e, secret_value)}"
+        ) from None
+
+
+class SecretWriteError(RuntimeError):
+    """A secret could not be written. Message is scrubbed of the value."""
+
+
+def _write_secret(client, name: str, secret_value: str, description: str) -> str:
     try:
         response = client.create_secret(
             Name=name,

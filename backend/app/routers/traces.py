@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
+from app.routers.utils import get_agent_or_404
 from app.models.agent import Agent
 from app.routers.agents import derive_log_group
 from app.services.otel import (
@@ -84,7 +85,7 @@ class TraceDetailResponse(BaseModel):
 def get_session_traces(
     agent_id: int,
     session_id: str,
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> TraceListResponse:
     """List traces for a session from OTEL runtime logs.
@@ -93,11 +94,10 @@ def get_session_traces(
     and builds summaries from the complete dataset so counts are accurate.
     Filters to traces that belong to the given session_id.
     """
-    agent = db.query(Agent).filter(Agent.id == agent_id).first()
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found"
-        )
+    # Group check, and session:read above rather than agent:read: OTEL trace
+    # bodies carry the model's input/output, so these routes return the same
+    # conversation content as the session readers and were a way around both.
+    agent = get_agent_or_404(agent_id, db, user)
 
     if not agent.runtime_id:
         return TraceListResponse(traces=[])
@@ -126,15 +126,14 @@ def get_session_traces(
 def get_trace_detail(
     agent_id: int,
     trace_id: str,
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> TraceDetailResponse:
     """Get full trace detail with spans and events."""
-    agent = db.query(Agent).filter(Agent.id == agent_id).first()
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found"
-        )
+    # Group check, and session:read above rather than agent:read: OTEL trace
+    # bodies carry the model's input/output, so these routes return the same
+    # conversation content as the session readers and were a way around both.
+    agent = get_agent_or_404(agent_id, db, user)
 
     if not agent.runtime_id:
         raise HTTPException(

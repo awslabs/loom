@@ -81,7 +81,12 @@ class TestCredentialsRouter(unittest.TestCase):
 
         self.assertEqual(response.status_code, 201)
         data = response.json()
-        self.assertEqual(data["name"], "github-oauth")
+        # The caller's name is a label inside a name keyed on the agent id, so
+        # it cannot be aimed at another group's provider.
+        self.assertEqual(data["name"], f"loom-github-oauth-{self.agent.id}-custom")
+        self.assertEqual(
+            mock_create_provider.call_args.kwargs["name"], data["name"],
+        )
         self.assertEqual(data["vendor"], "CustomOAuth2")
         self.assertEqual(data["callback_url"], "https://auth.example.com/callback")
         self.assertEqual(data["scopes"], ["read:user", "repo"])
@@ -145,7 +150,10 @@ class TestCredentialsRouter(unittest.TestCase):
             f"/api/agents/{self.agent.id}/credential-providers/{provider_id}"
         )
         self.assertEqual(response.status_code, 204)
-        mock_delete_provider.assert_called_once_with("to-delete", "us-east-1")
+        # Delete uses the stored namespaced name, not the caller's label.
+        mock_delete_provider.assert_called_once_with(
+            f"loom-to-delete-{self.agent.id}-custom", "us-east-1",
+        )
 
         # Verify it's gone
         list_resp = self.client.get(f"/api/agents/{self.agent.id}/credential-providers")

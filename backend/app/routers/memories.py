@@ -20,7 +20,7 @@ from app.models.memory import Memory
 from app.models.session import InvocationSession
 from app.models.tag_policy import TagPolicy
 from app.models.tag_profile import TagProfile
-from app.routers.utils import check_resource_group_access
+from app.routers.utils import check_resource_group_access, require_group_tag
 from app.services.memory import (
     create_memory as svc_create_memory,
     get_memory as svc_get_memory,
@@ -265,7 +265,7 @@ def create_memory(
 
     # Resolve tags from tag policies + user-supplied profile tags
     resolved_tags: dict[str, str] = {}
-    user_tags = request.tags or {}
+    user_tags = require_group_tag(request.tags, "memory")
     policies = db.query(TagPolicy).all()
     for p in policies:
         if p.key in user_tags:

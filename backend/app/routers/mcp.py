@@ -14,7 +14,7 @@ from sqlalchemy import or_
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.mcp import McpServer, McpTool, McpServerAccess
-from app.routers.utils import check_resource_group_access
+from app.routers.utils import check_resource_group_access, require_group_tag
 from app.services.mcp import test_mcp_connection as svc_test_connection
 from app.services.mcp import fetch_mcp_tools as svc_fetch_tools
 from app.services.mcp import invoke_mcp_tool as svc_invoke_tool
@@ -46,6 +46,7 @@ class McpServerCreateRequest(BaseModel):
     api_key: str | None = Field(None, description="Admin API key (stored in Secrets Manager)")
     supports_elicitation: bool = Field(default=False, description="Whether this server supports MCP elicitation")
     runtime_endpoint_url: str | None = Field(None, description="Direct runtime URL for WebSocket elicitation (bypasses Gateway)")
+    tags: dict[str, str] | None = Field(None, description="Resource tags from a tag profile; must include loom:group")
 
     @model_validator(mode="after")
     def validate_auth_fields(self):
@@ -78,6 +79,7 @@ class McpServerUpdateRequest(BaseModel):
     api_key: str | None = None
     supports_elicitation: bool | None = None
     runtime_endpoint_url: str | None = None
+    tags: dict[str, str] | None = None
 
 
 class McpServerResponse(BaseModel):
@@ -197,6 +199,9 @@ def create_mcp_server(
         obo_grant_type=request.obo_grant_type,
         oauth2_audience=request.oauth2_audience,
     )
+    # loom:group is what authorization is keyed on, so it is required rather
+    # than optional — see require_group_tag.
+    server.set_tags(require_group_tag(request.tags, "MCP server"))
     server.api_key_header_name = request.api_key_header_name
     server.supports_elicitation = "true" if request.supports_elicitation else "false"
     server.runtime_endpoint_url = request.runtime_endpoint_url
@@ -309,6 +314,10 @@ def update_mcp_server(
 
     update_data = request.model_dump(exclude_unset=True)
     new_api_key = update_data.pop("api_key", None)
+    # tags is a JSON column, so it goes through set_tags rather than setattr;
+    # an update that touches tags must still supply loom:group.
+    if "tags" in update_data:
+        server.set_tags(require_group_tag(update_data.pop("tags"), "MCP server"))
     if "supports_elicitation" in update_data:
         update_data["supports_elicitation"] = "true" if update_data["supports_elicitation"] else "false"
     for field, value in update_data.items():

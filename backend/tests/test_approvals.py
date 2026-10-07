@@ -21,6 +21,9 @@ def _admin_user():
         scopes={
             "security:read", "security:write", "invoke",
             "agent:read", "agent:write",
+            # Approval logs carry tool_input_summary, i.e. conversation
+            # content, so the log route is gated on session:read.
+            "session:read",
         },
     )
 

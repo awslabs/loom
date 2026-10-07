@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies.auth import UserInfo, get_current_user, require_scopes
+from app.routers.utils import get_agent_or_404, visible_agent_ids
 from app.models.approval_policy import ApprovalPolicy
 from app.models.approval_log import ApprovalLog
 
@@ -298,19 +299,38 @@ async def decide_approval(
 # ---------------------------------------------------------------------------
 # Approval Log Query
 # ---------------------------------------------------------------------------
-@router.get(
-    "/approvals/logs",
-    dependencies=[Depends(require_scopes("agent:read"))],
-)
+@router.get("/approvals/logs")
 def list_approval_logs(
     agent_id: int | None = Query(None),
     session_id: str | None = Query(None),
     status_filter: str | None = Query(None, alias="status"),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ):
+    """Approval decisions, restricted to agents the caller may see.
+
+    This route was declared with `dependencies=[...]` and no `user` parameter,
+    so it had no identity in scope and *structurally could not* check anything:
+    it filtered only on the caller-supplied agent_id, which is a sequential
+    integer. Any holder of agent:read could walk the IDs and harvest
+    tool_input_summary across every agent in the deployment.
+
+    Now gated on session:read (tool inputs are conversation content) and scoped
+    to visible agents, so an unfiltered query returns the caller's own agents
+    rather than everyone's.
+    """
+    if agent_id is not None:
+        # Resolves the agent and applies the loom:group check.
+        get_agent_or_404(agent_id, db, user)
+
     query = db.query(ApprovalLog).order_by(ApprovalLog.requested_at.desc())
     if agent_id is not None:
         query = query.filter(ApprovalLog.agent_id == agent_id)
+    else:
+        allowed = visible_agent_ids(db, user)
+        if allowed is not None:
+            # Default-deny: no visible agents means no rows, not all rows.
+            query = query.filter(ApprovalLog.agent_id.in_(allowed or [-1]))
     if session_id is not None:
         query = query.filter(ApprovalLog.session_id == session_id)
     if status_filter is not None:

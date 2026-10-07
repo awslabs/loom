@@ -149,6 +149,7 @@ GROUP_SCOPES: dict[str, list[str]] = {
     # Admin groups (t-admin users - single group only)
     "g-admins-super": [
         "catalog:read", "catalog:write", "agent:read", "agent:write",
+        "session:read",
         "memory:read", "memory:write", "security:read", "security:write",
         "tagging:read", "tagging:write",
         "costs:read", "costs:write",
@@ -157,7 +158,8 @@ GROUP_SCOPES: dict[str, list[str]] = {
         "invoke", "admin:read", "admin:write",
     ],
     "g-admins-demo": [
-        "catalog:read", "agent:read", "agent:write", "memory:read", "memory:write",
+        "catalog:read", "agent:read", "agent:write", "session:read",
+        "memory:read", "memory:write",
         "security:read", "tagging:read", "costs:read", "costs:write",
         "mcp:read", "mcp:write", "a2a:read", "a2a:write",
         "registry:read", "registry:write",
@@ -180,9 +182,16 @@ GROUP_SCOPES: dict[str, list[str]] = {
     ],
 
     # User groups (t-user users - can have multiple)
-    "g-users-demo": ["agent:read", "memory:read", "mcp:read", "invoke"],
-    "g-users-test": ["agent:read", "memory:read", "mcp:read", "invoke"],
-    "g-users-strategics": ["agent:read", "memory:read", "mcp:read", "invoke"],
+    # session:read is held alongside agent:read by everyone who has it today,
+    # so splitting the scope is not a privilege change. The point of the split
+    # is that conversation content (prompts, reasoning, responses, tool inputs)
+    # is far more sensitive than "this agent exists", and now has to be granted
+    # deliberately: the domain admins below (security/memory/mcp/a2a/registry)
+    # hold neither, and a future read-only or audit role can be given
+    # agent:read without handing over every chat transcript.
+    "g-users-demo": ["agent:read", "session:read", "memory:read", "mcp:read", "invoke"],
+    "g-users-test": ["agent:read", "session:read", "memory:read", "mcp:read", "invoke"],
+    "g-users-strategics": ["agent:read", "session:read", "memory:read", "mcp:read", "invoke"],
 }
 
 ALL_SCOPES: set[str] = {s for scopes in GROUP_SCOPES.values() for s in scopes}
@@ -198,6 +207,7 @@ oauth2_scheme = OAuth2AuthorizationCodeBearer(
         "catalog:write": "Write catalog",
         "agent:read": "Read agents",
         "agent:write": "Write agents",
+        "session:read": "Read agent conversations (prompts, reasoning, responses)",
         "memory:read": "Read memory",
         "memory:write": "Write memory",
         "security:read": "Read security",

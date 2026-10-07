@@ -44,9 +44,20 @@ class TestCheckResourceGroupAccessUnit(unittest.TestCase):
     def test_super_admin_bypasses_any_group(self):
         check_resource_group_access(_FakeResource("mcp"), _make_user(["t-admin", "g-admins-super"]))
 
-    def test_untagged_resource_accessible_to_anyone(self):
-        check_resource_group_access(_FakeResource(None), _make_user(["t-admin", "g-admins-demo"]))
-        check_resource_group_access(_FakeResource(None), _make_user(["t-user", "g-users-demo"]))
+    def test_untagged_resource_is_denied_to_everyone_but_super(self):
+        """Untagged used to fail open — no loom:group meant "anyone". Absence of
+        policy is not absence of restriction, so it now denies."""
+        for groups in (["t-admin", "g-admins-demo"], ["t-user", "g-users-demo"]):
+            with self.subTest(groups=groups):
+                with self.assertRaises(HTTPException) as ctx:
+                    check_resource_group_access(_FakeResource(None), _make_user(groups))
+                self.assertEqual(ctx.exception.status_code, 403)
+                self.assertIn("no loom:group", ctx.exception.detail)
+
+    def test_untagged_resource_still_reachable_by_super_admin(self):
+        """Somebody has to be able to administer an untagged resource, or it
+        becomes unrecoverable."""
+        check_resource_group_access(_FakeResource(None), _make_user(["t-admin", "g-admins-super"]))
 
     def test_admin_confined_to_own_group(self):
         check_resource_group_access(_FakeResource("demo"), _make_user(["t-admin", "g-admins-demo"]))
@@ -165,9 +176,15 @@ class TestAgentMemoryGroupIsolationEndToEnd(_GroupIsolationTestBase):
         resp = self.client.get(f"/api/agents/{agent_id}")
         self.assertEqual(resp.status_code, 200)
 
-    def test_untagged_agent_readable_by_any_admin(self):
+    def test_untagged_agent_is_not_readable_by_a_group_admin(self):
         agent_id = self._create_agent(None)
         self._override_user(["t-admin", "g-admins-demo"])
+        resp = self.client.get(f"/api/agents/{agent_id}")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_untagged_agent_readable_by_super_admin(self):
+        agent_id = self._create_agent(None)
+        self._override_user(["t-admin", "g-admins-super"])
         resp = self.client.get(f"/api/agents/{agent_id}")
         self.assertEqual(resp.status_code, 200)
 
@@ -204,14 +221,14 @@ class TestAgentMemoryGroupIsolationEndToEnd(_GroupIsolationTestBase):
         self.assertEqual(resp.status_code, 403)
 
     def test_demo_admin_delete_still_confined_to_demo_group(self):
-        """Preserves the pre-existing demo-admin-specific rule alongside the
-        new general check: a demo admin still can't delete an untagged
-        memory either (narrower than the general untagged-is-open rule)."""
+        """A demo admin still can't delete an untagged memory. The general
+        untagged check now denies first, so the message is about the missing
+        loom:group rather than the demo-specific rule — the outcome the test
+        exists for is unchanged."""
         memory_id = self._create_memory(None)
         self._override_user(["t-admin", "g-admins-demo"])
         resp = self.client.delete(f"/api/memories/{memory_id}")
         self.assertEqual(resp.status_code, 403)
-        self.assertIn("demo", resp.json()["detail"].lower())
 
     # -- Named high-impact route: POST /invocations/{agent_id}/token --
 
@@ -382,11 +399,11 @@ class TestMcpServerGroupIsolationEndToEnd(_GroupIsolationTestBase):
         resp = self.client.get(f"/api/mcp/servers/{server_id}")
         self.assertEqual(resp.status_code, 200)
 
-    def test_untagged_server_readable_by_any_admin(self):
+    def test_untagged_server_is_not_readable_by_a_group_admin(self):
         server_id = self._create_server(None)
         self._override_user(["t-admin", "g-admins-demo"])
         resp = self.client.get(f"/api/mcp/servers/{server_id}")
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 403)
 
     def test_demo_admin_cannot_update_other_group_server_by_id(self):
         server_id = self._create_server("mcp")

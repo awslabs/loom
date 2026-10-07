@@ -13,6 +13,7 @@ import { Loader2 } from "lucide-react";
 import { testA2aConnection, testA2aConnectionPreCreate, exportA2aAgent } from "@/api/a2a";
 import { JsonConfigSection } from "./JsonConfigSection";
 import { useAuth } from "@/contexts/AuthContext";
+import { ResourceTagFields } from "@/components/ResourceTagFields";
 import type { A2aAgentCreateRequest, TestConnectionResult } from "@/api/types";
 
 interface A2aAgentFormProps {
@@ -22,6 +23,9 @@ interface A2aAgentFormProps {
 }
 
 export function A2aAgentForm({ onSubmit, onCancel, initialData }: A2aAgentFormProps) {
+  // loom:group is what authorization is keyed on, so the API refuses a create
+  // without it; the submit button stays disabled until a profile is chosen.
+  const [tagValues, setTagValues] = useState<Record<string, string>>(initialData?.tags ?? {});
   const { hasScope } = useAuth();
   const [name, setName] = useState(initialData?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(initialData?.base_url ?? "");
@@ -51,6 +55,7 @@ export function A2aAgentForm({ onSubmit, onCancel, initialData }: A2aAgentFormPr
         if (scopes.trim()) request.oauth2_scopes = scopes.trim();
         request.delegation_mode = delegationMode;
       }
+      request.tags = tagValues;
       await onSubmit(request);
     } finally {
       setSubmitting(false);
@@ -235,8 +240,10 @@ export function A2aAgentForm({ onSubmit, onCancel, initialData }: A2aAgentFormPr
         )}
       </div>
 
+      <ResourceTagFields onChange={setTagValues} />
+
       <div className="flex items-center gap-2 pt-2">
-        <Button size="sm" className="min-w-[120px]" onClick={handleSubmit} disabled={submitting || !baseUrl.trim()}>
+        <Button size="sm" className="min-w-[120px]" onClick={handleSubmit} disabled={submitting || !baseUrl.trim() || !tagValues["loom:group"]}>
           {submitting ? (initialData?.id ? "Updating..." : "Registering...") : (initialData?.id ? "Update" : "Register")}
         </Button>
         <Button size="sm" variant="ghost" onClick={onCancel}>

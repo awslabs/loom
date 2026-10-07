@@ -29,7 +29,9 @@ class TestCreateApiKeyCredentialProvider(unittest.TestCase):
         )
 
     @patch("boto3.client")
-    def test_updates_existing_provider_on_conflict(self, mock_boto_client):
+    def test_updates_existing_provider_on_conflict_when_allowed(self, mock_boto_client):
+        """Reconciling an existing provider is now opt-in; see
+        tests/test_credential_provider_overwrite.py for why."""
         mock_client = MagicMock()
         mock_boto_client.return_value = mock_client
 
@@ -45,7 +47,9 @@ class TestCreateApiKeyCredentialProvider(unittest.TestCase):
             "credentialProviderArn": "arn:cp-updated",
         }
 
-        result = create_api_key_credential_provider("my-key", "sk-new-secret", "us-east-1")
+        result = create_api_key_credential_provider(
+            "my-key", "sk-new-secret", "us-east-1", allow_update=True,
+        )
 
         mock_client.update_api_key_credential_provider.assert_called_once_with(
             name="my-key", apiKey="sk-new-secret",

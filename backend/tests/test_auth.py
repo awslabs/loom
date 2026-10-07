@@ -63,9 +63,13 @@ class TestDeriveScopes(unittest.TestCase):
         self.assertIn("a2a:write", scopes)
 
     def test_derive_scopes_for_users_demo_has_minimal_scopes(self) -> None:
-        """Test that g-users-demo group has agent:read, memory:read, mcp:read, invoke."""
+        """g-users-demo holds agent:read, session:read, memory:read, mcp:read, invoke.
+
+        session:read is separate from agent:read so conversation content can be
+        granted independently of agent visibility; a user still needs it to see
+        their own chat history."""
         scopes = derive_scopes(["g-users-demo"])
-        self.assertEqual(scopes, {"agent:read", "memory:read", "mcp:read", "invoke"})
+        self.assertEqual(scopes, {"agent:read", "session:read", "memory:read", "mcp:read", "invoke"})
 
 
 class TestJWTValidator(unittest.TestCase):

@@ -51,6 +51,7 @@ class TestSecurityRoles(unittest.TestCase):
         mock_policy.return_value = {"statements": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*"}]}
 
         response = self.client.post("/api/security/roles", json={
+            "tags": {"loom:group": "demo"},
             "mode": "import",
             "role_arn": "arn:aws:iam::123456789012:role/test-role",
             "description": "Test role",
@@ -79,6 +80,7 @@ class TestSecurityRoles(unittest.TestCase):
         }
 
         response = self.client.post("/api/security/roles", json={
+            "tags": {"loom:group": "demo"},
             "mode": "import",
             "role_arn": "arn:aws:iam::123456789012:role/tagged-role",
         })
@@ -100,13 +102,17 @@ class TestSecurityRoles(unittest.TestCase):
         mock_iam.list_role_tags.side_effect = Exception("Access denied")
 
         response = self.client.post("/api/security/roles", json={
+            "tags": {"loom:group": "demo"},
             "mode": "import",
             "role_arn": "arn:aws:iam::123456789012:role/no-tag-role",
         })
 
         self.assertEqual(response.status_code, 201)
         data = response.json()
-        self.assertEqual(data["tags"], {})
+        # A failed AWS tag fetch is non-fatal: the import still succeeds and the
+        # caller's profile tags are kept. (Tags are required now, so the old
+        # expectation of an empty dict is no longer reachable.)
+        self.assertEqual(data["tags"], {"loom:group": "demo"})
 
     def test_import_role_missing_arn(self):
         """Test import mode without role_arn."""
@@ -120,8 +126,8 @@ class TestSecurityRoles(unittest.TestCase):
         mock_policy.return_value = {"statements": []}
         arn = "arn:aws:iam::123456789012:role/dup-role"
 
-        self.client.post("/api/security/roles", json={"mode": "import", "role_arn": arn})
-        response = self.client.post("/api/security/roles", json={"mode": "import", "role_arn": arn})
+        self.client.post("/api/security/roles", json={"mode": "import", "role_arn": arn, "tags": {"loom:group": "demo"}})
+        response = self.client.post("/api/security/roles", json={"mode": "import", "role_arn": arn, "tags": {"loom:group": "demo"}})
         self.assertEqual(response.status_code, 409)
 
     @patch("app.routers.security.create_iam_role_with_policy")
@@ -131,6 +137,7 @@ class TestSecurityRoles(unittest.TestCase):
 
         policy = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]}
         response = self.client.post("/api/security/roles", json={
+            "tags": {"loom:group": "demo"},
             "mode": "wizard",
             "role_name": "new-role",
             "description": "Wizard role",
@@ -159,10 +166,12 @@ class TestSecurityRoles(unittest.TestCase):
         mock_policy.return_value = {"statements": []}
 
         self.client.post("/api/security/roles", json={
+            "tags": {"loom:group": "demo"},
             "mode": "import",
             "role_arn": "arn:aws:iam::123456789012:role/role-a",
         })
         self.client.post("/api/security/roles", json={
+            "tags": {"loom:group": "demo"},
             "mode": "import",
             "role_arn": "arn:aws:iam::123456789012:role/role-b",
         })
@@ -177,6 +186,7 @@ class TestSecurityRoles(unittest.TestCase):
         mock_policy.return_value = {"statements": []}
 
         create_resp = self.client.post("/api/security/roles", json={
+            "tags": {"loom:group": "demo"},
             "mode": "import",
             "role_arn": "arn:aws:iam::123456789012:role/get-test",
         })
@@ -198,6 +208,7 @@ class TestSecurityRoles(unittest.TestCase):
         mock_policy.return_value = {"statements": []}
 
         create_resp = self.client.post("/api/security/roles", json={
+            "tags": {"loom:group": "demo"},
             "mode": "import",
             "role_arn": "arn:aws:iam::123456789012:role/upd-test",
         })
@@ -223,6 +234,7 @@ class TestSecurityRoles(unittest.TestCase):
         mock_policy.return_value = {"statements": []}
 
         create_resp = self.client.post("/api/security/roles", json={
+            "tags": {"loom:group": "demo"},
             "mode": "import",
             "role_arn": "arn:aws:iam::123456789012:role/del-test",
         })
@@ -247,6 +259,7 @@ class TestSecurityRoles(unittest.TestCase):
 
         role_arn = "arn:aws:iam::123456789012:role/in-use-role"
         create_resp = self.client.post("/api/security/roles", json={
+            "tags": {"loom:group": "demo"},
             "mode": "import",
             "role_arn": role_arn,
         })
@@ -305,6 +318,7 @@ class TestSecurityAuthorizers(unittest.TestCase):
     def test_create_authorizer_basic(self):
         """Test creating a basic authorizer without secret."""
         response = self.client.post("/api/security/authorizers", json={
+            "tags": {"loom:group": "demo"},
             "name": "my-cognito",
             "authorizer_type": "cognito",
             "pool_id": "us-east-1_abc123",
@@ -333,6 +347,7 @@ class TestSecurityAuthorizers(unittest.TestCase):
         }
 
         response = self.client.post("/api/security/authorizers", json={
+            "tags": {"loom:group": "demo"},
             "name": "tagged-cognito",
             "authorizer_type": "cognito",
             "pool_id": "us-east-1_tagged",
@@ -342,15 +357,18 @@ class TestSecurityAuthorizers(unittest.TestCase):
         self.assertEqual(data["tags"]["loom:application"], "myapp")
         self.assertEqual(data["tags"]["loom:owner"], "alice")
 
-    def test_create_non_cognito_authorizer_no_tags(self):
-        """Test that non-Cognito authorizers get empty tags."""
+    def test_create_non_cognito_authorizer_merges_no_aws_tags(self):
+        """A non-Cognito authorizer has no user pool to read tags from, so the
+        stored tags are exactly the caller's profile — nothing is merged in.
+        (Tags themselves are now required, so "empty" is no longer reachable.)"""
         response = self.client.post("/api/security/authorizers", json={
+            "tags": {"loom:group": "demo"},
             "name": "other-auth",
             "authorizer_type": "other",
             "discovery_url": "https://example.com/.well-known/openid-configuration",
         })
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()["tags"], {})
+        self.assertEqual(response.json()["tags"], {"loom:group": "demo"})
 
     @patch("app.routers.security.store_secret")
     def test_create_authorizer_with_secret(self, mock_store):
@@ -358,6 +376,7 @@ class TestSecurityAuthorizers(unittest.TestCase):
         mock_store.return_value = "arn:aws:secretsmanager:us-east-1:123:secret:test-abc"
 
         response = self.client.post("/api/security/authorizers", json={
+            "tags": {"loom:group": "demo"},
             "name": "secret-auth",
             "authorizer_type": "cognito",
             "client_id": "my-client",
@@ -370,10 +389,12 @@ class TestSecurityAuthorizers(unittest.TestCase):
     def test_create_authorizer_duplicate_name(self):
         """Test creating authorizer with duplicate name."""
         self.client.post("/api/security/authorizers", json={
+            "tags": {"loom:group": "demo"},
             "name": "dup-auth",
             "authorizer_type": "cognito",
         })
         response = self.client.post("/api/security/authorizers", json={
+            "tags": {"loom:group": "demo"},
             "name": "dup-auth",
             "authorizer_type": "other",
         })
@@ -381,8 +402,8 @@ class TestSecurityAuthorizers(unittest.TestCase):
 
     def test_list_authorizers(self):
         """Test listing authorizers."""
-        self.client.post("/api/security/authorizers", json={"name": "auth-a", "authorizer_type": "cognito"})
-        self.client.post("/api/security/authorizers", json={"name": "auth-b", "authorizer_type": "other"})
+        self.client.post("/api/security/authorizers", json={"name": "auth-a", "authorizer_type": "cognito", "tags": {"loom:group": "demo"}})
+        self.client.post("/api/security/authorizers", json={"name": "auth-b", "authorizer_type": "other", "tags": {"loom:group": "demo"}})
 
         response = self.client.get("/api/security/authorizers")
         self.assertEqual(response.status_code, 200)
@@ -391,6 +412,7 @@ class TestSecurityAuthorizers(unittest.TestCase):
     def test_get_authorizer(self):
         """Test getting a single authorizer."""
         create_resp = self.client.post("/api/security/authorizers", json={
+            "tags": {"loom:group": "demo"},
             "name": "get-auth",
             "authorizer_type": "cognito",
         })
@@ -408,6 +430,7 @@ class TestSecurityAuthorizers(unittest.TestCase):
     def test_update_authorizer(self):
         """Test updating an authorizer."""
         create_resp = self.client.post("/api/security/authorizers", json={
+            "tags": {"loom:group": "demo"},
             "name": "upd-auth",
             "authorizer_type": "cognito",
         })
@@ -433,6 +456,7 @@ class TestSecurityAuthorizers(unittest.TestCase):
         mock_store.return_value = "arn:aws:secretsmanager:us-east-1:123:secret:test"
 
         create_resp = self.client.post("/api/security/authorizers", json={
+            "tags": {"loom:group": "demo"},
             "name": "del-auth",
             "authorizer_type": "cognito",
             "client_secret": "secret-value",
@@ -450,6 +474,7 @@ class TestSecurityAuthorizers(unittest.TestCase):
         mock_store.return_value = "arn:aws:secretsmanager:us-east-1:123:secret:cred"
 
         create_resp = self.client.post("/api/security/authorizers", json={
+            "tags": {"loom:group": "demo"},
             "name": "auth-with-creds",
             "authorizer_type": "cognito",
         })

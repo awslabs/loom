@@ -32,6 +32,7 @@ interface CognitoUser {
 export type Scope =
   | "catalog:read" | "catalog:write"
   | "agent:read" | "agent:write"
+  | "session:read"
   | "memory:read" | "memory:write"
   | "security:read" | "security:write"
   | "tagging:read" | "tagging:write"
@@ -50,6 +51,7 @@ export const GROUP_SCOPES: Record<string, Scope[]> = {
   // Admin groups (t-admin users - single group only)
   "g-admins-super": [
     "catalog:read", "catalog:write", "agent:read", "agent:write",
+    "session:read",
     "memory:read", "memory:write", "security:read", "security:write",
     "tagging:read", "tagging:write",
     "costs:read", "costs:write",
@@ -58,7 +60,8 @@ export const GROUP_SCOPES: Record<string, Scope[]> = {
     "invoke", "admin:read", "admin:write",
   ],
   "g-admins-demo": [
-    "catalog:read", "agent:read", "agent:write", "memory:read", "memory:write",
+    "catalog:read", "agent:read", "agent:write", "session:read",
+    "memory:read", "memory:write",
     "security:read", "tagging:read", "costs:read", "costs:write",
     "mcp:read", "mcp:write", "a2a:read", "a2a:write",
     "registry:read", "registry:write",
@@ -81,9 +84,9 @@ export const GROUP_SCOPES: Record<string, Scope[]> = {
   ],
 
   // User groups (t-user users - can have multiple)
-  "g-users-demo": ["agent:read", "memory:read", "mcp:read", "invoke"],
-  "g-users-test": ["agent:read", "memory:read", "mcp:read", "invoke"],
-  "g-users-strategics": ["agent:read", "memory:read", "mcp:read", "invoke"],
+  "g-users-demo": ["agent:read", "session:read", "memory:read", "mcp:read", "invoke"],
+  "g-users-test": ["agent:read", "session:read", "memory:read", "mcp:read", "invoke"],
+  "g-users-strategics": ["agent:read", "session:read", "memory:read", "mcp:read", "invoke"],
 };
 
 function deriveScopes(groups: string[]): Set<Scope> {

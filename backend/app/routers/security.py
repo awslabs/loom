@@ -17,7 +17,7 @@ from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
 from app.models.permission_request import PermissionRequest
 from app.models.agent import Agent
-from app.routers.utils import check_resource_group_access
+from app.routers.utils import check_resource_group_access, require_group_tag
 from app.services.security import (
     apply_permissions_to_role,
     create_iam_role_with_policy,
@@ -69,6 +69,7 @@ class UpdateRoleRequest(BaseModel):
 
 
 class CreateAuthorizerRequest(BaseModel):
+    tags: dict[str, str] | None = Field(None, description="Resource tags from a tag profile; must include loom:group")
     name: str
     authorizer_type: str  # "cognito" or "other"
     pool_id: str | None = None
@@ -164,7 +165,7 @@ def create_role(request: CreateRoleRequest, user: UserInfo = Depends(require_sco
             description=request.description,
             policy_document=json.dumps(policy_doc),
         )
-        role.set_tags(tags)
+        role.set_tags(require_group_tag(tags, "role"))
         db.add(role)
         db.commit()
         db.refresh(role)
@@ -330,7 +331,8 @@ def create_authorizer(request: CreateAuthorizerRequest, user: UserInfo = Depends
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Failed to store client secret: {e}")
 
-    # Fetch tags from the Cognito User Pool if applicable
+    # Tags from the Cognito User Pool, overlaid with the caller's profile tags
+    # (the caller's win, and loom:group is required — see require_group_tag).
     tags: dict[str, str] = {}
     if request.authorizer_type == "cognito" and request.pool_id:
         try:
@@ -341,6 +343,7 @@ def create_authorizer(request: CreateAuthorizerRequest, user: UserInfo = Depends
             tags = {k: v for k, v in raw_tags.items()}
         except Exception as e:
             logger.warning("Could not fetch tags for Cognito pool %s: %s", request.pool_id, e)
+    tags.update(request.tags or {})
 
     user_client_secret_arn = None
     if request.user_client_secret:
@@ -370,7 +373,7 @@ def create_authorizer(request: CreateAuthorizerRequest, user: UserInfo = Depends
         user_client_secret_arn=user_client_secret_arn,
         user_redirect_uri=request.user_redirect_uri,
     )
-    auth.set_tags(tags)
+    auth.set_tags(require_group_tag(tags, "authorizer"))
     db.add(auth)
     db.commit()
     db.refresh(auth)

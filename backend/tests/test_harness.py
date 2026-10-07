@@ -70,6 +70,7 @@ class TestHarnessDeployment(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "my_harness_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -96,6 +97,7 @@ class TestHarnessDeployment(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "fail_harness",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -129,6 +131,7 @@ class TestHarnessDeployment(unittest.TestCase):
             response = self.client.post(
                 "/api/agents",
                 json={
+                    "tags": {"loom:group": "demo"},
                     "source": "harness",
                     "name": "mantle_only_agent",
                     "model_id": "google.gemma-4-31b",
@@ -148,6 +151,7 @@ class TestHarnessDeployment(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
                 "role_arn": "arn:aws:iam::123456789012:role/test-role",
@@ -160,6 +164,7 @@ class TestHarnessDeployment(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "test_agent",
                 "role_arn": "arn:aws:iam::123456789012:role/test-role",
@@ -172,6 +177,7 @@ class TestHarnessDeployment(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "test_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -184,6 +190,7 @@ class TestHarnessDeployment(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "my-harness",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -215,6 +222,7 @@ class TestHarnessDeployment(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "mcp_harness_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -244,6 +252,7 @@ class TestHarnessDeployment(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "params_harness_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -273,6 +282,7 @@ class TestHarnessDeployment(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "delete_harness_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -308,6 +318,7 @@ class TestHarnessDeployment(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "status_harness_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -340,6 +351,7 @@ class TestHarnessDeployment(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "refresh_harness_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -357,6 +369,7 @@ class TestHarnessDeployment(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "bad_mcp_harness",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -379,6 +392,7 @@ class TestHarnessDeployment(unittest.TestCase):
         self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "config_harness_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -694,6 +708,7 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "litellm_harness",
                 "model_id": "claude-sonnet-5",
@@ -704,9 +719,12 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
 
         self.assertEqual(response.status_code, 201)
 
+        # Keyed on the agent id so another group cannot derive this name.
+        expected_cp = f"loom-litellm-harness-{response.json()['id']}-litellm-key"
+
         mock_vend.assert_called_once()
         mock_create_cp.assert_called_once()
-        self.assertEqual(mock_create_cp.call_args[1]["name"], "loom-litellm-harness-litellm-key")
+        self.assertEqual(mock_create_cp.call_args[1]["name"], expected_cp)
         self.assertEqual(mock_create_cp.call_args[1]["api_key"], "sk-virtual-key")
 
         create_kwargs = mock_create_harness.call_args[1]
@@ -725,7 +743,7 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
         config_data = json.loads(config.value)
         self.assertEqual(config_data["provider"], "litellm")
         self.assertEqual(config_data["base_url"], "https://my-proxy.example.com")
-        self.assertEqual(config_data["litellm_api_key_credential_provider_name"], "loom-litellm-harness-litellm-key")
+        self.assertEqual(config_data["litellm_api_key_credential_provider_name"], expected_cp)
 
     @patch("app.routers.agents.update_harness_api")
     @patch("app.routers.agents.create_harness_api")
@@ -763,6 +781,7 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
         create_response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "litellm_harness_update",
                 "model_id": "azure/gpt-4.1-mini",
@@ -801,6 +820,9 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
         )
         self.assertEqual(update_response.status_code, 200)
 
+        # The repair re-derives the name, so it picks up the agent id too.
+        expected_cp = f"loom-litellm-harness-update-{agent_id}-litellm-key"
+
         update_kwargs = mock_update_harness.call_args[1]
         self.assertEqual(update_kwargs["provider"], "litellm")
         self.assertEqual(
@@ -808,7 +830,7 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
             (
                 "arn:aws:bedrock-agentcore:us-east-1:123456789012:"
                 "token-vault/default/apikeycredentialprovider/"
-                "loom-litellm-harness-update-litellm-key"
+                f"{expected_cp}"
             ),
         )
         self.assertEqual(
@@ -824,8 +846,7 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
         self.assertEqual(config_data["provider"], "litellm")
         self.assertEqual(config_data["base_url"], "https://my-proxy.example.com")
         self.assertEqual(
-            config_data["litellm_api_key_credential_provider_name"],
-            "loom-litellm-harness-update-litellm-key",
+            config_data["litellm_api_key_credential_provider_name"], expected_cp,
         )
 
     @patch("app.services.litellm.get_agent_base_url", return_value="")
@@ -833,6 +854,7 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "litellm_harness_unconfigured",
                 "model_id": "claude-sonnet-5",
@@ -856,6 +878,7 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "litellm_harness_cp_fail",
                 "model_id": "claude-sonnet-5",
@@ -879,6 +902,7 @@ class TestDeployHarnessLitellmProvider(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "harness",
                 "name": "litellm_harness_vend_fail",
                 "model_id": "claude-sonnet-5",

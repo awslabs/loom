@@ -526,6 +526,9 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   // CreateHarness's dedicated systemPrompt field and aren't capped by this.
   const systemPromptBytes = utf8ByteLength(systemPrompt);
   const systemPromptTooLarge = deploymentType === "custom" && systemPromptBytes > MAX_SYSTEM_PROMPT_BYTES;
+  // loom:group is what authorization is keyed on, so the API refuses a create
+  // without it — block the deploy rather than surface a 400.
+  const missingGroupTag = !tagValues["loom:group"];
 
   // Shared by the "View / Paste JSON" disclosure and manifest import (R5/R6):
   // parses a manifest and applies it to form state. Returns an error string on
@@ -820,7 +823,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       await onRegister(arn.trim(), modelId || undefined);
       setArn("");
     } else if (deploymentType === "managed") {
-      if (!name.trim() || !modelId || !selectedRoleId || !onDeployHarness || hasValidationErrors) return;
+      if (!name.trim() || !modelId || !selectedRoleId || !onDeployHarness || hasValidationErrors || missingGroupTag) return;
 
       const roleArn = selectedRole?.role_arn ?? "";
       const authConfig = selectedAuthConfig;
@@ -884,7 +887,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       };
       await onDeployHarness(request);
     } else {
-      if (!name.trim() || !modelId || !selectedRoleId || !onDeploy || hasValidationErrors || systemPromptTooLarge) return;
+      if (!name.trim() || !modelId || !selectedRoleId || !onDeploy || hasValidationErrors || systemPromptTooLarge || missingGroupTag) return;
 
       // Resolve managed role to role_arn
       const roleArn = selectedRole?.role_arn ?? null;
@@ -1953,7 +1956,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                           type="submit"
                           size="sm"
                           className="flex-1"
-                          disabled={isLoading || !name.trim() || !modelId || !selectedRoleId || (deploymentType === "custom" ? !onDeploy : !onDeployHarness) || hasValidationErrors || systemPromptTooLarge}
+                          disabled={isLoading || !name.trim() || !modelId || !selectedRoleId || (deploymentType === "custom" ? !onDeploy : !onDeployHarness) || hasValidationErrors || systemPromptTooLarge || missingGroupTag}
                         >
                           {isLoading ? "Deploying..." : (exportAgentId ? "Update agent" : (deploymentType === "managed" ? "Deploy harness" : "Deploy agent"))}
                         </Button>

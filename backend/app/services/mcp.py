@@ -51,6 +51,19 @@ def legacy_admin_api_key_secret_name(name: str) -> str:
     return f"loom/mcp/{name}/admin-api-key"
 
 
+def _resource_label(resource: Any) -> str:
+    """"MCP server 42" / "A2A agent 7" — for logs, in place of a secret path.
+
+    The Secrets Manager name is a deterministic function of this id and the
+    secret kind, so it adds nothing to a log line while looking exactly like a
+    credential. Logging the resource keeps the diagnostic and drops the
+    appearance.
+    """
+    table = getattr(getattr(resource, "__table__", None), "name", "")
+    kind = "A2A agent" if table == "a2a_agents" or hasattr(resource, "base_url") else "MCP server"
+    return f"{kind} {getattr(resource, 'id', '?')}"
+
+
 def resolve_oauth2_client_secret(server: Any) -> str | None:
     """The OAuth2 client secret for an MCP server or A2A agent.
 
@@ -74,10 +87,19 @@ def resolve_oauth2_client_secret(server: Any) -> str | None:
     if not legacy:
         return None
     try:
-        store_secret(name, legacy, region, description=f"OAuth2 client secret for {name}")
-        logger.info("Migrated a plaintext OAuth2 client secret into %s", name)
+        store_secret(
+            name, legacy, region,
+            description=f"OAuth2 client secret for {_resource_label(server)}",
+        )
+        logger.info(
+            "Migrated the plaintext OAuth2 client secret for %s into Secrets Manager",
+            _resource_label(server),
+        )
     except Exception as e:
-        logger.warning("Could not migrate the plaintext OAuth2 client secret to %s: %s", name, e)
+        logger.warning(
+            "Could not migrate the plaintext OAuth2 client secret for %s: %s",
+            _resource_label(server), e,
+        )
     return legacy
 
 
@@ -135,8 +157,8 @@ def _resolve_legacy_admin_api_key(server: Any, region: str, db: Any) -> str | No
         )
         delete_secret(legacy_admin_api_key_secret_name(server.name), region)
         logger.info(
-            "Migrated the admin API key for MCP server %s from its name-keyed "
-            "location to %s", server.id, admin_api_key_secret_name(server.id),
+            "Migrated the admin API key for MCP server %s from its old "
+            "name-keyed location to the id-keyed one", server.id,
         )
     except Exception as e:
         # The read succeeded, so serve it; migration retries on the next call.

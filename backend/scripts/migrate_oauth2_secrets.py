@@ -51,7 +51,7 @@ def main() -> int:
                     continue
                 name = secret_name_for(row)
                 if not args.apply:
-                    logger.info("Would move %s %s's client secret to %s", label, row.id, name)
+                    logger.info("Would move %s %s's client secret into Secrets Manager", label, row.id)
                     moved += 1
                     continue
                 try:
@@ -64,13 +64,13 @@ def main() -> int:
                     if get_secret(name, region) != row.oauth2_client_secret:
                         raise RuntimeError("read-back mismatch")
                 except Exception as e:
-                    logger.error("FAILED %s %s (%s): %s", label, row.id, name, e)
+                    logger.error("FAILED %s %s: %s", label, row.id, e)
                     failed += 1
                     continue
                 row.oauth2_client_secret = None
                 row.has_oauth2_secret = "true"  # nosec B105 — boolean flag, not a password
                 moved += 1
-                logger.info("Moved %s %s's client secret to %s", label, row.id, name)
+                logger.info("Moved %s %s's client secret into Secrets Manager", label, row.id)
         if args.apply:
             db.commit()
     finally:

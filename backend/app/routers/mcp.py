@@ -444,14 +444,21 @@ def update_mcp_server(
         # endpoint. Sent in the same request, api_key wins and no clear
         # happens, so moving a server and supplying its new key is one call.
         region = os.getenv("AWS_REGION", "us-east-1")
-        for secret_name in (
-            admin_api_key_secret_name(server.id),
-            legacy_admin_api_key_secret_name(previous_name),
+        # Labelled rather than logged by path: which of the two locations
+        # failed is the useful part, and the path itself is a deterministic
+        # function of the id, so printing it only makes the line look like a
+        # leaked credential.
+        for where, secret_name in (
+            ("current", admin_api_key_secret_name(server.id)),
+            ("legacy", legacy_admin_api_key_secret_name(previous_name)),
         ):
             try:
                 delete_secret(secret_name, region)
             except Exception as e:
-                logger.warning("Failed to delete secret %s on endpoint change: %s", secret_name, e)
+                logger.warning(
+                    "Failed to delete the %s admin API key for MCP server %s "
+                    "on endpoint change: %s", where, server.id, e,
+                )
         server.has_admin_api_key = "false"
         logger.warning(
             "Cleared the admin API key for MCP server %s: endpoint_url changed "
@@ -486,15 +493,18 @@ def delete_mcp_server(
     except Exception:
         pass  # absent for servers with no OAuth2 secret, which is most of them
     if server.has_admin_api_key == "true":
-        for secret_name in (
-            admin_api_key_secret_name(server.id),
+        for where, secret_name in (
+            ("current", admin_api_key_secret_name(server.id)),
             # Servers created before the migration may still have theirs here.
-            legacy_admin_api_key_secret_name(server.name),
+            ("legacy", legacy_admin_api_key_secret_name(server.name)),
         ):
             try:
                 delete_secret(secret_name, region)
             except Exception as e:
-                logger.warning("Failed to delete secret %s: %s", secret_name, e)
+                logger.warning(
+                    "Failed to delete the %s admin API key for MCP server %s: %s",
+                    where, server.id, e,
+                )
     result = McpServerResponse(**server.to_dict())
     db.delete(server)
     db.commit()

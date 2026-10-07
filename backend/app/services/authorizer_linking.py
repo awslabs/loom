@@ -61,7 +61,11 @@ def resolve_access_token(
 
     try:
         secret_name = _secret_name(auth_id, user_sub)
-        logger.info("Looking up linked token at %s", secret_name)
+        # Was logging the full secret path at INFO on every lookup, which put
+        # a credential-shaped string plus the user's subject identifier into
+        # the log on a hot path. The failure branch below already reports
+        # auth and user, so nothing diagnostic is lost.
+        logger.debug("Looking up the linked token for authorizer %s", auth_id)
         raw = get_secret(secret_name, region)
         payload = json.loads(raw)
         refresh_token = payload["refresh_token"]

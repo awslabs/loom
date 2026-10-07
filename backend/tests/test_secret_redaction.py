@@ -81,13 +81,14 @@ class TestStoreSecretScrubsItsError(unittest.TestCase):
         self.assertIsNone(ctx.exception.__cause__)
         self.assertNotIn(SECRET, repr(ctx.exception.__cause__))
 
-    def test_the_secret_name_is_kept_for_diagnosis(self) -> None:
-        """Scrubbing must not make the error useless."""
+    def test_the_aws_error_code_is_kept_for_diagnosis(self) -> None:
+        """Scrubbing must not make the error useless. The AWS code is the
+        useful part; the path is not, and every caller names the resource."""
         with self.assertRaises(SecretWriteError) as ctx:
             store_secret("loom/mcp/1/oauth2-client-secret", SECRET, "us-east-1")
         msg = str(ctx.exception)
-        self.assertIn("loom/mcp/1/oauth2-client-secret", msg)
         self.assertIn("ValidationException", msg)
+        self.assertNotIn("loom/mcp/1", msg)
 
 
 class TestCredentialProviderScrubsItsError(unittest.TestCase):
@@ -145,3 +146,88 @@ class TestCredentialProviderScrubsItsError(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLogsDoNotContainSecretPaths(unittest.TestCase):
+    """A log line should not look like a leaked credential.
+
+    None of these paths *is* a secret — they are deterministic functions of a
+    resource id and a secret kind. But a line reading `Failed to delete secret
+    loom/mcp/42/oauth2-client-secret` costs a scanner finding and a security
+    review every time it is read, and it tells an operator nothing that
+    "the OAuth2 client secret for MCP server 42" does not. So the paths are
+    out of the logs and the resource is named instead.
+    """
+
+    def test_kind_never_echoes_an_identifier(self) -> None:
+        """The per-user paths end in the user's subject identifier, so taking
+        the trailing segment would have swapped a credential locator for a
+        user identifier. That was the first version of this helper."""
+        from app.services.secrets import _kind
+
+        cases = {
+            "loom/mcp/42/oauth2-client-secret": "oauth2-client-secret",
+            "loom/mcp/7/admin-api-key": "admin-api-key",
+            "loom/authorizers/3/user-tokens/abc123sub": "user-tokens",
+            "loom/mcp/srv/api-key/user-sub-xyz": "api-key",
+            "loom/settings/litellm-master-key": "litellm-master-key",
+            "loom/agents/5/cognito-client-secret": "cognito-client-secret",
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(expected, _kind(path))
+
+    def test_unknown_shapes_degrade_rather_than_echo(self) -> None:
+        from app.services.secrets import _kind
+
+        self.assertEqual("secret", _kind("loom/something/new/opaque-id-9f3a"))
+
+    def test_secret_write_failure_names_no_path(self) -> None:
+        from app.services.secrets import SecretWriteError, store_secret
+
+        logging.disable(logging.CRITICAL)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        client = MagicMock()
+        client.exceptions.ResourceExistsException = _AwsEchoesTheValue
+        client.exceptions.InvalidRequestException = _AwsEchoesTheValue
+        client.create_secret.side_effect = Exception("AccessDeniedException: nope")
+        with patch("boto3.client", return_value=client):
+            with self.assertRaises(SecretWriteError) as ctx:
+                store_secret("loom/mcp/42/oauth2-client-secret", SECRET, "us-east-1")
+        msg = str(ctx.exception)
+        self.assertNotIn("loom/mcp/42", msg)
+        self.assertIn("AccessDeniedException", msg, "the AWS code must survive")
+
+    def test_no_log_call_passes_a_secret_path_builder(self) -> None:
+        """Structural: nothing may hand a secret-name helper to a logger."""
+        import ast
+        import pathlib
+
+        builders = {
+            "admin_api_key_secret_name", "legacy_admin_api_key_secret_name",
+            "user_api_key_secret_name", "oauth2_client_secret_name",
+            "secret_name_for", "_secret_name", "credential_provider_name",
+        }
+        roots = [pathlib.Path("app"), pathlib.Path("scripts")]
+        offenders = []
+        for root in roots:
+            for path in sorted(root.rglob("*.py")):
+                for node in ast.walk(ast.parse(path.read_text())):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    if getattr(node.func, "attr", None) not in {
+                        "info", "warning", "error", "exception", "debug", "critical"
+                    }:
+                        continue
+                    for arg in node.args:
+                        for sub in ast.walk(arg):
+                            if isinstance(sub, ast.Call):
+                                nm = (sub.func.id if isinstance(sub.func, ast.Name)
+                                      else getattr(sub.func, "attr", None))
+                                if nm in builders:
+                                    offenders.append(f"{path}:{node.lineno} -> {nm}()")
+        self.assertEqual(
+            [], offenders,
+            "A secret path is being logged. Name the resource instead:\n  "
+            + "\n  ".join(offenders),
+        )

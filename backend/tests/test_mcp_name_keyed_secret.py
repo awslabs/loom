@@ -279,3 +279,206 @@ class TestListRoutesFilterByGroup(McpSecretTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCredentialsDoNotFollowAMovedEndpoint(McpSecretTestCase):
+    """A credential issued for one host must not follow the record to another.
+
+    The admin API key is keyed on `server.id`, so it survived a change of
+    `endpoint_url` — and `mcp:write` is enough to make that change. Any of
+    test-connection, tools/refresh or tools/invoke then resolves the key and
+    sends it as an `Authorization: Bearer` header to whatever host the URL now
+    names. The key may have been configured by a different admin, and on an
+    OBO invocation the same endpoint receives every invoking user's downstream
+    access token.
+
+    Repointing a server is a legitimate admin action; silently re-aiming its
+    stored credential at the new host is not. Moving the endpoint now clears
+    the key, so it has to be re-entered deliberately.
+    """
+
+    def _server_with_key(self, group: str = "demo"):
+        self._as(["t-admin", "g-admins-demo"])
+        created = self._create("own-server", group, endpoint="https://original.example.com/mcp")
+        self.assertEqual(201, created.status_code)
+        server_id = created.json()["id"]
+        self.assertIn(f"loom/mcp/{server_id}/admin-api-key", self.vault.store)
+        return server_id
+
+    def test_moving_the_endpoint_clears_the_admin_key(self) -> None:
+        server_id = self._server_with_key()
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertNotIn(f"loom/mcp/{server_id}/admin-api-key", self.vault.store)
+        self.assertFalse(resp.json()["has_admin_api_key"])
+
+    def test_resolve_returns_nothing_after_the_move(self) -> None:
+        """The end that matters: nothing is left to send to the new host."""
+        server_id = self._server_with_key()
+        self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        server = self.db.query(McpServer).filter(McpServer.id == server_id).first()
+        self.assertIsNone(resolve_api_key(server, db=self.db))
+
+    def test_moving_the_endpoint_clears_the_oauth_client_secret(self) -> None:
+        self._as(["t-admin", "g-admins-super"])
+        created = self.client.post("/api/mcp/servers", json={  # nosec B105 — placeholder secrets in the payload below
+            "name": "oauth-server", "description": "d",
+            "endpoint_url": "https://original.example.com/mcp",
+            "transport_type": "streamable_http", "auth_type": "oauth2",
+            "oauth2_well_known_url": "https://idp.example.com/.well-known/openid-configuration",
+            "oauth2_client_id": "cid",
+            "oauth2_client_secret": "M2M-SECRET",  # nosec B106
+            "tags": {"loom:group": "demo"},
+        })
+        self.assertEqual(201, created.status_code)
+        server_id = created.json()["id"]
+
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertFalse(resp.json()["has_oauth2_secret"])
+
+    # -- the move must stay usable in one call, and unrelated edits untouched --
+
+    def test_supplying_a_new_key_with_the_move_keeps_it(self) -> None:
+        """Moving a server and giving it the new host's key is one request."""
+        server_id = self._server_with_key()
+        resp = self.client.put(f"/api/mcp/servers/{server_id}", json={
+            "endpoint_url": "https://new-home.example.com/mcp",
+            "api_key": "key-for-the-new-host",  # nosec B106
+        })
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.json()["has_admin_api_key"])
+        self.assertEqual(
+            "key-for-the-new-host",
+            self.vault.store[f"loom/mcp/{server_id}/admin-api-key"],
+        )
+
+    def test_editing_something_else_keeps_the_key(self) -> None:
+        server_id = self._server_with_key()
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}", json={"description": "renamed only"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.json()["has_admin_api_key"])
+        self.assertIn(f"loom/mcp/{server_id}/admin-api-key", self.vault.store)
+
+    def test_rewriting_the_same_endpoint_keeps_the_key(self) -> None:
+        """An idempotent PUT from a UI form must not wipe the credential."""
+        server_id = self._server_with_key()
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://original.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.json()["has_admin_api_key"])
+
+
+class TestOauth2ClientSecretsLiveInSecretsManager(McpSecretTestCase):
+    """The OAuth2 client secret must not be a database column.
+
+    `McpServer.oauth2_client_secret` and `A2aAgent.oauth2_client_secret` were
+    the only secrets in Loom kept in the database rather than Secrets Manager.
+    That made a dump or RDS snapshot directly credential-bearing, left secret
+    reads with no CloudTrail trail, and made the `admin:write` export route a
+    plaintext database read. Every other secret in the system — authorizer and
+    identity-provider client secrets, the LiteLLM master key, MCP admin and
+    per-user API keys — already went to Secrets Manager with only a flag or an
+    ARN persisted.
+    """
+
+    def _create_oauth2_server(self, group: str = "demo", name: str = "oauth-srv"):
+        self._as(["t-admin", "g-admins-super"])
+        resp = self.client.post("/api/mcp/servers", json={  # nosec B105 — placeholder secrets in the payload below
+            "name": name, "description": "d",
+            "endpoint_url": "https://srv.example.com/mcp",
+            "transport_type": "streamable_http", "auth_type": "oauth2",
+            "oauth2_well_known_url": "https://idp.example.com/.well-known/openid-configuration",
+            "oauth2_client_id": "cid",
+            "oauth2_client_secret": "M2M-CLIENT-SECRET",  # nosec B105,B106
+            "tags": {"loom:group": group},
+        })
+        self.assertEqual(201, resp.status_code, resp.text)
+        return resp.json()["id"]
+
+    def test_create_puts_the_secret_in_secrets_manager_not_the_column(self) -> None:
+        server_id = self._create_oauth2_server()
+        self.assertEqual(
+            "M2M-CLIENT-SECRET",
+            self.vault.store[f"loom/mcp/{server_id}/oauth2-client-secret"],
+        )
+        row = self.db.query(McpServer).filter(McpServer.id == server_id).first()
+        self.assertIsNone(
+            row.oauth2_client_secret,
+            "the plaintext column must stay empty — that is the whole point",
+        )
+
+    def test_the_response_still_reports_that_a_secret_exists(self) -> None:
+        """has_oauth2_secret was derived from the column, so it needed a real
+        flag once the column stopped being written."""
+        server_id = self._create_oauth2_server()
+        resp = self.client.get(f"/api/mcp/servers/{server_id}")
+        self.assertTrue(resp.json()["has_oauth2_secret"])
+        self.assertNotIn("M2M-CLIENT-SECRET", resp.text)
+
+    def test_an_unmigrated_row_still_resolves_and_is_migrated(self) -> None:
+        """Existing deployments upgrade without re-entering anything, and the
+        plaintext copy stops existing the first time it is used."""
+        from app.services.mcp import resolve_oauth2_client_secret
+
+        legacy = McpServer(
+            name="legacy-srv", description="d",
+            endpoint_url="https://legacy.example.com/mcp",
+            transport_type="streamable_http", auth_type="oauth2",
+            oauth2_well_known_url="https://idp.example.com/.well-known/openid-configuration",
+            oauth2_client_id="cid",
+            oauth2_client_secret="OLD-PLAINTEXT-SECRET",  # nosec B106
+        )
+        legacy.set_tags({"loom:group": "demo"})
+        self.db.add(legacy)
+        self.db.commit()
+        self.db.refresh(legacy)
+
+        self.assertEqual("OLD-PLAINTEXT-SECRET", resolve_oauth2_client_secret(legacy))
+        self.assertEqual(
+            "OLD-PLAINTEXT-SECRET",
+            self.vault.store[f"loom/mcp/{legacy.id}/oauth2-client-secret"],
+            "resolving an un-migrated row should move it to Secrets Manager",
+        )
+
+    def test_secrets_manager_wins_over_a_stale_column(self) -> None:
+        """If both exist, the authoritative copy is the one in Secrets Manager."""
+        from app.services.mcp import resolve_oauth2_client_secret
+
+        server_id = self._create_oauth2_server()
+        row = self.db.query(McpServer).filter(McpServer.id == server_id).first()
+        row.oauth2_client_secret = "STALE-COLUMN-VALUE"  # nosec B105
+        self.db.commit()
+        self.assertEqual("M2M-CLIENT-SECRET", resolve_oauth2_client_secret(row))
+
+    def test_deleting_the_server_deletes_the_secret(self) -> None:
+        server_id = self._create_oauth2_server()
+        path = f"loom/mcp/{server_id}/oauth2-client-secret"
+        self.assertIn(path, self.vault.store)
+        self.assertEqual(200, self.client.delete(f"/api/mcp/servers/{server_id}").status_code)
+        self.assertNotIn(path, self.vault.store)
+
+    def test_moving_the_endpoint_clears_the_secrets_manager_copy(self) -> None:
+        """The earlier endpoint-move rule has to reach the new location too."""
+        server_id = self._create_oauth2_server()
+        path = f"loom/mcp/{server_id}/oauth2-client-secret"
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertNotIn(path, self.vault.store)
+        self.assertFalse(resp.json()["has_oauth2_secret"])

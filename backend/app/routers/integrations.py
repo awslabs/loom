@@ -11,7 +11,6 @@ from app.dependencies.auth import UserInfo, require_scopes
 from app.models.agent import Agent
 from app.models.integration import Integration
 from app.routers.utils import get_agent_or_404
-from app.services.iam import update_role_policy
 
 logger = logging.getLogger(__name__)
 
@@ -44,42 +43,6 @@ class IntegrationResponse(BaseModel):
     updated_at: str | None
 
 
-def _sync_role_policy(agent: Agent, db: Session) -> None:
-    """Update the agent's IAM role policy based on current enabled integrations."""
-    if not agent.execution_role_arn:
-        return
-
-    role_name = agent.execution_role_arn.split("/")[-1]
-    enabled_integrations = db.query(Integration).filter(
-        Integration.agent_id == agent.id,
-        Integration.enabled == True
-    ).all()
-
-    integration_dicts = [
-        {
-            "integration_type": i.integration_type,
-            "integration_config": i.integration_config or "{}"
-        }
-        for i in enabled_integrations
-    ]
-
-    try:
-        update_role_policy(
-            role_name=role_name,
-            integrations=integration_dicts,
-            region=agent.region,
-            account_id=agent.account_id,
-            agent_name=agent.name or "",
-            agent_id=agent.id,
-        )
-    except Exception as e:
-        logger.error("Failed to update IAM role policy for agent %s: %s", agent.id, e)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to update IAM role policy: {str(e)}"
-        )
-
-
 @router.post(
     "/{agent_id}/integrations",
     response_model=IntegrationResponse,
@@ -92,7 +55,9 @@ def create_integration(
     db: Session = Depends(get_db),
 ) -> IntegrationResponse:
     """Add an integration to an agent."""
-    agent = get_agent_or_404(agent_id, db, user)
+    # Authorization only — the agent object itself is no longer needed here,
+    # since integration changes no longer touch the IAM role.
+    get_agent_or_404(agent_id, db, user)
 
     integration = Integration(
         agent_id=agent_id,
@@ -104,8 +69,6 @@ def create_integration(
     db.add(integration)
     db.commit()
     db.refresh(integration)
-
-    _sync_role_policy(agent, db)
 
     return IntegrationResponse(**integration.to_dict())
 
@@ -133,7 +96,9 @@ def update_integration(
     db: Session = Depends(get_db),
 ) -> IntegrationResponse:
     """Update an integration."""
-    agent = get_agent_or_404(agent_id, db, user)
+    # Authorization only — the agent object itself is no longer needed here,
+    # since integration changes no longer touch the IAM role.
+    get_agent_or_404(agent_id, db, user)
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
         Integration.agent_id == agent_id
@@ -154,8 +119,6 @@ def update_integration(
     db.commit()
     db.refresh(integration)
 
-    _sync_role_policy(agent, db)
-
     return IntegrationResponse(**integration.to_dict())
 
 
@@ -170,7 +133,9 @@ def delete_integration(
     db: Session = Depends(get_db),
 ) -> None:
     """Delete an integration from an agent."""
-    agent = get_agent_or_404(agent_id, db, user)
+    # Authorization only — the agent object itself is no longer needed here,
+    # since integration changes no longer touch the IAM role.
+    get_agent_or_404(agent_id, db, user)
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
         Integration.agent_id == agent_id
@@ -183,5 +148,3 @@ def delete_integration(
 
     db.delete(integration)
     db.commit()
-
-    _sync_role_policy(agent, db)

@@ -31,7 +31,14 @@ from app.models.tag_policy import TagPolicy
 from app.models.tag_profile import TagProfile
 from app.models.managed_role import ManagedRole
 from app.models.vpc_config import VpcConfig
-from app.routers.utils import get_agent_or_404, require_group_tag
+from app.routers.utils import (
+    assert_bindable,
+    filter_visible_resources,
+    assert_role_arn_bindable,
+    bindable_role_arns,
+    get_agent_or_404,
+    require_group_tag,
+)
 
 from app.services.agentcore import describe_runtime, list_runtime_endpoints
 from app.services.deployment import (
@@ -49,12 +56,10 @@ from app.services.deployment import (
     update_runtime,
 )
 from app.services.iam import (
-    _iam_tags,
-    create_execution_role,
-    delete_execution_role,
     list_agentcore_roles,
     list_cognito_pools,
 )
+from app.services.mcp import resolve_oauth2_client_secret, user_api_key_secret_name
 from app.services.credential import (
     create_api_key_credential_provider,
     create_oauth2_credential_provider,
@@ -79,16 +84,6 @@ from app.services.secrets import store_secret, get_secret, delete_secret
 
 logger = logging.getLogger(__name__)
 
-def _sync_role_policy_for_provider_update(agent: Agent, db: Session) -> None:
-    """Refresh the agent's execution role policy after a provider/api_key change."""
-    from app.routers.integrations import _sync_role_policy
-
-    try:
-        _sync_role_policy(agent, db)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.warning("Failed to refresh IAM role policy for agent %s after provider update", agent.id, exc_info=True)
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -305,9 +300,9 @@ def _store_provider_api_key(agent_id: int, agent_name: str, provider: str, api_k
     """Store a non-Bedrock provider's API key in Secrets Manager and return its ARN.
 
     The secret name is prefixed with the agent's name (not just its numeric
-    id) so it falls under the IAM role's `loom/agents/{agent_name}*`
-    wildcard (see app.services.iam.build_base_policy) — this lets a shared
-    managed role (e.g. "loom-role-demo") read the secrets of any agent whose
+    id) so it falls under the `loom/agents/{agent_name}*` wildcard that the
+    execution role policy in `shared/iac/role.yaml` grants — this lets a
+    shared role (e.g. "loom-role-demo") read the secrets of any agent whose
     name starts with that same prefix. The trailing agent_id keeps the name
     unique across agents that share a prefix.
     """
@@ -726,10 +721,24 @@ def _build_system_prompt(request: AgentCreateRequest, skill_prompt_text: str = "
 # Discovery endpoints
 # ---------------------------------------------------------------------------
 @router.get("/roles")
-def list_roles(user: UserInfo = Depends(require_scopes("agent:read"))) -> list[dict]:
-    """List available IAM roles with bedrock-agentcore trust policy."""
+def list_roles(
+    user: UserInfo = Depends(require_scopes("agent:read")),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """List IAM roles with a bedrock-agentcore trust policy that this caller
+    may actually attach.
+
+    Unfiltered, this returned every AgentCore-trusting role in the AWS
+    account to any holder of agent:read — both an inventory of the account's
+    IAM and the pick-list for the role-takeover path that
+    assert_role_arn_bindable now closes.
+    """
     region = os.getenv("AWS_REGION", DEFAULT_REGION)
-    return list_agentcore_roles(region)
+    roles = list_agentcore_roles(region)
+    allowed = bindable_role_arns(db, user)
+    if allowed is None:
+        return roles
+    return [r for r in roles if r.get("role_arn") in allowed]
 
 
 @router.get("/cognito-pools")
@@ -905,9 +914,9 @@ def create_agent(
     if request.source == "register":
         return _register_agent(request, db)
     elif request.source == "deploy":
-        return _deploy_agent(request, db, background_tasks)
+        return _deploy_agent(request, db, background_tasks, user)
     elif request.source == "harness":
-        return _deploy_harness(request, db, background_tasks)
+        return _deploy_harness(request, db, background_tasks, user)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1044,7 +1053,7 @@ def _register_agent(request: AgentCreateRequest, db: Session) -> AgentResponse:
     return _agent_response(agent, db)
 
 
-def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: BackgroundTasks) -> AgentResponse:
+def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: BackgroundTasks, user: UserInfo) -> AgentResponse:
     """Deploy a new agent runtime to AgentCore.
 
     Validates inputs synchronously, creates the agent record, then schedules the
@@ -1111,6 +1120,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     mcp_records: list[McpServer] = []
     if request.mcp_servers:
         mcp_records = db.query(McpServer).filter(McpServer.id.in_(request.mcp_servers)).all()
+        assert_bindable(mcp_records, user, resource_label="mcp server")
         found_ids = {s.id for s in mcp_records}
         missing = set(request.mcp_servers) - found_ids
         if missing:
@@ -1134,6 +1144,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     a2a_records: list[A2aAgentModel] = []
     if request.a2a_agents:
         a2a_records = db.query(A2aAgentModel).filter(A2aAgentModel.id.in_(request.a2a_agents)).all()
+        assert_bindable(a2a_records, user, resource_label="a2a agent")
         found_ids = {a.id for a in a2a_records}
         missing = set(request.a2a_agents) - found_ids
         if missing:
@@ -1157,6 +1168,35 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     memory_records: list[Memory] = []
     if request.memory_ids:
         memory_records = db.query(Memory).filter(Memory.id.in_(request.memory_ids)).all()
+        assert_bindable(memory_records, user, resource_label="memory resource")
+
+    # The code interpreter's execution_role_arn comes from this row, so an
+    # unchecked bind here hands another group's IAM role to this agent —
+    # privilege escalation rather than disclosure. Validated at request time
+    # because the two deploy paths that consume it run in background tasks,
+    # where there is no caller to check against.
+    # Loom cannot create a role, so one must be supplied, and it must already
+    # be registered under Security > Roles in a group the caller can reach.
+    # Both checks are here rather than in the background task so the caller
+    # gets a 400/403 instead of a deployment that fails minutes later.
+    if not request.role_arn:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "role_arn is required. Loom does not create IAM execution "
+                "roles — ask a platform engineer to provision one (see "
+                "shared/iac/role.yaml) and register it under Security > Roles."
+            ),
+        )
+    assert_role_arn_bindable(request.role_arn, db, user)
+
+    if request.code_interpreter_role_id:
+        assert_bindable(
+            db.query(ManagedRole).filter(
+                ManagedRole.id == request.code_interpreter_role_id
+            ).all(),
+            user, resource_label="managed role",
+        )
         found_ids = {m.id for m in memory_records}
         missing = set(request.memory_ids) - found_ids
         if missing:
@@ -1177,7 +1217,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
             "auth_type": s.auth_type,
             "oauth2_well_known_url": s.oauth2_well_known_url,
             "oauth2_client_id": s.oauth2_client_id,
-            "oauth2_client_secret": s.oauth2_client_secret,
+            "oauth2_client_secret": resolve_oauth2_client_secret(s),
             "oauth2_scopes": s.oauth2_scopes,
             "delegation_mode": (s.delegation_mode or "m2m"),
             "obo_grant_type": s.obo_grant_type,
@@ -1196,7 +1236,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
             "auth_type": a.auth_type,
             "oauth2_well_known_url": a.oauth2_well_known_url,
             "oauth2_client_id": a.oauth2_client_id,
-            "oauth2_client_secret": a.oauth2_client_secret,
+            "oauth2_client_secret": resolve_oauth2_client_secret(a),
             "oauth2_scopes": a.oauth2_scopes,
             "delegation_mode": (a.delegation_mode or "m2m"),
             "obo_grant_type": a.obo_grant_type,
@@ -1413,7 +1453,10 @@ def _deploy_agent_background(
                     auth_entry["audience"] = server["oauth2_audience"]
                 entry["auth"] = auth_entry
             elif server["auth_type"] == "api_key":
-                secret_name = f"loom/mcp/{server['name']}/api-key/{{actor_id}}"
+                # Same path services/mcp.py resolves at request time; built by
+                # the one helper so the two cannot drift. actor_id stays a
+                # literal placeholder for the runtime to substitute.
+                secret_name = user_api_key_secret_name(server["name"], "{actor_id}")
                 entry["auth"] = {
                     "type": "api_key",
                     "credentials_secret_arn": secret_name,
@@ -1503,36 +1546,14 @@ def _deploy_agent_background(
                     ci_config["execution_role_arn"] = ci_role.role_arn
             integrations_config["code_interpreter"] = ci_config
 
-        # --- Step 2: Create or use provided IAM execution role ---
-        agent.deployment_status = "creating_role"
-        db.commit()
-
-        created_role = False
+        # --- Step 2: Use the provided IAM execution role ---
+        # Loom never creates one. The role is provisioned outside Loom by a
+        # platform engineer (shared/iac/role.yaml) and registered through
+        # Security > Roles; the request is rejected at the API boundary if it
+        # names a role the caller is not entitled to, so by here it is valid.
         execution_role_arn = request.role_arn
-        if not execution_role_arn:
-            try:
-                execution_role_arn = create_execution_role(
-                    agent_name=request.name,
-                    runtime_id=f"pending-{agent.id}",
-                    region=region,
-                    account_id=account_id,
-                    tag_policies=tag_policy_dicts,
-                    extra_tags=resolved_tags,
-                    code_interpreter=request.code_interpreter_enabled,
-                    agent_id=agent.id,
-                )
-                created_role = True
-                agent.execution_role_arn = execution_role_arn
-                db.commit()
-            except Exception as e:
-                agent.deployment_status = "failed"
-                agent.status = "FAILED"
-                db.commit()
-                logger.error("Failed to create execution role for agent %s: %s", agent.id, e)
-                return
-        else:
-            agent.execution_role_arn = execution_role_arn
-            db.commit()
+        agent.execution_role_arn = execution_role_arn
+        db.commit()
 
         # --- Step 3: Build agent artifact (and optionally create CI resource in parallel) ---
         agent.deployment_status = "building_artifact"
@@ -1577,8 +1598,6 @@ def _deploy_agent_background(
                 ci_future.cancel()
             if ci_executor is not None:
                 ci_executor.shutdown(wait=False)
-            if created_role and execution_role_arn:
-                _cleanup_role(execution_role_arn)
             logger.error("Failed to build artifact for agent %s: %s", agent.id, e)
             return
 
@@ -1830,8 +1849,6 @@ def _deploy_agent_background(
             agent.deployment_status = "failed"
             agent.status = "FAILED"
             db.commit()
-            if created_role and execution_role_arn:
-                _cleanup_role(execution_role_arn)
             logger.error("Failed to deploy agent %s: %s", agent.id, e)
     except Exception as e:
         logger.error("Unexpected error in background deploy for agent %s: %s", agent_id, e)
@@ -1928,7 +1945,10 @@ def _update_deploy_agent_background(
                     auth_entry["audience"] = server["oauth2_audience"]
                 entry["auth"] = auth_entry
             elif server["auth_type"] == "api_key":
-                secret_name = f"loom/mcp/{server['name']}/api-key/{{actor_id}}"
+                # Same path services/mcp.py resolves at request time; built by
+                # the one helper so the two cannot drift. actor_id stays a
+                # literal placeholder for the runtime to substitute.
+                secret_name = user_api_key_secret_name(server["name"], "{actor_id}")
                 entry["auth"] = {
                     "type": "api_key",
                     "credentials_secret_arn": secret_name,
@@ -2168,7 +2188,7 @@ def _update_deploy_agent_background(
         db.close()
 
 
-def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: BackgroundTasks) -> AgentResponse:
+def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: BackgroundTasks, user: UserInfo) -> AgentResponse:
     """Deploy a managed agent via AgentCore Harness.
 
     Simpler than _deploy_agent — no artifact build or credential provider creation.
@@ -2246,6 +2266,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
     mcp_snapshots: list[dict[str, Any]] = []
     if request.mcp_servers:
         mcp_records = db.query(McpServer).filter(McpServer.id.in_(request.mcp_servers)).all()
+        assert_bindable(mcp_records, user, resource_label="mcp server")
         found_ids = {s.id for s in mcp_records}
         missing = set(request.mcp_servers) - found_ids
         if missing:
@@ -2260,7 +2281,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
                 "transport_type": server.transport_type,
                 "auth_type": server.auth_type,
                 "oauth2_client_id": server.oauth2_client_id,
-                "oauth2_client_secret": server.oauth2_client_secret,
+                "oauth2_client_secret": resolve_oauth2_client_secret(server),
                 "oauth2_well_known_url": server.oauth2_well_known_url,
                 "oauth2_scopes": server.oauth2_scopes,
                 "delegation_mode": (server.delegation_mode or "m2m"),
@@ -2275,6 +2296,35 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
     memory_snapshots: list[dict[str, Any]] = []
     if request.memory_ids:
         memory_records = db.query(Memory).filter(Memory.id.in_(request.memory_ids)).all()
+        assert_bindable(memory_records, user, resource_label="memory resource")
+
+    # The code interpreter's execution_role_arn comes from this row, so an
+    # unchecked bind here hands another group's IAM role to this agent —
+    # privilege escalation rather than disclosure. Validated at request time
+    # because the two deploy paths that consume it run in background tasks,
+    # where there is no caller to check against.
+    # Loom cannot create a role, so one must be supplied, and it must already
+    # be registered under Security > Roles in a group the caller can reach.
+    # Both checks are here rather than in the background task so the caller
+    # gets a 400/403 instead of a deployment that fails minutes later.
+    if not request.role_arn:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "role_arn is required. Loom does not create IAM execution "
+                "roles — ask a platform engineer to provision one (see "
+                "shared/iac/role.yaml) and register it under Security > Roles."
+            ),
+        )
+    assert_role_arn_bindable(request.role_arn, db, user)
+
+    if request.code_interpreter_role_id:
+        assert_bindable(
+            db.query(ManagedRole).filter(
+                ManagedRole.id == request.code_interpreter_role_id
+            ).all(),
+            user, resource_label="managed role",
+        )
         memory_snapshots = [
             {"name": m.name, "memory_id": m.memory_id, "arn": m.arn}
             for m in memory_records
@@ -3130,15 +3180,6 @@ def _register_agent_in_registry_background(agent_id: int) -> None:
         db.close()
 
 
-def _cleanup_role(role_arn: str) -> None:
-    """Best-effort cleanup of an IAM role on deploy failure."""
-    try:
-        role_name = role_arn.split("/")[-1]
-        delete_execution_role(role_name)
-    except Exception as e:
-        logger.warning("Failed to clean up orphaned IAM role %s: %s", role_arn, e)
-
-
 def _delete_code_interpreter(ci_id: str, region: str) -> None:
     """Best-effort deletion of a custom Code Interpreter resource.
 
@@ -3199,14 +3240,17 @@ def list_agents(
     """List all registered agents."""
     agents = db.query(Agent).order_by(Agent.registered_at.desc()).all()
 
-    # Tag-based filtering:
-    # - Admins (t-admin): See ALL resources including untagged
-    # - Users (t-user): See only resources tagged with their groups (g-users-* → strip prefix)
-    if "t-admin" not in user.groups:
-        # User view: filter by group tags (strip "g-users-" prefix)
-        user_groups = [g for g in user.groups if g.startswith("g-users-")]
-        allowed_tags = [g.replace("g-users-", "", 1) for g in user_groups]
-        agents = [a for a in agents if a.get_tags().get("loom:group") in allowed_tags]
+    # Group filtering goes through the shared helper, which means a super-admin
+    # sees everything, everyone else sees only their own groups, and an
+    # untagged row is visible to a super-admin alone.
+    #
+    # This used to apply the filter only `if "t-admin" not in user.groups`, so
+    # every admin got the unfiltered query: another group's agents, and
+    # untagged ones, were listed with their ARN, account id, execution role
+    # and model — while GET /{id} on the same row returned 403, and while the
+    # release notes said untagged resources were super-admin-only. An inlined
+    # half-rule like that is how the invoke path drifted too.
+    agents = filter_visible_resources(agents, user, resource_label="agent")
 
     # Registry visibility: when registry is enabled, t-user only sees APPROVED agents
     if "t-admin" not in user.groups:
@@ -3371,8 +3415,6 @@ def get_agent_status(
     if ci_status is not None:
         response.code_interpreter_status = ci_status
     return response
-
-
 
 
 @router.delete("/{agent_id}", response_model=AgentResponse)
@@ -3877,6 +3919,7 @@ def redeploy_deploy_agent(
     mcp_records: list[McpServer] = []
     if request.mcp_servers:
         mcp_records = db.query(McpServer).filter(McpServer.id.in_(request.mcp_servers)).all()
+        assert_bindable(mcp_records, user, resource_label="mcp server")
         found_ids = {s.id for s in mcp_records}
         missing = set(request.mcp_servers) - found_ids
         if missing:
@@ -3893,7 +3936,7 @@ def redeploy_deploy_agent(
             "auth_type": s.auth_type,
             "oauth2_well_known_url": s.oauth2_well_known_url,
             "oauth2_client_id": s.oauth2_client_id,
-            "oauth2_client_secret": s.oauth2_client_secret,
+            "oauth2_client_secret": resolve_oauth2_client_secret(s),
             "oauth2_scopes": s.oauth2_scopes,
             "delegation_mode": (s.delegation_mode or "m2m"),
             "obo_grant_type": s.obo_grant_type,
@@ -3908,6 +3951,7 @@ def redeploy_deploy_agent(
     a2a_records: list[A2aAgentModel] = []
     if request.a2a_agents:
         a2a_records = db.query(A2aAgentModel).filter(A2aAgentModel.id.in_(request.a2a_agents)).all()
+        assert_bindable(a2a_records, user, resource_label="a2a agent")
         found_ids = {a.id for a in a2a_records}
         missing = set(request.a2a_agents) - found_ids
         if missing:
@@ -3923,7 +3967,7 @@ def redeploy_deploy_agent(
             "auth_type": a.auth_type,
             "oauth2_well_known_url": a.oauth2_well_known_url,
             "oauth2_client_id": a.oauth2_client_id,
-            "oauth2_client_secret": a.oauth2_client_secret,
+            "oauth2_client_secret": resolve_oauth2_client_secret(a),
             "oauth2_scopes": a.oauth2_scopes,
             "delegation_mode": (a.delegation_mode or "m2m"),
             "obo_grant_type": a.obo_grant_type,
@@ -3935,6 +3979,35 @@ def redeploy_deploy_agent(
     memory_records: list[Memory] = []
     if request.memory_ids:
         memory_records = db.query(Memory).filter(Memory.id.in_(request.memory_ids)).all()
+        assert_bindable(memory_records, user, resource_label="memory resource")
+
+    # The code interpreter's execution_role_arn comes from this row, so an
+    # unchecked bind here hands another group's IAM role to this agent —
+    # privilege escalation rather than disclosure. Validated at request time
+    # because the two deploy paths that consume it run in background tasks,
+    # where there is no caller to check against.
+    # Loom cannot create a role, so one must be supplied, and it must already
+    # be registered under Security > Roles in a group the caller can reach.
+    # Both checks are here rather than in the background task so the caller
+    # gets a 400/403 instead of a deployment that fails minutes later.
+    if not request.role_arn:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "role_arn is required. Loom does not create IAM execution "
+                "roles — ask a platform engineer to provision one (see "
+                "shared/iac/role.yaml) and register it under Security > Roles."
+            ),
+        )
+    assert_role_arn_bindable(request.role_arn, db, user)
+
+    if request.code_interpreter_role_id:
+        assert_bindable(
+            db.query(ManagedRole).filter(
+                ManagedRole.id == request.code_interpreter_role_id
+            ).all(),
+            user, resource_label="managed role",
+        )
         found_ids = {m.id for m in memory_records}
         missing = set(request.memory_ids) - found_ids
         if missing:
@@ -4133,6 +4206,7 @@ def redeploy_harness_agent(
     mcp_snapshots: list[dict[str, Any]] = []
     if request.mcp_servers:
         mcp_records = db.query(McpServer).filter(McpServer.id.in_(request.mcp_servers)).all()
+        assert_bindable(mcp_records, user, resource_label="mcp server")
         for server in mcp_records:
             mcp_snapshots.append({
                 "name": server.name,
@@ -4140,7 +4214,7 @@ def redeploy_harness_agent(
                 "transport_type": server.transport_type,
                 "auth_type": server.auth_type,
                 "oauth2_client_id": server.oauth2_client_id,
-                "oauth2_client_secret": server.oauth2_client_secret,
+                "oauth2_client_secret": resolve_oauth2_client_secret(server),
                 "oauth2_well_known_url": server.oauth2_well_known_url,
                 "oauth2_scopes": server.oauth2_scopes,
                 "delegation_mode": (server.delegation_mode or "m2m"),
@@ -4155,6 +4229,35 @@ def redeploy_harness_agent(
     update_memory_snapshots: list[dict[str, Any]] = []
     if request.memory_ids:
         mem_records = db.query(Memory).filter(Memory.id.in_(request.memory_ids)).all()
+        assert_bindable(mem_records, user, resource_label="memory resource")
+
+    # The code interpreter's execution_role_arn comes from this row, so an
+    # unchecked bind here hands another group's IAM role to this agent —
+    # privilege escalation rather than disclosure. Validated at request time
+    # because the two deploy paths that consume it run in background tasks,
+    # where there is no caller to check against.
+    # Loom cannot create a role, so one must be supplied, and it must already
+    # be registered under Security > Roles in a group the caller can reach.
+    # Both checks are here rather than in the background task so the caller
+    # gets a 400/403 instead of a deployment that fails minutes later.
+    if not request.role_arn:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "role_arn is required. Loom does not create IAM execution "
+                "roles — ask a platform engineer to provision one (see "
+                "shared/iac/role.yaml) and register it under Security > Roles."
+            ),
+        )
+    assert_role_arn_bindable(request.role_arn, db, user)
+
+    if request.code_interpreter_role_id:
+        assert_bindable(
+            db.query(ManagedRole).filter(
+                ManagedRole.id == request.code_interpreter_role_id
+            ).all(),
+            user, resource_label="managed role",
+        )
         update_memory_snapshots = [
             {"name": m.name, "memory_id": m.memory_id, "arn": m.arn}
             for m in mem_records
@@ -4503,8 +4606,6 @@ def patch_agent(
                 break
     db.commit()
     db.refresh(agent)
-    if provider_fields_set:
-        _sync_role_policy_for_provider_update(agent, db)
     return _agent_response(agent, db)
 
 

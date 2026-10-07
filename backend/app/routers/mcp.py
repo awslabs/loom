@@ -24,6 +24,8 @@ from app.services.mcp import fetch_mcp_tools as svc_fetch_tools
 from app.services.mcp import invoke_mcp_tool as svc_invoke_tool
 from app.services.mcp import (
     admin_api_key_secret_name,
+    oauth2_client_secret_name,
+    resolve_oauth2_client_secret,
     legacy_admin_api_key_secret_name,
     resolve_api_key,
     user_api_key_secret_name,
@@ -240,7 +242,8 @@ def create_mcp_server(
         auth_type=request.auth_type,
         oauth2_well_known_url=request.oauth2_well_known_url,
         oauth2_client_id=request.oauth2_client_id,
-        oauth2_client_secret=request.oauth2_client_secret,
+        # oauth2_client_secret is deliberately not set: it goes to Secrets
+        # Manager once the row has an id to key it on, just below.
         oauth2_scopes=request.oauth2_scopes,
         delegation_mode=request.delegation_mode or "m2m",
         obo_grant_type=request.obo_grant_type,
@@ -258,6 +261,14 @@ def create_mcp_server(
     # The admin key's secret name is keyed on the server id, so the row has to
     # exist before the secret can be written.
     db.flush()
+    if request.oauth2_client_secret:
+        region = os.getenv("AWS_REGION", "us-east-1")
+        store_secret(
+            oauth2_client_secret_name(server.id), request.oauth2_client_secret, region,
+            description=f"OAuth2 client secret for MCP server {request.name}",
+        )
+        server.has_oauth2_secret = "true"
+
     if request.auth_type == "api_key" and request.api_key:
         region = os.getenv("AWS_REGION", "us-east-1")
         store_secret(
@@ -345,7 +356,7 @@ def export_mcp_server(
     if server.auth_type == "oauth2":
         data["oauth2_well_known_url"] = server.oauth2_well_known_url
         data["oauth2_client_id"] = server.oauth2_client_id
-        data["oauth2_client_secret"] = server.oauth2_client_secret or None
+        data["oauth2_client_secret"] = resolve_oauth2_client_secret(server)
         data["oauth2_scopes"] = server.oauth2_scopes
         data["delegation_mode"] = server.delegation_mode
         if server.obo_grant_type:
@@ -371,6 +382,9 @@ def update_mcp_server(
 
     update_data = request.model_dump(exclude_unset=True)
     new_api_key = update_data.pop("api_key", None)
+    new_oauth2_secret = update_data.pop("oauth2_client_secret", None)
+    previous_endpoint = server.endpoint_url
+    previous_name = server.name
     # tags is a JSON column, so it goes through set_tags rather than setattr;
     # an update that touches tags must still supply loom:group.
     if "tags" in update_data:
@@ -388,6 +402,8 @@ def update_mcp_server(
     for field, value in update_data.items():
         setattr(server, field, value)
 
+    moved_endpoint = server.endpoint_url != previous_endpoint
+
     if new_api_key:
         region = os.getenv("AWS_REGION", "us-east-1")
         store_secret(
@@ -395,6 +411,60 @@ def update_mcp_server(
             description=f"Admin API key for MCP server {server.name}",
         )
         server.has_admin_api_key = "true"
+    region = os.getenv("AWS_REGION", "us-east-1")
+    if new_oauth2_secret:
+        store_secret(
+            oauth2_client_secret_name(server.id), new_oauth2_secret, region,
+            description=f"OAuth2 client secret for MCP server {server.name}",
+        )
+        server.has_oauth2_secret = "true"
+        server.oauth2_client_secret = None
+    elif moved_endpoint and server.has_oauth2_secret == "true":
+        # Same rule for the M2M client secret: it is exchanged for a token
+        # that is then sent to endpoint_url, so it must not follow the move.
+        try:
+            delete_secret(oauth2_client_secret_name(server.id), region)
+        except Exception as e:
+            logger.warning("Failed to delete the OAuth2 client secret for server %s: %s", server.id, e)
+        server.oauth2_client_secret = None
+        server.has_oauth2_secret = "false"
+        logger.warning(
+            "Cleared the OAuth2 client secret for MCP server %s: endpoint_url changed. "
+            "Re-enter it for the new endpoint.", server.id,
+        )
+
+    if moved_endpoint and server.has_admin_api_key == "true" and not new_api_key:
+        # The admin API key is keyed on server.id, so without this it would
+        # survive a change of endpoint_url and be sent, as an Authorization
+        # Bearer header, to whatever host the URL now names. A credential
+        # issued for one host must not silently follow the record to another:
+        # mcp:write is enough to repoint a server, and test-connection /
+        # tools/refresh / tools/invoke would then ship a key another admin
+        # configured. Clearing it forces deliberate re-entry against the new
+        # endpoint. Sent in the same request, api_key wins and no clear
+        # happens, so moving a server and supplying its new key is one call.
+        region = os.getenv("AWS_REGION", "us-east-1")
+        # Labelled rather than logged by path: which of the two locations
+        # failed is the useful part, and the path itself is a deterministic
+        # function of the id, so printing it only makes the line look like a
+        # leaked credential.
+        for where, secret_name in (
+            ("current", admin_api_key_secret_name(server.id)),
+            ("legacy", legacy_admin_api_key_secret_name(previous_name)),
+        ):
+            try:
+                delete_secret(secret_name, region)
+            except Exception as e:
+                logger.warning(
+                    "Failed to delete the %s admin API key for MCP server %s "
+                    "on endpoint change: %s", where, server.id, e,
+                )
+        server.has_admin_api_key = "false"
+        logger.warning(
+            "Cleared the admin API key for MCP server %s: endpoint_url changed "
+            "from %s to %s. Re-enter the key for the new endpoint.",
+            server.id, previous_endpoint, server.endpoint_url,
+        )
 
     server.updated_at = datetime.utcnow()
     db.commit()
@@ -417,17 +487,24 @@ def delete_mcp_server(
             logger.info("Deleted registry record %s for MCP server %s", server.registry_record_id, server.id)
         except Exception as reg_err:
             logger.warning("Failed to delete registry record for MCP server %s: %s", server.id, reg_err)
+    region = os.getenv("AWS_REGION", "us-east-1")
+    try:
+        delete_secret(oauth2_client_secret_name(server.id), region)
+    except Exception:
+        pass  # absent for servers with no OAuth2 secret, which is most of them
     if server.has_admin_api_key == "true":
-        region = os.getenv("AWS_REGION", "us-east-1")
-        for secret_name in (
-            admin_api_key_secret_name(server.id),
+        for where, secret_name in (
+            ("current", admin_api_key_secret_name(server.id)),
             # Servers created before the migration may still have theirs here.
-            legacy_admin_api_key_secret_name(server.name),
+            ("legacy", legacy_admin_api_key_secret_name(server.name)),
         ):
             try:
                 delete_secret(secret_name, region)
             except Exception as e:
-                logger.warning("Failed to delete secret %s: %s", secret_name, e)
+                logger.warning(
+                    "Failed to delete the %s admin API key for MCP server %s: %s",
+                    where, server.id, e,
+                )
     result = McpServerResponse(**server.to_dict())
     db.delete(server)
     db.commit()

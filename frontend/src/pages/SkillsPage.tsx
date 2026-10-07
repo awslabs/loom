@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isSafeExternalUrl } from "@/lib/navigation";
 import { AlertTriangle, ArrowLeft, Download, ExternalLink, FileUp, Loader2, Puzzle, RefreshCw, Trash2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -91,6 +92,19 @@ function MetaRow({ label, children }: { label: string; children: React.ReactNode
 }
 
 function ExternalLinkRow({ url }: { url: string }) {
+  // url comes from the skill record's agentSkillsDefinition descriptor
+  // (repository.url / websiteUrl), which is authored through the registry.
+  // An unchecked href here is a one-click XSS: a javascript: target would run
+  // in Loom's origin, where the session tokens live. Show the value either
+  // way so nothing is silently hidden, but only make it clickable if it is a
+  // real https URL.
+  if (!isSafeExternalUrl(url)) {
+    return (
+      <span className="inline-flex items-center gap-1 break-all text-muted-foreground" title="Not a valid https URL, so it is not linked">
+        {url}
+      </span>
+    );
+  }
   return (
     <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
       {url} <ExternalLink className="h-3 w-3 shrink-0" />

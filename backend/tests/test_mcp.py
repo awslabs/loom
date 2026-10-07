@@ -51,7 +51,10 @@ class TestMcpRouter(unittest.TestCase):
             "transport_type": "sse",
         }
         payload.update(overrides)
-        response = self.client.post("/api/mcp/servers", json=payload)
+        # An OAuth2 client secret now goes to Secrets Manager rather than a
+        # database column, and the suite is offline by design.
+        with patch("app.routers.mcp.store_secret", return_value="arn:aws:secretsmanager:::secret:stub"):
+            response = self.client.post("/api/mcp/servers", json=payload)
         self.assertEqual(response.status_code, 201)
         return response.json()
 

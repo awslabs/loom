@@ -18,7 +18,15 @@ class McpServer(Base):
     auth_type = Column(String, nullable=False, default="none")  # none, oauth2
     oauth2_well_known_url = Column(String, nullable=True)
     oauth2_client_id = Column(String, nullable=True)
+    # Legacy. The OAuth2 client secret now lives in Secrets Manager, keyed on
+    # this row's id — these were the only secrets in the system kept in the
+    # database, which made a dump or RDS snapshot directly credential-bearing
+    # and left secret reads with no CloudTrail trail. The column is retained
+    # read-only so an un-migrated row still works; resolve_oauth2_client_secret
+    # moves the value across on first use, and
+    # scripts/migrate_oauth2_secrets.py does it eagerly.
     oauth2_client_secret = Column(String, nullable=True)
+    has_oauth2_secret = Column(String, nullable=True)  # "true"/"false"
     oauth2_scopes = Column(String, nullable=True)  # space-separated
     delegation_mode = Column(String, nullable=False, default="m2m")  # 'm2m' or 'obo'
     obo_grant_type = Column(String, nullable=True)  # 'JWT_AUTHORIZATION_GRANT' or 'TOKEN_EXCHANGE'
@@ -64,7 +72,7 @@ class McpServer(Base):
             "delegation_mode": self.delegation_mode or "m2m",
             "obo_grant_type": self.obo_grant_type,
             "oauth2_audience": self.oauth2_audience,
-            "has_oauth2_secret": bool(self.oauth2_client_secret),
+            "has_oauth2_secret": self.has_oauth2_secret == "true" or bool(self.oauth2_client_secret),
             "api_key_header_name": self.api_key_header_name,
             "has_admin_api_key": self.has_admin_api_key == "true",
             "supports_elicitation": self.supports_elicitation == "true",

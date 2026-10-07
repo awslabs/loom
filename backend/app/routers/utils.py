@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.dependencies.auth import UserInfo
 from app.models.agent import Agent
+from app.models.managed_role import ManagedRole
 
 
 def check_resource_group_access(resource, user: UserInfo, resource_label: str = "resource") -> None:
@@ -120,6 +121,86 @@ def visible_agent_ids(db: Session, user: UserInfo) -> list[int] | None:
             continue
         allowed.append(agent.id)
     return allowed
+
+def bindable_role_arns(db: Session, user: UserInfo) -> set[str] | None:
+    """Execution-role ARNs this caller may legitimately attach to an agent.
+
+    None means unrestricted (super-admin).
+
+    A role is usable only if it has a ManagedRole row the caller can reach —
+    that is, somebody registered it under Security > Roles and tagged it into
+    a group the caller belongs to. `iam.list_roles` returns every role in the
+    account that trusts bedrock-agentcore, and most have no Loom record, so
+    being visible in AWS is not entitlement.
+
+    This used to also accept any ARN already attached to an agent the caller
+    could reach, which was necessary while Loom created execution roles during
+    deploy and gave them no ManagedRole row. Loom no longer creates roles, so
+    that clause is gone: registration is the single way a role enters Loom.
+    Agents whose role Loom auto-created before this change will fail to
+    redeploy until that role is registered — deliberately, because an
+    unregistered role has no group and therefore no owner.
+    """
+    if "g-admins-super" in user.groups:
+        return None
+    allowed: set[str] = set()
+    for role in db.query(ManagedRole).all():
+        try:
+            check_resource_group_access(role, user, resource_label="managed role")
+        except HTTPException:
+            continue
+        if role.role_arn:
+            allowed.add(role.role_arn)
+    return allowed
+
+
+def assert_role_arn_bindable(
+    role_arn: str | None, db: Session, user: UserInfo,
+) -> None:
+    """Refuse an execution role ARN the caller is not entitled to attach."""
+    if not role_arn:
+        return
+    allowed = bindable_role_arns(db, user)
+    if allowed is None or role_arn in allowed:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "You cannot attach that execution role. It must be registered "
+            "under Security > Roles and belong to one of your groups. Loom "
+            "does not create execution roles — ask a platform engineer to "
+            "provision one (see shared/iac/role.yaml) and register it."
+        ),
+    )
+
+
+def assert_bindable(resources: list, user: UserInfo, resource_label: str = "resource") -> None:
+    """Group-check every row a request is attaching to an agent by primary key.
+
+    Agent create and redeploy resolve `mcp_servers`, `memory_ids` and
+    `a2a_agents` straight from primary keys in the request body. Fetch-by-ID
+    has been 403 across groups since the single-object helpers landed, but
+    these binds never ran that check, so the IDs were a second way in: a
+    caller could attach another group's MCP server — whose deploy snapshot
+    carries `oauth2_client_secret` into a credential provider under the
+    caller's own agent — or another group's `memory_id` into their own
+    `AGENT_CONFIG_JSON`.
+
+    Unlike filter_visible_resources this raises rather than filtering. A list
+    silently omitting a row the caller cannot see is right; a deploy silently
+    dropping an integration the caller asked for is not, and would leave them
+    with a working agent quietly missing its tools.
+
+    Keyed on what the *caller* can reach rather than on matching the agent's
+    own loom:group: that is exactly the reporter's "do not snapshot secrets
+    the caller cannot GET", it matches the semantics every other check already
+    uses, and it leaves a super-admin able to compose across groups
+    deliberately instead of breaking existing deployments that share one
+    integration between several groups' agents.
+    """
+    for resource in resources:
+        check_resource_group_access(resource, user, resource_label=resource_label)
+
 
 def filter_visible_resources(resources: list, user: UserInfo, resource_label: str = "resource") -> list:
     """Drop the rows the caller's loom:group does not reach.

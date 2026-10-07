@@ -42,7 +42,12 @@ class Agent(Base):
     protocol = Column(String, nullable=True)  # HTTP, MCP, A2A
     network_mode = Column(String, nullable=True)  # PUBLIC or VPC
     agent_framework = Column(String, nullable=True)  # 'strands' or 'adk' (source='deploy' only)
-    authorizer_config = Column(Text, nullable=True)  # JSON: {type, pool_id, discovery_url, client_id, client_secret}
+    # JSON: {type, pool_id, discovery_url, allowed_audience, allowed_clients,
+    # allowed_scopes}. Deliberately no client secret — that goes to Secrets
+    # Manager and only its ARN is kept, in the COGNITO_CLIENT_SECRET_ARN
+    # config entry. The comment used to list client_secret here, which made
+    # the places that log this dict look like secret leaks.
+    authorizer_config = Column(Text, nullable=True)
     description = Column(Text, nullable=True)  # Human-readable description of the agent
     tags = Column(Text, nullable=True)  # JSON dict of resolved tags
     deployed_at = Column(DateTime, nullable=True)

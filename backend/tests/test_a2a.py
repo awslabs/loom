@@ -87,7 +87,10 @@ class TestA2aRouter(unittest.TestCase):
             "base_url": "https://recipe-agent.example.com",
         }
         payload.update(overrides)
-        response = self.client.post("/api/a2a/agents", json=payload)
+        # An OAuth2 client secret now goes to Secrets Manager rather than a
+        # database column, and the suite is offline by design.
+        with patch("app.routers.a2a.store_secret", return_value="arn:aws:secretsmanager:::secret:stub"):
+            response = self.client.post("/api/a2a/agents", json=payload)
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()
 

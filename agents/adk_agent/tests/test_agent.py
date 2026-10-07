@@ -39,7 +39,7 @@ class TestBuildAgent(unittest.IsolatedAsyncioTestCase):
 
     async def test_minimal_agent(self) -> None:
         config = _make_config()
-        agent, plugins, ci = await build_agent(config)
+        agent, plugins, ci, _matcher = await build_agent(config)
 
         self.assertEqual(agent.instruction, "Test prompt")
         self.assertEqual(agent.tools, [])
@@ -65,7 +65,7 @@ class TestBuildAgent(unittest.IsolatedAsyncioTestCase):
                 MCPServerConfig(name="test-mcp", enabled=True, endpoint_url="https://example.com")
             ]
         )
-        agent, plugins, ci = await build_agent(config)
+        agent, plugins, ci, _matcher = await build_agent(config)
 
         mock_build_toolsets.assert_called_once()
         self.assertIn(mock_tool, agent.tools)
@@ -80,14 +80,14 @@ class TestBuildAgent(unittest.IsolatedAsyncioTestCase):
 
     async def test_agent_with_memory(self) -> None:
         config = _make_config(memory_enabled=True)
-        agent, plugins, ci = await build_agent(config)
+        agent, plugins, ci, _matcher = await build_agent(config)
 
         memory_plugins = [p for p in plugins if isinstance(p, MemoryPlugin)]
         self.assertEqual(len(memory_plugins), 1)
 
     async def test_memory_disabled_no_plugin(self) -> None:
         config = _make_config(memory_enabled=False)
-        agent, plugins, ci = await build_agent(config)
+        agent, plugins, ci, _matcher = await build_agent(config)
 
         # Only TelemetryPlugin, no MemoryPlugin
         self.assertEqual(len(plugins), 1)
@@ -95,7 +95,7 @@ class TestBuildAgent(unittest.IsolatedAsyncioTestCase):
 
     async def test_telemetry_plugin_added(self) -> None:
         config = _make_config()
-        agent, plugins, ci = await build_agent(config)
+        agent, plugins, ci, _matcher = await build_agent(config)
         telemetry_plugins = [p for p in plugins if isinstance(p, TelemetryPlugin)]
         self.assertEqual(len(telemetry_plugins), 1)
 
@@ -115,14 +115,14 @@ class TestBuildAgent(unittest.IsolatedAsyncioTestCase):
 
         config = _make_config()
         config.integrations.code_interpreter = CodeInterpreterConfig(enabled=True, region="us-west-2")
-        agent, plugins, ci = await build_agent(config)
+        agent, plugins, ci, _matcher = await build_agent(config)
 
         mock_build_ci.assert_called_once()
         self.assertIs(ci, mock_ci_tools)
 
     async def test_code_interpreter_disabled_no_tools(self) -> None:
         config = _make_config()
-        agent, plugins, ci = await build_agent(config)
+        agent, plugins, ci, _matcher = await build_agent(config)
         self.assertIsNone(ci)
         self.assertEqual(agent.tools, [])
 

@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch, MagicMock
 
-from integrations.approval import (
+from src.integrations.approval import (
     ApprovalHook,
     check_access,
     _matches_tool,

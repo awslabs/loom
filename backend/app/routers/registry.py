@@ -14,6 +14,7 @@ from app.models.a2a import A2aAgent
 from app.models.agent import Agent
 from app.models.integration import Integration
 from app.models.mcp import McpServer, McpTool
+from app.routers.utils import check_resource_group_access, filter_visible_resources
 from app.services.registry import get_registry_client
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,34 @@ def _find_resource_by_record_id(record_id: str, db: Session) -> McpServer | A2aA
     agent = db.query(Agent).filter(Agent.registry_record_id == record_id).first()
     return agent
 
+
+
+
+def _owned_resource_or_403(record_id: str, user: UserInfo, db: Session):
+    """Resolve the Loom resource behind a record_id and authorize the caller.
+
+    Every status transition below stamps `registry_status` on this row, and
+    approval is both the deploy gate and the t-user catalog gate — so stamping
+    a row is a write to it. `registry:write` alone used to be enough, with no
+    loom:group check, letting one group drive another group's resource to
+    APPROVED and publish its invoke URL / endpoint into the site-wide
+    registry.
+
+    Called *before* the registry API call in each route, not after: the remote
+    transition is the side effect that cannot be rolled back, so it must not
+    happen for a caller who is going to be refused.
+
+    Returns None when no Loom resource is linked (skill records have none),
+    which leaves those records governed by `registry:write` as before.
+    """
+    resource = _find_resource_by_record_id(record_id, db)
+    if resource is None:
+        return None
+    label = {
+        McpServer: "mcp server", A2aAgent: "a2a agent", Agent: "agent",
+    }.get(type(resource), "resource")
+    check_resource_group_access(resource, user, resource_label=label)
+    return resource
 
 
 
@@ -235,6 +264,10 @@ def create_record(
                 detail=f"namespace must be one of: {', '.join(MCP_NAMESPACES)}",
             )
         server = db.query(McpServer).filter(McpServer.id == request.resource_id).first()
+        if server:
+            # resource_id is caller-supplied; registry:write must not let one
+            # group submit another group's resource into the registry.
+            check_resource_group_access(server, user, resource_label="mcp server")
         if not server:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -249,6 +282,8 @@ def create_record(
 
     elif request.resource_type == "a2a":
         agent = db.query(A2aAgent).filter(A2aAgent.id == request.resource_id).first()
+        if agent:
+            check_resource_group_access(agent, user, resource_label="a2a agent")
         if not agent:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -262,6 +297,8 @@ def create_record(
 
     elif request.resource_type == "agent":
         agent_record = db.query(Agent).filter(Agent.id == request.resource_id).first()
+        if agent_record:
+            check_resource_group_access(agent_record, user, resource_label="agent")
         if not agent_record:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -362,6 +399,8 @@ def update_record(
     resource (mcp/a2a/agent), or from re-submitted content for a skill, which
     has no linked Loom resource to derive descriptors from."""
     client = get_registry_client()
+    # Re-publishes this resource's descriptors into the site-wide registry.
+    _owned_resource_or_403(record_id, user, db)
 
     server = db.query(McpServer).filter(McpServer.registry_record_id == record_id).first()
     if server:
@@ -438,9 +477,9 @@ def submit_for_approval(
 ) -> RegistryRecordResponse:
     """Submit a registry record for approval."""
     client = get_registry_client()
+    resource = _owned_resource_or_403(record_id, user, db)
     result = _call_registry(lambda: client.submit_for_approval(record_id))
 
-    resource = _find_resource_by_record_id(record_id, db)
     if resource:
         resource.registry_status = "PENDING_APPROVAL"
         db.commit()
@@ -459,9 +498,9 @@ def approve_record(
 ) -> RegistryRecordResponse:
     """Approve a registry record."""
     client = get_registry_client()
+    resource = _owned_resource_or_403(record_id, user, db)
     result = _call_registry(lambda: client.approve_record(record_id, reason=body.reason))
 
-    resource = _find_resource_by_record_id(record_id, db)
     if resource:
         resource.registry_status = "APPROVED"
         db.commit()
@@ -480,9 +519,9 @@ def reject_record(
 ) -> RegistryRecordResponse:
     """Reject a registry record with a reason."""
     client = get_registry_client()
+    resource = _owned_resource_or_403(record_id, user, db)
     result = _call_registry(lambda: client.reject_record(record_id, reason=body.reason))
 
-    resource = _find_resource_by_record_id(record_id, db)
     if resource:
         resource.registry_status = "REJECTED"
         db.commit()
@@ -500,9 +539,9 @@ def delete_record(
 ) -> dict:
     """Delete a registry record and clear the Loom resource link."""
     client = get_registry_client()
+    resource = _owned_resource_or_403(record_id, user, db)
     _call_registry(lambda: client.delete_record(record_id))
 
-    resource = _find_resource_by_record_id(record_id, db)
     if resource:
         resource.registry_record_id = None
         resource.registry_status = None
@@ -544,6 +583,10 @@ def get_skill_dependents(
         return SkillDependentsResponse(dependents=[])
 
     agents = db.query(Agent).filter(Agent.id.in_(agent_ids)).all()
+    # A reverse lookup is still a read of other groups' agents: unfiltered, it
+    # named every agent using the skill regardless of who asked. Dropped rather
+    # than refused, since a dependents list is a listing.
+    agents = filter_visible_resources(agents, user, resource_label="agent")
     return SkillDependentsResponse(dependents=[
         SkillDependent(agent_id=a.id, agent_name=a.name or a.runtime_id) for a in agents
     ])

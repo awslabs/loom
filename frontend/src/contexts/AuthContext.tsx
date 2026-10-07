@@ -7,6 +7,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import { assertHttpsUrl, navigateToExternal } from "@/lib/navigation";
 import {
   fetchAuthConfig,
   initiateAuth,
@@ -154,6 +155,23 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   const payload = parts[1]!;
   const decoded = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
   return JSON.parse(decoded) as Record<string, unknown>;
+}
+
+/**
+ * Whether `token`'s `iss` claim names the same host as `url`.
+ *
+ * Used to decide if an id_token may be sent to a logout endpoint as
+ * `id_token_hint`. If an administrator repoints `issuer_url` after tokens were
+ * issued, the hosts stop matching and the token is withheld.
+ */
+function issuedBySameHost(token: string, url: string): boolean {
+  try {
+    const iss = decodeJwtPayload(token)["iss"];
+    if (typeof iss !== "string") return false;
+    return new URL(iss).host === new URL(url).host;
+  } catch {
+    return false;
+  }
 }
 
 function isExternalOIDC(cfg: AuthConfig | null): boolean {
@@ -542,15 +560,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (currentConfig && isExternalOIDC(currentConfig) && currentConfig.issuer_url && idToken) {
       // Only redirect to IdP logout if we have a valid id_token_hint — otherwise the
       // IdP may reject the request (e.g. after authorization server change).
-      const issuer = currentConfig.issuer_url.replace(/\/+$/, "");
+      // issuer_url is server-supplied and becomes a navigation target below.
+      const issuer = assertHttpsUrl(currentConfig.issuer_url, "sign-out URL").replace(/\/+$/, "");
       const returnUrl = window.location.origin;
       if (currentConfig.provider_type === "okta") {
-        const params = new URLSearchParams({ post_logout_redirect_uri: returnUrl, id_token_hint: idToken });
-        window.location.href = `${issuer}/v1/logout?${params.toString()}`;
+        const params = new URLSearchParams({ post_logout_redirect_uri: returnUrl });
+        // id_token_hint is the only place a token ever enters a URL, so it
+        // goes in the query string of a top-level navigation and lands in
+        // browser history and the receiving host's access logs. The host here
+        // comes from issuer_url, which security:write controls — so send the
+        // hint only to the host that actually issued the token, read from its
+        // own iss claim. Allowlisting issuer_url against the deployment's
+        // trusted hosts would be circular: that set is built from issuer_url.
+        // Without a match we still sign out, just without the hint, which is
+        // what the Entra branch below already does.
+        if (issuedBySameHost(idToken, issuer)) {
+          params.set("id_token_hint", idToken);
+        }
+        navigateToExternal(`${issuer}/v1/logout?${params.toString()}`, "sign-out URL");
       } else if (currentConfig.provider_type === "entra_id") {
         const params = new URLSearchParams({ post_logout_redirect_uri: returnUrl });
         const authority = issuer.replace(/\/v2\.0$/i, "");
-        window.location.href = `${authority}/oauth2/v2.0/logout?${params.toString()}`;
+        navigateToExternal(`${authority}/oauth2/v2.0/logout?${params.toString()}`, "sign-out URL");
       }
     }
   }, [tokens, logout]);

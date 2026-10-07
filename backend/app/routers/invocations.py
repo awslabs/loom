@@ -27,7 +27,13 @@ from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
 from app.models.mcp import McpServer
 from app.models.approval_policy import ApprovalPolicy
-from app.routers.utils import assert_session_readable, check_resource_group_access, get_agent_or_404, get_session_or_404
+from app.routers.utils import (
+    assert_bindable,
+    assert_session_readable,
+    check_resource_group_access,
+    get_agent_or_404,
+    get_session_or_404,
+)
 
 from app.services.agentcore import invoke_agent, invoke_agent_ws
 from app.services.harness import invoke_harness_stream
@@ -38,6 +44,7 @@ from app.services.cloudwatch import (
 )
 from app.services.cognito import get_cognito_token
 from app.services.credential import credential_provider_name
+from app.services.mcp import user_api_key_secret_name
 from app.services.latency import compute_client_duration, compute_cold_start
 from app.services.secrets import get_secret
 from app.services.tokens import count_input_tokens, count_output_tokens
@@ -57,6 +64,28 @@ def _decode_jwt_claims(token: str) -> dict[str, Any] | None:
         return json.loads(base64.urlsafe_b64decode(padded))
     except Exception:
         return None
+
+
+# The agent harness builds token_info from an allowlist, but two of the queue's
+# producers accept arbitrary content from a remote MCP server: a
+# __TOKEN_INFO__-prefixed tool result, and an MCP `logging` notification whose
+# logger is "token_info". Both were relayed verbatim into the SSE stream and
+# the UI's token panel, so a third-party MCP server could put whatever it liked
+# in a privileged-looking place. Re-apply the same allowlist on receipt.
+_TOKEN_INFO_FIELDS = ("token_type", "source", "credential_provider", "server")
+_TOKEN_INFO_CLAIMS = ("iss", "sub", "aud", "cid", "scp", "roles", "act", "exp", "iat")
+
+
+def _safe_token_info(token_info: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the fields the harness is supposed to emit."""
+    safe: dict[str, Any] = {
+        k: token_info[k] for k in _TOKEN_INFO_FIELDS
+        if isinstance(token_info.get(k), (str, int, bool))
+    }
+    claims = token_info.get("claims")
+    if isinstance(claims, dict):
+        safe["claims"] = {k: claims[k] for k in _TOKEN_INFO_CLAIMS if k in claims}
+    return safe
 
 
 def _extract_token_summary(token: str, token_type: str = "user", source: str | None = None) -> dict[str, Any] | None:  # nosec B107 — "user" is a token-type label, not a password
@@ -632,7 +661,7 @@ async def invoke_agent_stream(
                     token_info = structured.get("token_info")
                     if isinstance(token_info, dict):
                         logger.info("Token info event: type=%s provider=%s", token_info.get("token_type"), token_info.get("credential_provider"))
-                        yield format_sse_event("token_info", token_info)
+                        yield format_sse_event("token_info", _safe_token_info(token_info))
                         continue
                     # MCP elicitation: tool paused waiting for user input
                     elicitation_data = structured.get("elicitation")
@@ -1393,31 +1422,15 @@ async def invoke_agent_endpoint(
         )
 
     # ---- Group-based invoke restriction ----
-    # Super-admins (g-admins-super) can invoke any agent.
-    # Agents with no loom:group tag are accessible to any authenticated user with invoke scope.
-    # Other admins (g-admins-demo, etc.) can only invoke agents in their specific group.
-    # Users (t-user) can only invoke agents tagged with their groups (g-users-* → strip prefix).
-    # Check this BEFORE creating any session/invocation records.
-    if "g-admins-super" not in user.groups:
-        agent_group = agent.get_tags().get("loom:group", "")
-
-        if agent_group:
-            if "t-admin" in user.groups:
-                admin_groups = [g for g in user.groups if g.startswith("g-admins-")]
-                allowed_tags = [g.replace("g-admins-", "", 1) for g in admin_groups]
-            else:
-                user_groups = [g for g in user.groups if g.startswith("g-users-")]
-                allowed_tags = [g.replace("g-users-", "", 1) for g in user_groups]
-
-            if agent_group not in allowed_tags:
-                logger.warning(
-                    "Group-based 403 for user=%s groups=%s agent_id=%s agent_group=%s allowed_tags=%s",
-                    user.username, user.groups, agent_id, agent_group, allowed_tags,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"You can only invoke agents within your group (agent group: {agent_group})",
-                )
+    # Checked BEFORE creating any session/invocation records.
+    #
+    # This was an inlined copy of check_resource_group_access that skipped the
+    # whole check when the agent had no loom:group tag — `if agent_group:`. So
+    # when the shared helper was made to fail closed on untagged resources, the
+    # copy kept failing open and an untagged agent stayed invokable by anyone
+    # holding `invoke`. Calling the helper is the point: the rule lives in one
+    # place and cannot drift again.
+    check_resource_group_access(agent, user, resource_label="agent")
 
     # Validate runtime model_id if provided
     runtime_model_id: str | None = None
@@ -1501,6 +1514,13 @@ async def invoke_agent_endpoint(
         cred = db.query(AuthorizerCredential).filter(AuthorizerCredential.id == request_body.credential_id).first()
         if cred and cred.client_secret_arn:
             auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == cred.authorizer_config_id).first()
+            # credential_id is caller-supplied and its client secret is used to
+            # mint an M2M token that is then handed to the agent. An
+            # AuthorizerCredential carries no loom:group of its own, so the
+            # owning AuthorizerConfig is what gets checked — otherwise any
+            # holder of `invoke` could borrow another group's credential.
+            if auth is not None:
+                check_resource_group_access(auth, user, resource_label="authorizer")
             if auth and auth.pool_id:
                 try:
                     import json as _json
@@ -1598,6 +1618,11 @@ async def invoke_agent_endpoint(
     if request_body.connector_ids:
         actor_id = user.actor_id
         mcp_records = db.query(McpServer).filter(McpServer.id.in_(request_body.connector_ids)).all()
+        # connector_ids comes straight from the request body, and the resolved
+        # server's OAuth client secret / admin API key is handed to the runtime
+        # for this invocation. An ID the caller cannot read is one they cannot
+        # attach.
+        assert_bindable(mcp_records, user, resource_label="mcp server")
         dynamic_mcp_servers = []
 
         for server in mcp_records:
@@ -1611,7 +1636,7 @@ async def invoke_agent_endpoint(
                 # Per-user keys are stored by the immutable IdP subject.  The
                 # actor_id is a separately formatted value used by AgentCore
                 # sessions and does not identify the Secrets Manager entry.
-                secret_name = f"loom/mcp/{server.name}/api-key/{user.sub}"
+                secret_name = user_api_key_secret_name(server.name, user.sub)
                 entry["auth"] = {
                     "type": "api_key",
                     "credentials_secret_arn": secret_name,
@@ -1845,6 +1870,7 @@ async def invoke_agent_websocket(
             dynamic_mcp_servers = None
             if connector_ids:
                 mcp_servers = db.query(McpServer).filter(McpServer.id.in_(connector_ids)).all()
+                assert_bindable(mcp_servers, user, resource_label="mcp server")
                 dynamic_mcp_servers = []
                 for s in mcp_servers:
                     server_data: dict[str, Any] = {

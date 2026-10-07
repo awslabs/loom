@@ -6,9 +6,6 @@ import type {
   AuthorizerConfigResponse,
   AuthorizerConfigCreateRequest,
   AuthorizerConfigUpdateRequest,
-  PermissionRequestResponse,
-  PermissionRequestCreateRequest,
-  PermissionRequestReviewRequest,
 } from "@/api/types";
 import * as securityApi from "@/api/security";
 
@@ -114,45 +111,3 @@ export function useAuthorizerConfigs() {
   return { configs, loading, error, fetchConfigs, createConfig, updateConfig, deleteConfig };
 }
 
-export function usePermissionRequests(statusFilter?: string) {
-  const [requests, setRequests] = useState<PermissionRequestResponse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchRequests = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await securityApi.listPermissionRequests(statusFilter);
-      setRequests(data);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to fetch permission requests");
-    } finally {
-      setLoading(false);
-    }
-  }, [statusFilter]);
-
-  useEffect(() => {
-    void fetchRequests();
-  }, [fetchRequests]);
-
-  const createRequest = useCallback(
-    async (request: PermissionRequestCreateRequest) => {
-      const result = await securityApi.createPermissionRequest(request);
-      await fetchRequests();
-      return result;
-    },
-    [fetchRequests],
-  );
-
-  const reviewRequest = useCallback(
-    async (id: number, request: PermissionRequestReviewRequest) => {
-      const result = await securityApi.reviewPermissionRequest(id, request);
-      await fetchRequests();
-      return result;
-    },
-    [fetchRequests],
-  );
-
-  return { requests, loading, error, fetchRequests, createRequest, reviewRequest };
-}

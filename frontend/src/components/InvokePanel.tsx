@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { navigateToExternal } from "@/lib/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -332,7 +333,7 @@ export function InvokePanel({
       sessionStorage.setItem("loom_link_auth_id", String(resolvedAuthorizerId));
       sessionStorage.setItem("loom_link_return_url", window.location.pathname);
       localStorage.setItem("loom_link_return_agent_id", String(agentId));
-      window.location.href = authorize_url;
+      navigateToExternal(authorize_url, "authorizer sign-in URL");
     } catch {
       setLinkStatus("unlinked");
     }

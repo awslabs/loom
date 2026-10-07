@@ -1,4 +1,5 @@
 import { apiFetch, getBaseUrl } from "./client";
+import { assertHttpsUrl, navigateToExternal } from "@/lib/navigation";
 
 export interface AuthConfig {
   provider_type?: string;
@@ -216,7 +217,12 @@ export async function startOIDCLogin(config: AuthConfig): Promise<void> {
 
   sessionStorage.setItem("oidc_state", params.get("state")!);
 
-  window.location.href = `${config.authorization_endpoint}?${params.toString()}`;
+  // config.authorization_endpoint comes from the IdP's discovery document via
+  // the unauthenticated /api/auth/config, so it is checked before navigating.
+  navigateToExternal(
+    `${assertHttpsUrl(config.authorization_endpoint, "sign-in URL")}?${params.toString()}`,
+    "sign-in URL",
+  );
 }
 
 export async function exchangeOIDCCode(

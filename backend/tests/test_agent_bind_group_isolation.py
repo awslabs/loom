@@ -91,10 +91,20 @@ class TestAgentBindsRespectGroup(unittest.TestCase):
         )
         self.role.set_tags({"loom:group": "mcp"})
 
-        for row in (self.mcp, self.memory, self.a2a, self.role):
+        # An execution role the attacker legitimately owns. Loom no longer
+        # creates roles, so a deploy must name a registered one — without this
+        # every deploy below would 400 before the bind check it is testing.
+        self.own_role = ManagedRole(
+            role_name="demo-exec", role_type="agent",
+            role_arn="arn:aws:iam::123456789012:role/demo-exec",
+        )
+        self.own_role.set_tags({"loom:group": "demo"})
+
+        rows = (self.mcp, self.memory, self.a2a, self.role, self.own_role)
+        for row in rows:
             self.db.add(row)
         self.db.commit()
-        for row in (self.mcp, self.memory, self.a2a, self.role):
+        for row in rows:
             self.db.refresh(row)
 
     def tearDown(self) -> None:
@@ -115,6 +125,7 @@ class TestAgentBindsRespectGroup(unittest.TestCase):
             "name": "demo_attacker",
             "model_id": "us.anthropic.claude-sonnet-4-6",
             "tags": {"loom:group": "demo"},
+            "role_arn": "arn:aws:iam::123456789012:role/demo-exec",
         }
         if source == "harness":
             payload["role_arn"] = "arn:aws:iam::123456789012:role/test-role"
@@ -183,6 +194,7 @@ class TestAgentBindsRespectGroup(unittest.TestCase):
         resp = self.client.put(f"/api/agents/{agent_id}/redeploy-deploy", json={
             "source": "deploy", "name": "demo_attacker",
             "model_id": "us.anthropic.claude-sonnet-4-6",
+            "role_arn": "arn:aws:iam::123456789012:role/demo-exec",
             "mcp_servers": [self.mcp.id],
         })
         self.assertEqual(resp.status_code, 403)
@@ -194,7 +206,7 @@ class TestAgentBindsRespectGroup(unittest.TestCase):
         resp = self.client.put(f"/api/agents/{agent_id}/redeploy-harness", json={
             "source": "harness", "name": "demo_attacker",
             "model_id": "us.anthropic.claude-sonnet-4-6",
-            "role_arn": "arn:aws:iam::123456789012:role/test-role",
+            "role_arn": "arn:aws:iam::123456789012:role/demo-exec",
             "memory_ids": [self.memory.id],
         })
         self.assertEqual(resp.status_code, 403)

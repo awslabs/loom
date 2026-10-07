@@ -127,21 +127,19 @@ def bindable_role_arns(db: Session, user: UserInfo) -> set[str] | None:
 
     None means unrestricted (super-admin).
 
-    An IAM role is not a group-owned Loom row in general — `iam.list_roles`
-    returns every role in the account that trusts bedrock-agentcore, and most
-    have no Loom record at all. So entitlement is defined as either:
+    A role is usable only if it has a ManagedRole row the caller can reach —
+    that is, somebody registered it under Security > Roles and tagged it into
+    a group the caller belongs to. `iam.list_roles` returns every role in the
+    account that trusts bedrock-agentcore, and most have no Loom record, so
+    being visible in AWS is not entitlement.
 
-      (a) the ARN has a ManagedRole row the caller can reach, or
-      (b) the ARN is already the execution role of an agent the caller can
-          reach — which covers the roles Loom creates for itself during
-          deploy, since those get no ManagedRole row, and keeps redeploy of
-          an existing agent working.
-
-    Without this, `agent:write` was enough to take over any AgentCore-trusting
-    role in the account: the discovery endpoint listed them all, deploy
-    accepted any ARN, and _sync_role_policy then PutRolePolicy-replaced
-    `loom-agent-base-policy` on whatever name that ARN ended in. The agent was
-    group-checked; the role was not.
+    This used to also accept any ARN already attached to an agent the caller
+    could reach, which was necessary while Loom created execution roles during
+    deploy and gave them no ManagedRole row. Loom no longer creates roles, so
+    that clause is gone: registration is the single way a role enters Loom.
+    Agents whose role Loom auto-created before this change will fail to
+    redeploy until that role is registered — deliberately, because an
+    unregistered role has no group and therefore no owner.
     """
     if "g-admins-super" in user.groups:
         return None
@@ -153,13 +151,6 @@ def bindable_role_arns(db: Session, user: UserInfo) -> set[str] | None:
             continue
         if role.role_arn:
             allowed.add(role.role_arn)
-    for agent in db.query(Agent).all():
-        try:
-            check_resource_group_access(agent, user, resource_label="agent")
-        except HTTPException:
-            continue
-        if agent.execution_role_arn:
-            allowed.add(agent.execution_role_arn)
     return allowed
 
 
@@ -175,9 +166,10 @@ def assert_role_arn_bindable(
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail=(
-            "You cannot attach that execution role. Use a role registered "
-            "under Security > Roles in your own group, or leave it unset to "
-            "have one created for this agent."
+            "You cannot attach that execution role. It must be registered "
+            "under Security > Roles and belong to one of your groups. Loom "
+            "does not create execution roles — ask a platform engineer to "
+            "provision one (see shared/iac/role.yaml) and register it."
         ),
     )
 

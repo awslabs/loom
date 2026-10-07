@@ -215,7 +215,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   // Security config state (pre-configured by Security Admin)
   const [selectedAuthConfigId, setSelectedAuthConfigId] = useState<string>("");
 
-  // Permission request state
+  // Role/VPC detail disclosure toggles
   const [showRolePerms, setShowRolePerms] = useState(false);
   const [showVpcDetail, setShowVpcDetail] = useState(false);
   const [vpcDetail, setVpcDetail] = useState<VpcConfigDetail | "loading" | null>(null);

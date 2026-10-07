@@ -8,9 +8,6 @@ import type {
   AuthorizerConfigResponse,
   AuthorizerConfigCreateRequest,
   AuthorizerConfigUpdateRequest,
-  PermissionRequestResponse,
-  PermissionRequestCreateRequest,
-  PermissionRequestReviewRequest,
 } from "./types";
 
 // Managed Roles
@@ -159,24 +156,4 @@ export function deleteAuthorizerLink(authId: number): Promise<void> {
   return apiFetch<void>(`/api/security/authorizers/${authId}/link`, { method: "DELETE" });
 }
 
-// Permission Requests
-export function listPermissionRequests(status?: string): Promise<PermissionRequestResponse[]> {
-  const query = status ? `?status=${status}` : "";
-  return apiFetch<PermissionRequestResponse[]>(`/api/security/permission-requests${query}`);
-}
 
-export function createPermissionRequest(request: PermissionRequestCreateRequest): Promise<PermissionRequestResponse> {
-  return apiFetch<PermissionRequestResponse>("/api/security/permission-requests", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
-}
-
-export function reviewPermissionRequest(id: number, request: PermissionRequestReviewRequest): Promise<PermissionRequestResponse> {
-  return apiFetch<PermissionRequestResponse>(`/api/security/permission-requests/${id}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
-}

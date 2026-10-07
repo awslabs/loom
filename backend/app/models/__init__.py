@@ -7,7 +7,6 @@ from app.models.credential_provider import CredentialProvider
 from app.models.integration import Integration
 from app.models.managed_role import ManagedRole
 from app.models.authorizer_config import AuthorizerConfig
-from app.models.permission_request import PermissionRequest
 from app.models.authorizer_credential import AuthorizerCredential
 from app.models.memory import Memory
 from app.models.tag_policy import TagPolicy
@@ -23,7 +22,7 @@ from app.models.evaluation import EvaluationTestCase, EvaluationRun
 __all__ = [
     "Agent", "InvocationSession", "Invocation", "ConfigEntry",
     "CredentialProvider", "Integration",
-    "ManagedRole", "AuthorizerConfig", "PermissionRequest",
+    "ManagedRole", "AuthorizerConfig",
     "AuthorizerCredential", "Memory", "TagPolicy", "TagProfile",
     "McpServer", "McpTool", "McpServerAccess", "SiteSetting",
     "AuditLogin", "AuditAction", "AuditPageView",

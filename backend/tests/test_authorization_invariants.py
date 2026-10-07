@@ -382,3 +382,99 @@ class TestUntaggedResourcesFailClosedEverywhere(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# 4. Loom cannot write IAM
+# ---------------------------------------------------------------------------
+# Loom used to create the agent execution role during deploy, replace its
+# inline policy whenever an integration changed, apply extra statements when a
+# permission request was approved, and delete the role on teardown. All of it
+# is gone: roles are provisioned outside Loom by a platform engineer (see
+# `shared/iac/role.yaml`) and registered through Security > Roles.
+#
+# The requirement is "no capability, whether latent or not", so this asserts
+# the absence of the machinery rather than that it happens to be unreachable.
+# Policy-document *builders* count as machinery and were removed too — the
+# deployed task role has never been granted these actions, so any such code
+# would be a dormant privilege waiting for someone to widen the policy.
+IAM_WRITE_ACTIONS = (
+    "create_role",
+    "put_role_policy",
+    "delete_role",
+    "delete_role_policy",
+    "attach_role_policy",
+    "detach_role_policy",
+    "tag_role",
+    "untag_role",
+    "update_assume_role_policy",
+    "create_policy",
+    "put_user_policy",
+)
+
+# Names that may not reappear anywhere under app/.
+REMOVED_IAM_SYMBOLS = (
+    "create_execution_role",
+    "delete_execution_role",
+    "update_role_policy",
+    "build_base_policy",
+    "build_trust_policy",
+    "build_integration_policy_statements",
+    "create_iam_role_with_policy",
+    "update_iam_role_policy",
+    "delete_iam_role",
+    "apply_permissions_to_role",
+    "_sync_role_policy",
+)
+
+
+class TestLoomCannotWriteIam(unittest.TestCase):
+    def test_no_iam_write_calls_anywhere_in_app(self) -> None:
+        offenders = []
+        for path in sorted(APP_DIR.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", None)
+                if name in IAM_WRITE_ACTIONS:
+                    offenders.append(
+                        f"{path.relative_to(APP_DIR).as_posix()}:{node.lineno} .{name}()"
+                    )
+        self.assertEqual(
+            [], offenders,
+            "Loom must not create, modify or delete IAM roles or policies. "
+            "The execution role is provisioned outside Loom (shared/iac/role.yaml) "
+            "and registered under Security > Roles:\n  " + "\n  ".join(offenders),
+        )
+
+    def test_removed_iam_helpers_have_not_come_back(self) -> None:
+        """Catches a reintroduction under the old name, including a re-add of
+        the policy builders — which are latent write capability even though
+        they only return a dict."""
+        offenders = []
+        for path in sorted(APP_DIR.rglob("*.py")):
+            text = path.read_text()
+            for symbol in REMOVED_IAM_SYMBOLS:
+                if symbol in text:
+                    offenders.append(f"{path.relative_to(APP_DIR).as_posix()}: {symbol}")
+        self.assertEqual([], offenders, "\n  ".join(offenders))
+
+    def test_iam_service_exports_only_discovery(self) -> None:
+        """app/services/iam.py is read-only by construction."""
+        from app.services import iam
+
+        public = {n for n in dir(iam) if not n.startswith("_") and callable(getattr(iam, n))}
+        public -= {"logging", "Any"}
+        self.assertEqual({"list_agentcore_roles", "list_cognito_pools"}, public)
+
+    def test_permission_requests_are_gone(self) -> None:
+        """The feature existed only to have Loom apply statements to a role."""
+        import app.models as models
+
+        self.assertFalse(hasattr(models, "PermissionRequest"))
+        offenders = [
+            p.relative_to(APP_DIR).as_posix()
+            for p in APP_DIR.rglob("*.py")
+            if "PermissionRequest" in p.read_text()
+        ]
+        self.assertEqual([], offenders, f"PermissionRequest still referenced in {offenders}")

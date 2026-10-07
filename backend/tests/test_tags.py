@@ -12,7 +12,6 @@ from app.db import Base, get_db, _seed_default_tags
 from app.models.agent import Agent
 from app.models.tag_policy import TagPolicy
 from app.services.deployment import _merge_tags
-from app.services.iam import _iam_tags
 
 
 class TestTagPolicyModel(unittest.TestCase):
@@ -249,23 +248,6 @@ class TestMergeTags(unittest.TestCase):
         self.assertNotIn("app", result)
 
 
-class TestIamTags(unittest.TestCase):
-    """Test _iam_tags function with tag policies."""
-
-    def test_iam_tags_with_policies(self):
-        """Test _iam_tags returns IAM-format tags from policies."""
-        policies = [
-            {"key": "loom:application", "default_value": "myapp"},
-        ]
-        result = _iam_tags(tag_policies=policies)
-        self.assertEqual(result, [{"Key": "loom:application", "Value": "myapp"}])
-
-    def test_iam_tags_no_policies(self):
-        """Test _iam_tags with no policies returns empty list."""
-        result = _iam_tags()
-        self.assertEqual(result, [])
-
-
 class TestAgentTagModel(unittest.TestCase):
     """Test Agent model tags column."""
 
@@ -368,16 +350,14 @@ class TestDeployWithTags(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_with_tags_stored_on_agent(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test that tags are resolved and stored on the agent after deployment."""
         self.session.add(TagPolicy(key="loom:application", default_value=None, required=True, show_on_card=True))
         self.session.add(TagPolicy(key="loom:group", default_value=None, required=True, show_on_card=True))
         self.session.commit()
 
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
         mock_build_artifact.return_value = ("bucket", "key")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-tags",
@@ -387,6 +367,7 @@ class TestDeployWithTags(unittest.TestCase):
 
         response = self.client.post("/api/agents", json={
             "source": "deploy",
+            "role_arn": "arn:aws:iam::123456789012:role/test-role",
             "name": "tagged_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
             "tags": {"loom:application": "myapp", "loom:group": "platform"},
@@ -406,6 +387,7 @@ class TestDeployWithTags(unittest.TestCase):
 
         response = self.client.post("/api/agents", json={
             "source": "deploy",
+            "role_arn": "arn:aws:iam::123456789012:role/test-role",
             "name": "missing_tag_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
         })
@@ -418,12 +400,10 @@ class TestDeployWithTags(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_no_policies_succeeds(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test deployment succeeds when no tag policies are configured."""
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
         mock_build_artifact.return_value = ("bucket", "key")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-notags",
@@ -434,6 +414,7 @@ class TestDeployWithTags(unittest.TestCase):
         response = self.client.post("/api/agents", json={
             "tags": {"loom:group": "demo"},
             "source": "deploy",
+            "role_arn": "arn:aws:iam::123456789012:role/test-role",
             "name": "no_policy_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
         })
@@ -446,15 +427,13 @@ class TestDeployWithTags(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_tags_passed_to_create_runtime(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test that resolved tags are passed to create_runtime."""
         self.session.add(TagPolicy(key="loom:application", default_value="testapp", required=True))
         self.session.commit()
 
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
         mock_build_artifact.return_value = ("bucket", "key")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-pass",
@@ -465,6 +444,7 @@ class TestDeployWithTags(unittest.TestCase):
         self.client.post("/api/agents", json={
             "tags": {"loom:group": "demo"},
             "source": "deploy",
+            "role_arn": "arn:aws:iam::123456789012:role/test-role",
             "name": "pass_tags_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
         })
@@ -475,15 +455,13 @@ class TestDeployWithTags(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_tags_in_agent_response(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test that agent list/detail endpoints include tags."""
         self.session.add(TagPolicy(key="loom:application", default_value="testapp", required=True))
         self.session.commit()
 
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
         mock_build_artifact.return_value = ("bucket", "key")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-resp",
@@ -494,6 +472,7 @@ class TestDeployWithTags(unittest.TestCase):
         create_resp = self.client.post("/api/agents", json={
             "tags": {"loom:group": "demo"},
             "source": "deploy",
+            "role_arn": "arn:aws:iam::123456789012:role/test-role",
             "name": "resp_tags_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
         })
@@ -513,15 +492,13 @@ class TestDeployWithTags(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_with_optional_custom_tag(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test that optional custom tags are included when provided."""
         self.session.add(TagPolicy(key="cost-center", default_value="default-cc", required=False, show_on_card=True))
         self.session.commit()
 
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
         mock_build_artifact.return_value = ("bucket", "key")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-custom",
@@ -533,6 +510,7 @@ class TestDeployWithTags(unittest.TestCase):
         response = self.client.post("/api/agents", json={
             "tags": {"loom:group": "demo"},
             "source": "deploy",
+            "role_arn": "arn:aws:iam::123456789012:role/test-role",
             "name": "custom_tag_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
         })
@@ -545,15 +523,13 @@ class TestDeployWithTags(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_custom_tag_override(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test that user-supplied values override custom tag defaults."""
         self.session.add(TagPolicy(key="cost-center", default_value="default-cc", required=False, show_on_card=True))
         self.session.commit()
 
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
         mock_build_artifact.return_value = ("bucket", "key")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-override",
@@ -563,6 +539,7 @@ class TestDeployWithTags(unittest.TestCase):
 
         response = self.client.post("/api/agents", json={
             "source": "deploy",
+            "role_arn": "arn:aws:iam::123456789012:role/test-role",
             "name": "override_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
             "tags": {"loom:group": "demo", "cost-center": "eng-42"},

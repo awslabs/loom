@@ -1,4 +1,12 @@
-"""Security management endpoints for roles, authorizers, and permission requests."""
+"""Security management endpoints for roles and authorizers.
+
+Role handling here is registration only. Loom does not create, modify or
+delete IAM roles or policies — the role is provisioned outside Loom by a
+platform engineer (see `shared/iac/role.yaml`) and registered here so agents
+can reference it and so group entitlement can be checked. Permission requests,
+which existed to have Loom apply additional statements to a role, were removed
+with that capability.
+"""
 import json
 import logging
 import os
@@ -15,16 +23,9 @@ from app.dependencies.auth import UserInfo, get_current_user, require_scopes
 from app.models.managed_role import ManagedRole
 from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
-from app.models.permission_request import PermissionRequest
 from app.models.agent import Agent
 from app.routers.utils import check_resource_group_access, require_group_tag
-from app.services.security import (
-    apply_permissions_to_role,
-    create_iam_role_with_policy,
-    delete_iam_role,
-    get_role_policy_details,
-    update_iam_role_policy,
-)
+from app.services.security import get_role_policy_details
 from app.services.secrets import store_secret, get_secret, delete_secret
 
 logger = logging.getLogger(__name__)
@@ -54,18 +55,25 @@ def _get_user_group(user: UserInfo) -> str | None:
 # Pydantic request/response models
 # ---------------------------------------------------------------------------
 class CreateRoleRequest(BaseModel):
-    mode: str = Field(..., description="'import' or 'wizard'")
-    role_arn: str | None = Field(None, description="Existing role ARN (import mode)")
-    role_name: str | None = Field(None, description="New role name (wizard mode)")
+    """Registers an IAM role that already exists.
+
+    There is no create mode. Loom cannot provision a role, so the ARN of an
+    existing one is required.
+    """
+    role_arn: str = Field(..., description="ARN of an existing IAM role to register")
     role_type: str = Field(default="agent", description="Role type: 'agent' or 'code_interpreter'")
     description: str = Field(default="", description="Role description")
-    policy_document: dict = Field(default_factory=dict, description="IAM policy document (wizard mode)")
     tags: dict[str, str] | None = Field(None, description="Tags to apply (merged with AWS IAM tags on import)")
 
 
 class UpdateRoleRequest(BaseModel):
+    """Only the description is editable.
+
+    policy_document used to be writable and was applied to the real role via
+    PutRolePolicy. Loom no longer writes IAM, and accepting a policy it cannot
+    apply would misrepresent the role's actual permissions.
+    """
     description: str | None = None
-    policy_document: dict | None = None
 
 
 class CreateAuthorizerRequest(BaseModel):
@@ -105,18 +113,6 @@ class LinkCallbackRequest(BaseModel):
     redirect_uri: str
 
 
-class CreatePermissionRequestBody(BaseModel):
-    managed_role_id: int
-    requested_actions: list[str]
-    requested_resources: list[str]
-    justification: str
-
-
-class ReviewPermissionRequestBody(BaseModel):
-    status: str  # "approved" or "denied"
-    reviewer_notes: str | None = None
-
-
 # ---------------------------------------------------------------------------
 # Managed Roles
 # ---------------------------------------------------------------------------
@@ -126,79 +122,47 @@ def create_role(request: CreateRoleRequest, user: UserInfo = Depends(require_sco
     region = _get_region()
     account_id = _get_account_id()
 
-    if request.mode == "import":
-        if not request.role_arn:
-            raise HTTPException(status_code=400, detail="role_arn is required for import mode")
+    if not request.role_arn:
+        raise HTTPException(status_code=400, detail="role_arn is required")
 
-        # Check for duplicate
-        existing = db.query(ManagedRole).filter(ManagedRole.role_arn == request.role_arn).first()
-        if existing:
-            raise HTTPException(status_code=409, detail="Role ARN already managed")
+    existing = db.query(ManagedRole).filter(ManagedRole.role_arn == request.role_arn).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Role ARN already managed")
 
-        # Extract role name from ARN
-        role_name = request.role_arn.split("/")[-1]
+    role_name = request.role_arn.split("/")[-1]
 
-        # Fetch existing policy from AWS
-        try:
-            policy_details = get_role_policy_details(role_name, region)
-            policy_doc = {"Version": "2012-10-17", "Statement": policy_details["statements"]}
-        except Exception as e:
-            logger.warning("Could not fetch policy for %s: %s", role_name, e)
-            policy_doc = {}
+    # Read-only: records what the role's policy actually is, for display. Loom
+    # does not write it back and cannot change it.
+    try:
+        policy_details = get_role_policy_details(role_name, region)
+        policy_doc = {"Version": "2012-10-17", "Statement": policy_details["statements"]}
+    except Exception as e:
+        logger.warning("Could not fetch policy for %s: %s", role_name, e)
+        policy_doc = {}
 
-        # Fetch tags from AWS IAM, then merge with any provided tags (provided take precedence)
-        tags: dict[str, str] = {}
-        try:
-            iam_client = boto3.client("iam", region_name=region)
-            response = iam_client.list_role_tags(RoleName=role_name)
-            for tag in response.get("Tags", []):
-                tags[tag["Key"]] = tag["Value"]
-        except Exception as e:
-            logger.warning("Could not fetch tags for role %s: %s", role_name, e)
-        if request.tags:
-            tags.update(request.tags)
+    tags: dict[str, str] = {}
+    try:
+        iam_client = boto3.client("iam", region_name=region)
+        response = iam_client.list_role_tags(RoleName=role_name)
+        for tag in response.get("Tags", []):
+            tags[tag["Key"]] = tag["Value"]
+    except Exception as e:
+        logger.warning("Could not fetch tags for role %s: %s", role_name, e)
+    if request.tags:
+        tags.update(request.tags)
 
-        role = ManagedRole(
-            role_name=role_name,
-            role_arn=request.role_arn,
-            role_type=request.role_type,
-            description=request.description,
-            policy_document=json.dumps(policy_doc),
-        )
-        role.set_tags(require_group_tag(tags, "role"))
-        db.add(role)
-        db.commit()
-        db.refresh(role)
-        return role.to_dict()
-
-    elif request.mode == "wizard":
-        if not request.role_name:
-            raise HTTPException(status_code=400, detail="role_name is required for wizard mode")
-
-        try:
-            role_arn = create_iam_role_with_policy(
-                role_name=request.role_name,
-                policy_document=request.policy_document,
-                region=region,
-                account_id=account_id,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Failed to create IAM role: {e}")
-
-        role = ManagedRole(
-            role_name=request.role_name,
-            role_arn=role_arn,
-            role_type=request.role_type,
-            description=request.description,
-            policy_document=json.dumps(request.policy_document),
-        )
-        db.add(role)
-        db.commit()
-        db.refresh(role)
-        return role.to_dict()
-
-    else:
-        raise HTTPException(status_code=400, detail="mode must be 'import' or 'wizard'")
+    role = ManagedRole(
+        role_name=role_name,
+        role_arn=request.role_arn,
+        role_type=request.role_type,
+        description=request.description,
+        policy_document=json.dumps(policy_doc),
+    )
+    role.set_tags(require_group_tag(tags, "role"))
+    db.add(role)
+    db.commit()
+    db.refresh(role)
+    return role.to_dict()
 
 
 @router.get("/roles")
@@ -245,14 +209,6 @@ def update_role(role_id: int, request: UpdateRoleRequest, user: UserInfo = Depen
 
     if request.description is not None:
         role.description = request.description
-
-    if request.policy_document is not None:
-        region = _get_region()
-        try:
-            update_iam_role_policy(role.role_name, request.policy_document, region)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Failed to update IAM policy: {e}")
-        role.policy_document = json.dumps(request.policy_document)
 
     db.commit()
     db.refresh(role)
@@ -743,78 +699,5 @@ def delete_link(auth_id: int, user: UserInfo = Depends(require_scopes("agent:rea
 # ---------------------------------------------------------------------------
 # Permission Requests
 # ---------------------------------------------------------------------------
-@router.post("/permission-requests", status_code=status.HTTP_201_CREATED)
-def create_permission_request(
-    request: CreatePermissionRequestBody, user: UserInfo = Depends(require_scopes("security:write")), db: Session = Depends(get_db)
-) -> dict:
-    """Create a new permission request."""
-    role = db.query(ManagedRole).filter(ManagedRole.id == request.managed_role_id).first()
-    if not role:
-        raise HTTPException(status_code=404, detail="Managed role not found")
-    check_resource_group_access(role, user, resource_label="role")
-
-    perm_req = PermissionRequest(
-        managed_role_id=request.managed_role_id,
-        requested_actions=json.dumps(request.requested_actions),
-        requested_resources=json.dumps(request.requested_resources),
-        justification=request.justification,
-    )
-    db.add(perm_req)
-    db.commit()
-    db.refresh(perm_req)
-    return perm_req.to_dict()
 
 
-@router.get("/permission-requests")
-def list_permission_requests(
-    request_status: str | None = Query(None, alias="status"),
-    user: UserInfo = Depends(require_scopes("security:read")),
-    db: Session = Depends(get_db),
-) -> list[dict]:
-    """List permission requests, optionally filtered by status."""
-    query = db.query(PermissionRequest)
-    if request_status:
-        query = query.filter(PermissionRequest.status == request_status)
-    requests = query.order_by(PermissionRequest.id.desc()).all()
-    return [r.to_dict() for r in requests]
-
-
-@router.put("/permission-requests/{request_id}")
-def review_permission_request(
-    request_id: int, body: ReviewPermissionRequestBody, user: UserInfo = Depends(require_scopes("security:write")), db: Session = Depends(get_db)
-) -> dict:
-    """Approve or deny a permission request."""
-    perm_req = db.query(PermissionRequest).filter(PermissionRequest.id == request_id).first()
-    if not perm_req:
-        raise HTTPException(status_code=404, detail="Permission request not found")
-    role = db.query(ManagedRole).filter(ManagedRole.id == perm_req.managed_role_id).first()
-    if role:
-        check_resource_group_access(role, user, resource_label="role")
-
-    if perm_req.status != "pending":
-        raise HTTPException(status_code=400, detail="Permission request is not pending")
-
-    if body.status not in ("approved", "denied"):
-        raise HTTPException(status_code=400, detail="status must be 'approved' or 'denied'")
-
-    perm_req.status = body.status
-    perm_req.reviewer_notes = body.reviewer_notes
-
-    if body.status == "approved":
-        role = db.query(ManagedRole).filter(ManagedRole.id == perm_req.managed_role_id).first()
-        if not role:
-            raise HTTPException(status_code=404, detail="Associated managed role not found")
-
-        actions = json.loads(perm_req.requested_actions) if perm_req.requested_actions else []
-        resources = json.loads(perm_req.requested_resources) if perm_req.requested_resources else []
-        region = _get_region()
-
-        try:
-            updated_doc = apply_permissions_to_role(role.role_name, actions, resources, region)
-            role.policy_document = json.dumps(updated_doc)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Failed to apply permissions: {e}")
-
-    db.commit()
-    db.refresh(perm_req)
-    return perm_req.to_dict()

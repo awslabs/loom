@@ -280,6 +280,13 @@ make role        # IAM execution roles (~1 min)
 
 **Note on `role` stacks:** A separate role stack must be created for each application prefix. For example, deploying a role with the prefix `demo` creates an execution role shared by all `demo_*` agents. If you add agents with a different prefix (e.g., `finance_*`), you must deploy an additional role stack for that prefix.
 
+**This step is required, and it is the only way an execution role gets created.** Loom cannot create, modify or delete IAM roles or policies — it has no code that could, and the backend's task role is not granted the IAM write actions. After deploying a role stack, register the role in the UI under **Security > Roles** and tag it into the group whose agents will use it. A deploy that names an unregistered role, or one tagged into a group the caller does not belong to, is rejected.
+
+Two consequences worth planning for:
+
+- An agent cannot be deployed without `role_arn`. If you are upgrading from a version where Loom created roles on demand, agents whose role was auto-created will not redeploy until that role is registered under **Security > Roles**.
+- Adding an integration (S3, Lambda, DynamoDB, …) records the configuration but does not grant the permission. Add the matching statement to the role stack yourself and redeploy it.
+
 Create IAM roles as needed for your agents.
 
 ### Phase 3.2 — Capture stack outputs

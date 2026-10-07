@@ -55,9 +55,6 @@ from app.services.deployment import (
     update_runtime,
 )
 from app.services.iam import (
-    _iam_tags,
-    create_execution_role,
-    delete_execution_role,
     list_agentcore_roles,
     list_cognito_pools,
 )
@@ -86,16 +83,6 @@ from app.services.secrets import store_secret, get_secret, delete_secret
 
 logger = logging.getLogger(__name__)
 
-def _sync_role_policy_for_provider_update(agent: Agent, db: Session, user: UserInfo) -> None:
-    """Refresh the agent's execution role policy after a provider/api_key change."""
-    from app.routers.integrations import _sync_role_policy
-
-    try:
-        _sync_role_policy(agent, db, user)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.warning("Failed to refresh IAM role policy for agent %s after provider update", agent.id, exc_info=True)
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -312,9 +299,9 @@ def _store_provider_api_key(agent_id: int, agent_name: str, provider: str, api_k
     """Store a non-Bedrock provider's API key in Secrets Manager and return its ARN.
 
     The secret name is prefixed with the agent's name (not just its numeric
-    id) so it falls under the IAM role's `loom/agents/{agent_name}*`
-    wildcard (see app.services.iam.build_base_policy) — this lets a shared
-    managed role (e.g. "loom-role-demo") read the secrets of any agent whose
+    id) so it falls under the `loom/agents/{agent_name}*` wildcard that the
+    execution role policy in `shared/iac/role.yaml` grants — this lets a
+    shared role (e.g. "loom-role-demo") read the secrets of any agent whose
     name starts with that same prefix. The trailing agent_id keeps the name
     unique across agents that share a prefix.
     """
@@ -1187,9 +1174,19 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     # privilege escalation rather than disclosure. Validated at request time
     # because the two deploy paths that consume it run in background tasks,
     # where there is no caller to check against.
-    # role_arn names an IAM role whose inline policy _sync_role_policy will
-    # later PutRolePolicy-replace, so attaching one is effectively a write to
-    # it. The agent was group-checked; the role never was.
+    # Loom cannot create a role, so one must be supplied, and it must already
+    # be registered under Security > Roles in a group the caller can reach.
+    # Both checks are here rather than in the background task so the caller
+    # gets a 400/403 instead of a deployment that fails minutes later.
+    if not request.role_arn:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "role_arn is required. Loom does not create IAM execution "
+                "roles — ask a platform engineer to provision one (see "
+                "shared/iac/role.yaml) and register it under Security > Roles."
+            ),
+        )
     assert_role_arn_bindable(request.role_arn, db, user)
 
     if request.code_interpreter_role_id:
@@ -1548,36 +1545,14 @@ def _deploy_agent_background(
                     ci_config["execution_role_arn"] = ci_role.role_arn
             integrations_config["code_interpreter"] = ci_config
 
-        # --- Step 2: Create or use provided IAM execution role ---
-        agent.deployment_status = "creating_role"
-        db.commit()
-
-        created_role = False
+        # --- Step 2: Use the provided IAM execution role ---
+        # Loom never creates one. The role is provisioned outside Loom by a
+        # platform engineer (shared/iac/role.yaml) and registered through
+        # Security > Roles; the request is rejected at the API boundary if it
+        # names a role the caller is not entitled to, so by here it is valid.
         execution_role_arn = request.role_arn
-        if not execution_role_arn:
-            try:
-                execution_role_arn = create_execution_role(
-                    agent_name=request.name,
-                    runtime_id=f"pending-{agent.id}",
-                    region=region,
-                    account_id=account_id,
-                    tag_policies=tag_policy_dicts,
-                    extra_tags=resolved_tags,
-                    code_interpreter=request.code_interpreter_enabled,
-                    agent_id=agent.id,
-                )
-                created_role = True
-                agent.execution_role_arn = execution_role_arn
-                db.commit()
-            except Exception as e:
-                agent.deployment_status = "failed"
-                agent.status = "FAILED"
-                db.commit()
-                logger.error("Failed to create execution role for agent %s: %s", agent.id, e)
-                return
-        else:
-            agent.execution_role_arn = execution_role_arn
-            db.commit()
+        agent.execution_role_arn = execution_role_arn
+        db.commit()
 
         # --- Step 3: Build agent artifact (and optionally create CI resource in parallel) ---
         agent.deployment_status = "building_artifact"
@@ -1622,8 +1597,6 @@ def _deploy_agent_background(
                 ci_future.cancel()
             if ci_executor is not None:
                 ci_executor.shutdown(wait=False)
-            if created_role and execution_role_arn:
-                _cleanup_role(execution_role_arn)
             logger.error("Failed to build artifact for agent %s: %s", agent.id, e)
             return
 
@@ -1875,8 +1848,6 @@ def _deploy_agent_background(
             agent.deployment_status = "failed"
             agent.status = "FAILED"
             db.commit()
-            if created_role and execution_role_arn:
-                _cleanup_role(execution_role_arn)
             logger.error("Failed to deploy agent %s: %s", agent.id, e)
     except Exception as e:
         logger.error("Unexpected error in background deploy for agent %s: %s", agent_id, e)
@@ -2331,9 +2302,19 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
     # privilege escalation rather than disclosure. Validated at request time
     # because the two deploy paths that consume it run in background tasks,
     # where there is no caller to check against.
-    # role_arn names an IAM role whose inline policy _sync_role_policy will
-    # later PutRolePolicy-replace, so attaching one is effectively a write to
-    # it. The agent was group-checked; the role never was.
+    # Loom cannot create a role, so one must be supplied, and it must already
+    # be registered under Security > Roles in a group the caller can reach.
+    # Both checks are here rather than in the background task so the caller
+    # gets a 400/403 instead of a deployment that fails minutes later.
+    if not request.role_arn:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "role_arn is required. Loom does not create IAM execution "
+                "roles — ask a platform engineer to provision one (see "
+                "shared/iac/role.yaml) and register it under Security > Roles."
+            ),
+        )
     assert_role_arn_bindable(request.role_arn, db, user)
 
     if request.code_interpreter_role_id:
@@ -3198,15 +3179,6 @@ def _register_agent_in_registry_background(agent_id: int) -> None:
         db.close()
 
 
-def _cleanup_role(role_arn: str) -> None:
-    """Best-effort cleanup of an IAM role on deploy failure."""
-    try:
-        role_name = role_arn.split("/")[-1]
-        delete_execution_role(role_name)
-    except Exception as e:
-        logger.warning("Failed to clean up orphaned IAM role %s: %s", role_arn, e)
-
-
 def _delete_code_interpreter(ci_id: str, region: str) -> None:
     """Best-effort deletion of a custom Code Interpreter resource.
 
@@ -3439,8 +3411,6 @@ def get_agent_status(
     if ci_status is not None:
         response.code_interpreter_status = ci_status
     return response
-
-
 
 
 @router.delete("/{agent_id}", response_model=AgentResponse)
@@ -4012,9 +3982,19 @@ def redeploy_deploy_agent(
     # privilege escalation rather than disclosure. Validated at request time
     # because the two deploy paths that consume it run in background tasks,
     # where there is no caller to check against.
-    # role_arn names an IAM role whose inline policy _sync_role_policy will
-    # later PutRolePolicy-replace, so attaching one is effectively a write to
-    # it. The agent was group-checked; the role never was.
+    # Loom cannot create a role, so one must be supplied, and it must already
+    # be registered under Security > Roles in a group the caller can reach.
+    # Both checks are here rather than in the background task so the caller
+    # gets a 400/403 instead of a deployment that fails minutes later.
+    if not request.role_arn:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "role_arn is required. Loom does not create IAM execution "
+                "roles — ask a platform engineer to provision one (see "
+                "shared/iac/role.yaml) and register it under Security > Roles."
+            ),
+        )
     assert_role_arn_bindable(request.role_arn, db, user)
 
     if request.code_interpreter_role_id:
@@ -4252,9 +4232,19 @@ def redeploy_harness_agent(
     # privilege escalation rather than disclosure. Validated at request time
     # because the two deploy paths that consume it run in background tasks,
     # where there is no caller to check against.
-    # role_arn names an IAM role whose inline policy _sync_role_policy will
-    # later PutRolePolicy-replace, so attaching one is effectively a write to
-    # it. The agent was group-checked; the role never was.
+    # Loom cannot create a role, so one must be supplied, and it must already
+    # be registered under Security > Roles in a group the caller can reach.
+    # Both checks are here rather than in the background task so the caller
+    # gets a 400/403 instead of a deployment that fails minutes later.
+    if not request.role_arn:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "role_arn is required. Loom does not create IAM execution "
+                "roles — ask a platform engineer to provision one (see "
+                "shared/iac/role.yaml) and register it under Security > Roles."
+            ),
+        )
     assert_role_arn_bindable(request.role_arn, db, user)
 
     if request.code_interpreter_role_id:
@@ -4612,8 +4602,6 @@ def patch_agent(
                 break
     db.commit()
     db.refresh(agent)
-    if provider_fields_set:
-        _sync_role_policy_for_provider_update(agent, db, user)
     return _agent_response(agent, db)
 
 

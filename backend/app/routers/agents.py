@@ -31,7 +31,7 @@ from app.models.tag_policy import TagPolicy
 from app.models.tag_profile import TagProfile
 from app.models.managed_role import ManagedRole
 from app.models.vpc_config import VpcConfig
-from app.routers.utils import get_agent_or_404, require_group_tag
+from app.routers.utils import assert_bindable, get_agent_or_404, require_group_tag
 
 from app.services.agentcore import describe_runtime, list_runtime_endpoints
 from app.services.deployment import (
@@ -905,9 +905,9 @@ def create_agent(
     if request.source == "register":
         return _register_agent(request, db)
     elif request.source == "deploy":
-        return _deploy_agent(request, db, background_tasks)
+        return _deploy_agent(request, db, background_tasks, user)
     elif request.source == "harness":
-        return _deploy_harness(request, db, background_tasks)
+        return _deploy_harness(request, db, background_tasks, user)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1044,7 +1044,7 @@ def _register_agent(request: AgentCreateRequest, db: Session) -> AgentResponse:
     return _agent_response(agent, db)
 
 
-def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: BackgroundTasks) -> AgentResponse:
+def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: BackgroundTasks, user: UserInfo) -> AgentResponse:
     """Deploy a new agent runtime to AgentCore.
 
     Validates inputs synchronously, creates the agent record, then schedules the
@@ -1111,6 +1111,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     mcp_records: list[McpServer] = []
     if request.mcp_servers:
         mcp_records = db.query(McpServer).filter(McpServer.id.in_(request.mcp_servers)).all()
+        assert_bindable(mcp_records, user, resource_label="mcp server")
         found_ids = {s.id for s in mcp_records}
         missing = set(request.mcp_servers) - found_ids
         if missing:
@@ -1134,6 +1135,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     a2a_records: list[A2aAgentModel] = []
     if request.a2a_agents:
         a2a_records = db.query(A2aAgentModel).filter(A2aAgentModel.id.in_(request.a2a_agents)).all()
+        assert_bindable(a2a_records, user, resource_label="a2a agent")
         found_ids = {a.id for a in a2a_records}
         missing = set(request.a2a_agents) - found_ids
         if missing:
@@ -1157,6 +1159,20 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     memory_records: list[Memory] = []
     if request.memory_ids:
         memory_records = db.query(Memory).filter(Memory.id.in_(request.memory_ids)).all()
+        assert_bindable(memory_records, user, resource_label="memory resource")
+
+    # The code interpreter's execution_role_arn comes from this row, so an
+    # unchecked bind here hands another group's IAM role to this agent —
+    # privilege escalation rather than disclosure. Validated at request time
+    # because the two deploy paths that consume it run in background tasks,
+    # where there is no caller to check against.
+    if request.code_interpreter_role_id:
+        assert_bindable(
+            db.query(ManagedRole).filter(
+                ManagedRole.id == request.code_interpreter_role_id
+            ).all(),
+            user, resource_label="managed role",
+        )
         found_ids = {m.id for m in memory_records}
         missing = set(request.memory_ids) - found_ids
         if missing:
@@ -2168,7 +2184,7 @@ def _update_deploy_agent_background(
         db.close()
 
 
-def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: BackgroundTasks) -> AgentResponse:
+def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: BackgroundTasks, user: UserInfo) -> AgentResponse:
     """Deploy a managed agent via AgentCore Harness.
 
     Simpler than _deploy_agent — no artifact build or credential provider creation.
@@ -2246,6 +2262,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
     mcp_snapshots: list[dict[str, Any]] = []
     if request.mcp_servers:
         mcp_records = db.query(McpServer).filter(McpServer.id.in_(request.mcp_servers)).all()
+        assert_bindable(mcp_records, user, resource_label="mcp server")
         found_ids = {s.id for s in mcp_records}
         missing = set(request.mcp_servers) - found_ids
         if missing:
@@ -2275,6 +2292,20 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
     memory_snapshots: list[dict[str, Any]] = []
     if request.memory_ids:
         memory_records = db.query(Memory).filter(Memory.id.in_(request.memory_ids)).all()
+        assert_bindable(memory_records, user, resource_label="memory resource")
+
+    # The code interpreter's execution_role_arn comes from this row, so an
+    # unchecked bind here hands another group's IAM role to this agent —
+    # privilege escalation rather than disclosure. Validated at request time
+    # because the two deploy paths that consume it run in background tasks,
+    # where there is no caller to check against.
+    if request.code_interpreter_role_id:
+        assert_bindable(
+            db.query(ManagedRole).filter(
+                ManagedRole.id == request.code_interpreter_role_id
+            ).all(),
+            user, resource_label="managed role",
+        )
         memory_snapshots = [
             {"name": m.name, "memory_id": m.memory_id, "arn": m.arn}
             for m in memory_records
@@ -3877,6 +3908,7 @@ def redeploy_deploy_agent(
     mcp_records: list[McpServer] = []
     if request.mcp_servers:
         mcp_records = db.query(McpServer).filter(McpServer.id.in_(request.mcp_servers)).all()
+        assert_bindable(mcp_records, user, resource_label="mcp server")
         found_ids = {s.id for s in mcp_records}
         missing = set(request.mcp_servers) - found_ids
         if missing:
@@ -3908,6 +3940,7 @@ def redeploy_deploy_agent(
     a2a_records: list[A2aAgentModel] = []
     if request.a2a_agents:
         a2a_records = db.query(A2aAgentModel).filter(A2aAgentModel.id.in_(request.a2a_agents)).all()
+        assert_bindable(a2a_records, user, resource_label="a2a agent")
         found_ids = {a.id for a in a2a_records}
         missing = set(request.a2a_agents) - found_ids
         if missing:
@@ -3935,6 +3968,20 @@ def redeploy_deploy_agent(
     memory_records: list[Memory] = []
     if request.memory_ids:
         memory_records = db.query(Memory).filter(Memory.id.in_(request.memory_ids)).all()
+        assert_bindable(memory_records, user, resource_label="memory resource")
+
+    # The code interpreter's execution_role_arn comes from this row, so an
+    # unchecked bind here hands another group's IAM role to this agent —
+    # privilege escalation rather than disclosure. Validated at request time
+    # because the two deploy paths that consume it run in background tasks,
+    # where there is no caller to check against.
+    if request.code_interpreter_role_id:
+        assert_bindable(
+            db.query(ManagedRole).filter(
+                ManagedRole.id == request.code_interpreter_role_id
+            ).all(),
+            user, resource_label="managed role",
+        )
         found_ids = {m.id for m in memory_records}
         missing = set(request.memory_ids) - found_ids
         if missing:
@@ -4133,6 +4180,7 @@ def redeploy_harness_agent(
     mcp_snapshots: list[dict[str, Any]] = []
     if request.mcp_servers:
         mcp_records = db.query(McpServer).filter(McpServer.id.in_(request.mcp_servers)).all()
+        assert_bindable(mcp_records, user, resource_label="mcp server")
         for server in mcp_records:
             mcp_snapshots.append({
                 "name": server.name,
@@ -4155,6 +4203,20 @@ def redeploy_harness_agent(
     update_memory_snapshots: list[dict[str, Any]] = []
     if request.memory_ids:
         mem_records = db.query(Memory).filter(Memory.id.in_(request.memory_ids)).all()
+        assert_bindable(mem_records, user, resource_label="memory resource")
+
+    # The code interpreter's execution_role_arn comes from this row, so an
+    # unchecked bind here hands another group's IAM role to this agent —
+    # privilege escalation rather than disclosure. Validated at request time
+    # because the two deploy paths that consume it run in background tasks,
+    # where there is no caller to check against.
+    if request.code_interpreter_role_id:
+        assert_bindable(
+            db.query(ManagedRole).filter(
+                ManagedRole.id == request.code_interpreter_role_id
+            ).all(),
+            user, resource_label="managed role",
+        )
         update_memory_snapshots = [
             {"name": m.name, "memory_id": m.memory_id, "arn": m.arn}
             for m in mem_records

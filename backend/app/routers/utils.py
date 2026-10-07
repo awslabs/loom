@@ -121,6 +121,34 @@ def visible_agent_ids(db: Session, user: UserInfo) -> list[int] | None:
         allowed.append(agent.id)
     return allowed
 
+def assert_bindable(resources: list, user: UserInfo, resource_label: str = "resource") -> None:
+    """Group-check every row a request is attaching to an agent by primary key.
+
+    Agent create and redeploy resolve `mcp_servers`, `memory_ids` and
+    `a2a_agents` straight from primary keys in the request body. Fetch-by-ID
+    has been 403 across groups since the single-object helpers landed, but
+    these binds never ran that check, so the IDs were a second way in: a
+    caller could attach another group's MCP server — whose deploy snapshot
+    carries `oauth2_client_secret` into a credential provider under the
+    caller's own agent — or another group's `memory_id` into their own
+    `AGENT_CONFIG_JSON`.
+
+    Unlike filter_visible_resources this raises rather than filtering. A list
+    silently omitting a row the caller cannot see is right; a deploy silently
+    dropping an integration the caller asked for is not, and would leave them
+    with a working agent quietly missing its tools.
+
+    Keyed on what the *caller* can reach rather than on matching the agent's
+    own loom:group: that is exactly the reporter's "do not snapshot secrets
+    the caller cannot GET", it matches the semantics every other check already
+    uses, and it leaves a super-admin able to compose across groups
+    deliberately instead of breaking existing deployments that share one
+    integration between several groups' agents.
+    """
+    for resource in resources:
+        check_resource_group_access(resource, user, resource_label=resource_label)
+
+
 def filter_visible_resources(resources: list, user: UserInfo, resource_label: str = "resource") -> list:
     """Drop the rows the caller's loom:group does not reach.
 

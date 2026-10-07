@@ -55,6 +55,7 @@ from app.services.iam import (
     list_agentcore_roles,
     list_cognito_pools,
 )
+from app.services.mcp import user_api_key_secret_name
 from app.services.credential import (
     create_api_key_credential_provider,
     create_oauth2_credential_provider,
@@ -1429,7 +1430,10 @@ def _deploy_agent_background(
                     auth_entry["audience"] = server["oauth2_audience"]
                 entry["auth"] = auth_entry
             elif server["auth_type"] == "api_key":
-                secret_name = f"loom/mcp/{server['name']}/api-key/{{actor_id}}"
+                # Same path services/mcp.py resolves at request time; built by
+                # the one helper so the two cannot drift. actor_id stays a
+                # literal placeholder for the runtime to substitute.
+                secret_name = user_api_key_secret_name(server["name"], "{actor_id}")
                 entry["auth"] = {
                     "type": "api_key",
                     "credentials_secret_arn": secret_name,
@@ -1944,7 +1948,10 @@ def _update_deploy_agent_background(
                     auth_entry["audience"] = server["oauth2_audience"]
                 entry["auth"] = auth_entry
             elif server["auth_type"] == "api_key":
-                secret_name = f"loom/mcp/{server['name']}/api-key/{{actor_id}}"
+                # Same path services/mcp.py resolves at request time; built by
+                # the one helper so the two cannot drift. actor_id stays a
+                # literal placeholder for the runtime to substitute.
+                secret_name = user_api_key_secret_name(server["name"], "{actor_id}")
                 entry["auth"] = {
                     "type": "api_key",
                     "credentials_secret_arn": secret_name,

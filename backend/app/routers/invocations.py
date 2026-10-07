@@ -44,6 +44,7 @@ from app.services.cloudwatch import (
 )
 from app.services.cognito import get_cognito_token
 from app.services.credential import credential_provider_name
+from app.services.mcp import user_api_key_secret_name
 from app.services.latency import compute_client_duration, compute_cold_start
 from app.services.secrets import get_secret
 from app.services.tokens import count_input_tokens, count_output_tokens
@@ -1613,7 +1614,7 @@ async def invoke_agent_endpoint(
                 # Per-user keys are stored by the immutable IdP subject.  The
                 # actor_id is a separately formatted value used by AgentCore
                 # sessions and does not identify the Secrets Manager entry.
-                secret_name = f"loom/mcp/{server.name}/api-key/{user.sub}"
+                secret_name = user_api_key_secret_name(server.name, user.sub)
                 entry["auth"] = {
                     "type": "api_key",
                     "credentials_secret_arn": secret_name,

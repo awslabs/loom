@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
-from app.routers.utils import visible_agent_ids
+from app.routers.utils import filter_visible_resources, visible_agent_ids
 from app.models.agent import Agent
 from app.models.invocation import Invocation
 from app.models.session import InvocationSession
@@ -383,15 +383,15 @@ def pull_cost_actuals(
     # Also include all Memory records in the DB (covers imported memories), filtered by group
     all_memories = db.query(Memory).filter(Memory.memory_id.isnot(None)).all()
 
-    # Filter memories by group parameter (for View As) or user's groups (same logic as agents)
+    # Narrow to what the caller may see FIRST, then apply the requested group
+    # as a further filter. The order is the whole point: this block used to
+    # read `if group: ... elif not t-admin: ...`, so passing ?group= skipped
+    # the caller's own restriction entirely and returned another group's
+    # memory spend. The agents half of this route was fixed by
+    # _agents_in_cost_scope; this half kept the original shape.
+    all_memories = filter_visible_resources(all_memories, user, resource_label="memory resource")
     if group:
-        # Explicit group filter (used by admins for View As)
         all_memories = [m for m in all_memories if m.get_tags().get("loom:group") == group]
-    elif "t-admin" not in user.groups:
-        # User view: filter by group tags (strip "g-users-" prefix)
-        user_groups = [g for g in user.groups if g.startswith("g-users-")]
-        allowed_tags = [g.replace("g-users-", "", 1) for g in user_groups]
-        all_memories = [m for m in all_memories if m.get_tags().get("loom:group") in allowed_tags]
 
     for mem in all_memories:
         if mem.memory_id:

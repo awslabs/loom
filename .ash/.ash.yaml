@@ -125,6 +125,9 @@ global_settings:
     - path: backend/tests/test_credential_provider_overwrite.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using placeholder client secrets/API keys to prove a credential provider name collision is not overwritten with them.
+    - path: backend/tests/test_authorization_invariants.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Constant names describing Secrets Manager path prefixes used by a structural test, not secret values.
     - path: backend/tests/test_mcp_name_keyed_secret.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using a placeholder MCP API key plus the has_admin_api_key boolean flag field name, to prove a renamed server cannot resolve another group's secret.

@@ -643,7 +643,7 @@ The `model_id` field is optional on registration and stored as an `AGENT_CONFIG_
 When `source="harness"`, the agent is deployed as a fully managed AgentCore Harness — no artifact build, no credential provider creation. Requires `name`, `model_id`, and `role_arn`. The backend calls `CreateHarness` API, sets `harness_id` on the agent record, and extracts the auto-provisioned runtime from the harness environment. Harness agents are invoked via `InvokeHarness` API (Converse API streaming format translated to existing SSE events) and deleted via `DeleteHarness` API.
 
 The `mcp_servers` configuration is stored in the `AGENT_CONFIG_JSON` config entry under `integrations.mcp_servers` as an array. Each MCP server with OAuth2 authentication includes:
-- `auth.credential_provider_name` — Name of the AgentCore credential provider created during deployment
+- `auth.credential_provider_name` — Name of the AgentCore credential provider created during deployment, from `credential_provider_name()` (`loom-{agent name}-{agent id}-mcp|a2a-{resource name}`)
 - `auth.well_known_endpoint` — OAuth2 discovery URL
 - `auth.scopes` — Array of OAuth2 scopes
 - `auth.delegation_mode` — `m2m` or `obo` (on-behalf-of token exchange)
@@ -651,7 +651,7 @@ The `mcp_servers` configuration is stored in the `AGENT_CONFIG_JSON` config entr
 - `auth.audience` — Token exchange audience (when required by the authorization server)
 
 The `a2a_agents` configuration is stored in the `AGENT_CONFIG_JSON` config entry under `integrations.a2a_agents` as an array. Each A2A agent with OAuth2 authentication includes:
-- `auth.credential_provider_name` — Name of the AgentCore credential provider created during deployment
+- `auth.credential_provider_name` — Name of the AgentCore credential provider created during deployment, from `credential_provider_name()` (`loom-{agent name}-{agent id}-mcp|a2a-{resource name}`)
 - `auth.well_known_endpoint` — OAuth2 discovery URL
 - `auth.scopes` — OAuth2 scopes string
 - `auth.delegation_mode` — `m2m` or `obo` (on-behalf-of token exchange)
@@ -1189,9 +1189,11 @@ Regenerates `etc/models.json` from the curated `etc/bedrock_model_catalog.json` 
 
 AgentCore credential provider management:
 
-- `create_oauth2_credential_provider(name: str, client_id: str, client_secret: str, auth_server_url: str, region: str, tags: dict | None, delegation_mode: str = "m2m", obo_grant_type: str | None = None) -> dict` — creates or updates an OAuth2 credential provider using the `CustomOauth2` vendor type. When `delegation_mode` is `"obo"`, configures `onBehalfOfTokenExchangeConfig` with the specified grant type (`TOKEN_EXCHANGE` for RFC 8693 or `JWT_AUTHORIZATION_GRANT` for RFC 7523). TOKEN_EXCHANGE uses `actorTokenContent: NONE` with `CLIENT_SECRET_BASIC` auth method; JWT_AUTHORIZATION_GRANT uses `CLIENT_SECRET_POST`. If creation fails with a `ValidationException` indicating the provider already exists, automatically falls back to `update_oauth2_credential_provider` (without tags, which the update API does not accept). Retries other transient failures with exponential backoff (4 retries, delays 2s/4s/8s/16s). Raises on exhaustion.
+- `credential_provider_name(agent_id: int, agent_name: str, kind: str, resource_name: str | None = None) -> str` — the single place provider names are derived: `loom-{agent name}-{agent id}-{kind}[-{resource name}]`, with every component sanitized to `[a-zA-Z0-9.-]`. `kind` is `mcp`, `a2a`, `litellm-key` or `custom`. The agent id is the security-relevant part — see "Credential provider names are keyed on the agent id" above.
+- `create_oauth2_credential_provider(name: str, client_id: str, client_secret: str, auth_server_url: str, region: str, tags: dict | None, delegation_mode: str = "m2m", obo_grant_type: str | None = None, allow_update: bool = False) -> dict` — creates an OAuth2 credential provider using the `CustomOauth2` vendor type. When `delegation_mode` is `"obo"`, configures `onBehalfOfTokenExchangeConfig` with the specified grant type (`TOKEN_EXCHANGE` for RFC 8693 or `JWT_AUTHORIZATION_GRANT` for RFC 7523). TOKEN_EXCHANGE uses `actorTokenContent: NONE` with `CLIENT_SECRET_BASIC` auth method; JWT_AUTHORIZATION_GRANT uses `CLIENT_SECRET_POST`. If creation fails with a `ValidationException` indicating the provider already exists, raises `CredentialProviderNameInUse` unless `allow_update=True`, in which case it falls back to `update_oauth2_credential_provider` (without tags, which the update API does not accept). Retries other transient failures with exponential backoff (4 retries, delays 2s/4s/8s/16s). Raises on exhaustion.
 - `delete_credential_provider(provider_name: str, region: str)` — deletes an OAuth2 credential provider by name.
-- `create_api_key_credential_provider(name: str, api_key: str, region: str) -> dict` — creates (or, on `ValidationException` indicating the provider already exists, updates) an AgentCore **API key** credential provider — a distinct provider type from the OAuth2 ones above. Used for harness agents' `liteLlmModelConfig.apiKeyArn`, which the Harness resolves itself via `bedrock-agentcore:GetResourceApiKey` at invocation time (not Secrets Manager). Returns the response dict including `credentialProviderArn`.
+- `create_api_key_credential_provider(name: str, api_key: str, region: str, allow_update: bool = False) -> dict` — creates an AgentCore **API key** credential provider — a distinct provider type from the OAuth2 ones above. Used for harness agents' `liteLlmModelConfig.apiKeyArn`, which the Harness resolves itself via `bedrock-agentcore:GetResourceApiKey` at invocation time (not Secrets Manager). Same `allow_update` semantics as the OAuth2 function. Returns the response dict including `credentialProviderArn`.
+- `CredentialProviderNameInUse(Exception)` — raised when the name is already taken and the caller did not opt into overwriting it.
 - `delete_api_key_credential_provider(provider_name: str, region: str)` — deletes an API key credential provider by name.
 
 **IAM permissions required:** The ECS task role needs both `bedrock-agentcore:*` actions (for the control plane API) and Secrets Manager permissions scoped to `bedrock-agentcore-identity!*` secrets. Credential providers internally store OAuth2 client credentials in Secrets Manager under this prefix. The task role requires `secretsmanager:GetSecretValue`, `CreateSecret`, `DeleteSecret`, and `PutSecretValue` on `arn:aws:secretsmanager:*:${AccountId}:secret:bedrock-agentcore-identity!*`. The CloudWatch Logs policy covers both `/aws/bedrock-agentcore/*` and `/aws/vendedlogs/bedrock-agentcore/*` log group prefixes (the latter is used for agent observability vended logs).
@@ -1207,8 +1209,8 @@ Core authentication and authorization module. Provides:
 - `GROUP_SCOPES: dict[str, list[str]]` — maps Cognito group names to scope lists. Must match the frontend `GROUP_SCOPES` exactly. Uses two-dimensional group architecture:
   - **Type groups** (UI view): `t-admin`, `t-user` — no scopes, determine layout
   - **Resource groups** (access control):
-    - `g-admins-super`: all 21 scopes (catalog:r/w, agent:r/w, memory:r/w, security:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, registry:r/w, admin:r/w, invoke)
-    - `g-admins-demo`: `catalog:read`, `agent:read`, `agent:write`, `memory:read`, `memory:write`, `security:read`, `tagging:read`, `costs:read`, `costs:write`, `mcp:read`, `mcp:write`, `a2a:read`, `a2a:write`, `invoke` (can create/delete demo resources only)
+    - `g-admins-super`: all 22 scopes (catalog:r/w, agent:r/w, session:read, memory:r/w, security:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, registry:r/w, admin:r/w, invoke)
+    - `g-admins-demo`: `catalog:read`, `agent:read`, `agent:write`, `session:read`, `memory:read`, `memory:write`, `security:read`, `tagging:read`, `costs:read`, `costs:write`, `mcp:read`, `mcp:write`, `a2a:read`, `a2a:write`, `invoke` (can create/delete demo resources only)
     - `g-admins-security`: `security:read`, `security:write`, `tagging:read`
     - `g-admins-memory`: `memory:read`, `memory:write`, `tagging:read`
     - `g-admins-mcp`: `mcp:read`, `mcp:write`, `tagging:read`
@@ -1238,7 +1240,7 @@ Two defences, both verified by mutation testing in `tests/test_auth_bypass_harde
 
 Note `get_current_user_token()` has the same no-IdP precondition and returns the caller's token *unvalidated* in that state. It grants no scopes, so it does not escalate privilege, but it is the remaining instance of this pattern — tracked for removal alongside the bypass itself.
 - `require_scopes(*required: str)` — factory returning a FastAPI dependency that checks the user has ALL required scopes. Raises 403 on missing scope. Used as `Depends(require_scopes("scope:name"))` on all guarded endpoints.
-- `oauth2_scheme` — `OAuth2AuthorizationCodeBearer` for OpenAPI docs with all 21 scopes.
+- `oauth2_scheme` — `OAuth2AuthorizationCodeBearer` for OpenAPI docs with all 22 scopes.
 - `get_current_user_token(request: Request) -> str | None` — legacy helper for token forwarding to AgentCore invocations.
 - `get_token_claims(request: Request) -> dict | None` — legacy helper for decoded claims extraction.
 
@@ -1270,6 +1272,24 @@ Note `get_current_user_token()` has the same no-IdP precondition and returns the
 - **Demo-admin write restrictions**: `g-admins-demo` can only create/delete resources with `loom:group=demo` (enforced in agents.py and memories.py)
 
 **Multi-group filtering:** When a user belongs to multiple groups (excluding `super-admins`), the backend applies a union filter: a resource is visible if its `loom:group` tag matches any of the user's groups. This allows cross-team visibility when users have multiple group memberships.
+
+**`session:read` is separate from `agent:read`.** Conversation content — `prompt_text`, `thinking_text`, `response_text`, and approval logs' `tool_input_summary` — is far more sensitive than "this agent exists", so the session/invocation/approval-log readers are gated on `session:read` rather than `agent:read`. Every group that holds `agent:read` today also holds `session:read`, so the split is not a privilege change; the point is that agent visibility can now be granted without handing over every transcript, and the domain admins (`g-admins-security`/`memory`/`mcp`/`a2a`/`registry`) hold neither.
+
+**Conversation reads enforce group *and* ownership.** `GET /api/agents/{id}` returned 403 for an agent outside the caller's group, but the readers beside it never got the same check: `list_sessions` loaded the Agent by ID with no check and returned every conversation on it to any `t-admin`, while `get_session` and `get_invocation` resolved by session UUID with no group check *and* no owner filter. `GET /api/settings/approvals/logs` was worse — declared with `dependencies=[...]` and no `user` parameter, so it had no identity in scope and structurally could not check anything, filtering only on a caller-supplied sequential `agent_id`. `routers/utils.py` now provides `get_session_or_404()` (group check via `get_agent_or_404`, then `assert_session_readable`: owner, or an admin for the agent's group) and `visible_agent_ids()` (for list routes, so an unfiltered query returns the caller's own agents rather than everyone's).
+
+**loom:group is mandatory at creation.** `routers/utils.py`'s `require_group_tag()` rejects any create whose tags carry no `loom:group`, wired into every resource-creating path: both agent deploy paths, memory create, MCP server create/update, A2A agent create/update, managed-role import and authorizer create. MCP servers and A2A agents previously had tag *columns* (`tags` and `resource_tags`) that no API exposed, which is why every one of them was untagged — both now accept `tags` on create and update. The frontend disables submit until a tag profile is chosen, on the agent wizard, memory, MCP and A2A forms.
+
+Enforced at the API boundary rather than in the models' `set_tags()`: internal paths and the fail-closed tests still need to be able to construct an untagged resource, not least to prove the fail-closed behaviour. The guarantee is "the API cannot create one", not "the type cannot exist". The authorizer create path additionally gained a `tags` field — it previously read tags only from the Cognito user pool and silently ignored the caller's, which is how two of three authorizers ended up untagged.
+
+**Untagged resources fail closed.** `check_resource_group_access()` used to return early for a resource with no `loom:group` tag, making it readable by anyone — the same shape as an empty IdP mapping table meaning "trust the provider": absence of policy read as absence of restriction. An untagged resource is now visible to super-admins only. **This is a breaking change for existing data**: any resource without a `loom:group` tag becomes inaccessible to non-super users until tagged.
+
+**Credential provider names are keyed on the agent id, and collisions fail closed.** Credential provider names live in one flat namespace per AWS account, shared by every `loom:group`, but they were derived entirely from caller-controlled strings — `loom-{agent name}-mcp-{server name}`, `loom-{agent name}-a2a-{a2a name}`, `loom-{agent name}-litellm-key`, or, from `POST /api/agents/{id}/credential-providers`, the caller's raw `request.name`. Where the name then collided with an existing provider, `create_oauth2_credential_provider`/`create_api_key_credential_provider` caught the `ValidationException`, logged "already exists, updating instead", and called `update_*_credential_provider` with the caller's own `clientSecret`/`apiKey`. An operator in one group could therefore name an agent and MCP server to match another group's derived name and silently replace the client secret that group's agents authenticate downstream with — a cross-group credential overwrite from `agent:write` alone.
+
+Both halves are fixed. `services/credential.py`'s new `credential_provider_name(agent_id, agent_name, kind, resource_name=None)` builds every name as `loom-{agent name}-{agent id}-{kind}[-{resource name}]`, sanitized to `[a-zA-Z0-9.-]` (which the harness's `apiKeyArn` regex requires anyway). The agent id is what makes this safe: it is server-assigned and an agent belongs to exactly one group, so no caller can derive a name that lands on another group's provider. And `allow_update` now defaults to `False`, raising `CredentialProviderNameInUse` instead of overwriting. Only the deploy/redeploy paths pass `allow_update=True`, and they may do so precisely because the id in the name means a collision can only be their own leftover from an earlier failed deploy (`AGENT_CONFIG_JSON` is written on success, so a deploy that fails after provider creation leaves one behind with no record of it — failing closed there would wedge the agent permanently). `POST /api/agents/{id}/credential-providers`, whose name is caller-supplied, keeps the default and returns `409` on collision; the caller's `name` becomes a label inside `loom-{name}-{agent id}-custom`.
+
+Two latent bugs in the same paths were fixed alongside, deliberately together: that endpoint passed `scopes=` to `create_oauth2_credential_provider`, which has no such parameter, so it raised `TypeError` and returned `502` on every call (`scopes` is stored on the local `CredentialProvider` row only and was never sent to AgentCore) — fixing that without namespacing first would have armed it as a direct overwrite gadget. And `_update_harness_background` imported `create_oauth2_credential_provider` from `app.services.deployment`, which does not define it, so adding an OAuth2 MCP server to an existing harness agent always failed with `credential_creation_failed`; the module-level import from `app.services.credential` is used now.
+
+Existing agents are unaffected: deletion and redeploy read the provider name from `AGENT_CONFIG_JSON`, which still holds the old un-namespaced form, and the reconciliation in `_update_deploy_agent_background` creates the new name and deletes the old one as a `removed_cps` entry on the next redeploy.
 
 **Single-object fetch-by-ID also enforces `loom:group` (H1-3954919):** the tag filtering above was applied consistently on list routes, but every single-object fetch-by-ID helper — `routers/utils.py`'s `get_agent_or_404()` and the inline `Memory` lookups in `memories.py` — resolved by ID alone with no group check, so any authenticated user could read/update/delete/export another group's agent or memory resource (and mint a live Cognito token for any agent via `POST /api/agents/{id}/token`) simply by guessing/enumerating IDs. `routers/utils.py`'s new `check_resource_group_access(resource, user, resource_label)` — the same logic the agent invoke route (`invocations.py`) already applied — is now called from `get_agent_or_404()` (fixing all 21 call sites across `agents.py`/`credentials.py`/`integrations.py` in one place, since `CredentialProvider`/`Integration` records are scoped to their parent agent), `memories.py`'s new `_get_memory_or_404()` (6 call sites), and directly in the `/api/agents/{id}/token` handler. Semantics match the existing invoke-route reference exactly: `g-admins-super` bypasses; an untagged resource is accessible to anyone (consistent with list-route behavior for untagged resources); every other admin group is confined to its own `g-admins-*` group; users are confined to the union of their `g-users-*` groups. The pre-existing demo-admin-specific delete restriction in `memories.py`/`agents.py` (`g-admins-demo` confined to `loom:group=demo`, including untagged resources) is unaffected and still runs as an additional, stricter check afterward.
 
@@ -1419,7 +1439,7 @@ Deployment runs asynchronously via FastAPI `BackgroundTasks` with progressive `d
 2. Backend creates the agent record with `deployment_status="initializing"`, immediately applies resolved tags to the DB record (so tag-based resource filtering is active from the first poll), and returns immediately with HTTP 202.
    - **Auto-grant access control:** After creating the agent record, for each associated MCP server and A2A agent, if access control rules already exist for that integration, the new agent is automatically added with `all_tools` (MCP) or `all_skills` (A2A) access. If no rules exist (access control disabled), no action is taken — the agent already has access by default. Existing rules are never modified, only new entries are added.
 3. Background task progresses through deployment phases:
-   - **`creating_credentials`**: For each MCP server or A2A agent with OAuth2 auth, calls `create_oauth2_credential_provider` (vendor=`CustomOauth2`, using `discoveryUrl` from config) with exponential backoff retry. If the provider already exists (e.g., redeployment), automatically falls back to `update_oauth2_credential_provider` to apply the latest configuration. Stores credential provider names in `AGENT_CONFIG_JSON` under `integrations.mcp_servers[].auth.credential_provider_name` or `integrations.a2a_agents[].auth.credential_provider_name`. If credential provider creation fails after all retries, sets `deployment_status="credential_creation_failed"` and returns without deploying.
+   - **`creating_credentials`**: For each MCP server or A2A agent with OAuth2 auth, calls `create_oauth2_credential_provider` (vendor=`CustomOauth2`, using `discoveryUrl` from config) with exponential backoff retry, under a name from `credential_provider_name()` and with `allow_update=True`. If the provider already exists (e.g., redeployment, or a leftover from a deploy that failed after this step), applies the latest configuration via `update_oauth2_credential_provider`; because the name embeds the agent id, that existing provider can only be this agent's own. Stores credential provider names in `AGENT_CONFIG_JSON` under `integrations.mcp_servers[].auth.credential_provider_name` or `integrations.a2a_agents[].auth.credential_provider_name`. If credential provider creation fails after all retries, sets `deployment_status="credential_creation_failed"` and returns without deploying.
    - **`creating_role`**: Creates or validates the IAM execution role (if needed).
    - **`building_artifact`**: Builds the deployment artifact by copying source from `agents/strands_agent/src/` (or `agents/adk_agent/src/` when `agent_framework="adk"` — selected via `build_agent_artifact(region, agent_framework=...)` in `services/deployment.py`), running `pip install` against `requirements.txt` targeting `linux/arm64` (`manylinux2014_aarch64`), fixing console script shebangs (e.g. `opentelemetry-instrument`) to use `#!/usr/bin/env python3` for Linux compatibility, zipping the package and uploading it to S3. Both frameworks' `handler.py` share the same `entryPoint`/`runtime` values passed to `create_runtime`/`update_runtime`, so no framework parameter is needed there. When `code_interpreter_enabled` is true and a CI execution role is configured, a custom Code Interpreter resource is created in parallel via `ThreadPoolExecutor`. The resulting resource ID is stored in `agents.code_interpreter_id` and injected into `AGENT_CONFIG_JSON` as `integrations.code_interpreter.identifier`.
    - **`deploying`**: Calls `create_agent_runtime` with the artifact location, environment variables (including `OTEL_SERVICE_NAME` set to the agent name, `AGENT_OBSERVABILITY_ENABLED=true` to activate the `aws-opentelemetry-distro` export pipeline, `OTEL_TRACES_EXPORTER=awsxray`, and `OTEL_PROPAGATORS=xray` to activate X-Ray tracing), network/protocol/lifecycle/authorizer configuration.
@@ -1673,6 +1693,34 @@ The `_OAuth2Auth` handler in `agents/strands_agent/src/integrations/mcp_client.p
 - OBO failures surface as user-friendly SSE errors, not 500s.
 
 ---
+
+## 14b. Authorization Guard Tests
+
+`tests/test_router_authorization_guard.py` makes instance-level authorization
+mechanical rather than remembered. Four reported findings had the same shape —
+a route resolving a resource from a caller-supplied ID without checking
+entitlement — and each was fixed where it was reported while the next turned up
+elsewhere (the H1-3954919 fetch-by-ID sweep missed the session and invocation
+readers, which became their own report).
+
+Scope-level authorization does not have this problem because it rides
+dependency injection: a route cannot silently lack `require_scopes`. Two tests
+give instance-level checks the same property:
+
+- **Every route is scope-guarded.** Each `@router.*` handler must carry a
+  `require_scopes` dependency or an authenticated `UserInfo` parameter.
+  `auth.py`'s `/config` and `/token` are the only allowlisted exceptions.
+- **Scoped models are not queried directly.** A router may not call
+  `db.query(<ScopedModel>)` for `Agent`, `InvocationSession`, `Invocation`,
+  `ApprovalLog`, `Memory`, `McpServer` or `A2aAgent` unless its module is in
+  `ALLOWED_RAW_QUERY` with a stated reason. `db.query(Agent).filter(Agent.id ==
+  agent_id).first()` answers "does this row exist" when the question is "may
+  this caller have this row"; the helpers answer the second. A third test fails
+  when the allowlist names a module that no longer exists, so the exemptions
+  keep meaning something.
+
+The allowlist is deliberately coarse and must be extended consciously — the
+failure mode being guarded is forgetting.
 
 ## 14a. Test Isolation Boundary
 

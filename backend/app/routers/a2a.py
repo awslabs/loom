@@ -14,7 +14,11 @@ from sqlalchemy import or_
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.a2a import A2aAgent, A2aAgentSkill, A2aAgentAccess
-from app.routers.utils import check_resource_group_access, require_group_tag
+from app.routers.utils import (
+    check_resource_group_access,
+    filter_visible_resources,
+    require_group_tag,
+)
 from app.services.a2a import (
     _build_headers,
     _is_agentcore_url,
@@ -253,6 +257,7 @@ def list_a2a_agents(
     if "t-user" in user.groups and "t-admin" not in user.groups:
         query = query.filter(or_(A2aAgent.registry_status == "APPROVED", A2aAgent.registry_status.is_(None)))
     agents = query.order_by(A2aAgent.created_at.desc()).all()
+    agents = filter_visible_resources(agents, user, resource_label="a2a agent")
     return [A2aAgentResponse(**a.to_dict()) for a in agents]
 
 

@@ -12,12 +12,83 @@ from app.services.net_guard import (
     safe_get,
     safe_post,
 )
-from app.services.secrets import get_secret
+from app.services.secrets import delete_secret, get_secret, store_secret
 
 logger = logging.getLogger(__name__)
 
 # Timeout for MCP server requests (seconds)
 MCP_REQUEST_TIMEOUT = 30
+
+
+def admin_api_key_secret_name(server_id: int) -> str:
+    """Secrets Manager name for a server's admin API key.
+
+    Keyed on the server id, which is server-assigned and immutable. It used to
+    be keyed on `server.name` — a mutable display string with no uniqueness
+    constraint — so renaming any row the caller owned onto another group's
+    display name pointed this lookup at that group's secret, and
+    `tools/invoke` then sent it to the caller's own `endpoint_url`.
+    """
+    return f"loom/mcp/{server_id}/admin-api-key"
+
+
+def legacy_admin_api_key_secret_name(name: str) -> str:
+    """The pre-migration, name-keyed location. Read-only, and only ever read
+    through `_resolve_legacy_admin_api_key`, which refuses an ambiguous name."""
+    return f"loom/mcp/{name}/admin-api-key"
+
+
+def user_api_key_secret_name(server_name: str, user_sub: str) -> str:
+    """Secrets Manager name for one user's personal API key for a server.
+
+    Still keyed on the server name, deliberately: this path is embedded in
+    `AGENT_CONFIG_JSON` at deploy time and read by the deployed agent itself,
+    so re-keying it would strip per-user keys from every already-deployed
+    agent until it was redeployed. It is safe to leave name-keyed because
+    cross-group name collisions are now refused at the API boundary (see
+    `_assert_name_available`), and because the trailing `user_sub` confines
+    each entry to the one caller who owns it.
+    """
+    return f"loom/mcp/{server_name}/api-key/{user_sub}"
+
+
+def _resolve_legacy_admin_api_key(server: Any, region: str, db: Any) -> str | None:
+    """Read a pre-migration name-keyed admin key, then migrate it.
+
+    Only safe while the name is unambiguous. A second row sharing the name is
+    exactly how the rename attack aimed this lookup at another group's secret,
+    so an ambiguous name refuses rather than guesses — denying a read is the
+    right failure here. New collisions are refused at the API boundary, so in
+    practice this guard only covers duplicates that predate that check.
+    """
+    from app.models.mcp import McpServer
+
+    same_name = db.query(McpServer).filter(McpServer.name == server.name).count()
+    if same_name > 1:
+        logger.warning(
+            "Refusing to read the legacy admin API key for MCP server %s: "
+            "%d servers share the name %r, so the name does not identify one secret",
+            server.id, same_name, server.name,
+        )
+        return None
+    try:
+        value = get_secret(legacy_admin_api_key_secret_name(server.name), region)
+    except Exception:
+        return None
+    try:
+        store_secret(
+            admin_api_key_secret_name(server.id), value, region,
+            description=f"Admin API key for MCP server {server.name}",
+        )
+        delete_secret(legacy_admin_api_key_secret_name(server.name), region)
+        logger.info(
+            "Migrated the admin API key for MCP server %s from its name-keyed "
+            "location to %s", server.id, admin_api_key_secret_name(server.id),
+        )
+    except Exception as e:
+        # The read succeeded, so serve it; migration retries on the next call.
+        logger.warning("Failed to migrate the admin API key for MCP server %s: %s", server.id, e)
+    return value
 
 
 def _get_oauth2_token(server: Any) -> str | None:
@@ -73,22 +144,30 @@ def _get_oauth2_token(server: Any) -> str | None:
         return None
 
 
-def resolve_api_key(server: Any, user_sub: str | None = None) -> str | None:
-    """Resolve API key from Secrets Manager. Admin key for admin context, user key for user context."""
+def resolve_api_key(server: Any, user_sub: str | None = None, db: Any = None) -> str | None:
+    """Resolve API key from Secrets Manager. Admin key for admin context, user key for user context.
+
+    Pass `db` to allow the one-time read of a pre-migration, name-keyed admin
+    key. Without it the legacy location is not consulted at all, so a caller
+    that cannot prove the name is unambiguous gets nothing rather than
+    possibly another group's secret.
+    """
     if getattr(server, "auth_type", None) != "api_key":
         return None
     region = os.getenv("AWS_REGION", "us-east-1")
     name = getattr(server, "name", "")
     if user_sub:
         try:
-            return get_secret(f"loom/mcp/{name}/api-key/{user_sub}", region)
+            return get_secret(user_api_key_secret_name(name, user_sub), region)
         except Exception:
             return None
     if getattr(server, "has_admin_api_key", None) == "true":
         try:
-            return get_secret(f"loom/mcp/{name}/admin-api-key", region)
+            return get_secret(admin_api_key_secret_name(server.id), region)
         except Exception:
-            return None
+            pass
+        if db is not None:
+            return _resolve_legacy_admin_api_key(server, region, db)
     return None
 
 

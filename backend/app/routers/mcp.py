@@ -14,11 +14,20 @@ from sqlalchemy import or_
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.mcp import McpServer, McpTool, McpServerAccess
-from app.routers.utils import check_resource_group_access, require_group_tag
+from app.routers.utils import (
+    check_resource_group_access,
+    filter_visible_resources,
+    require_group_tag,
+)
 from app.services.mcp import test_mcp_connection as svc_test_connection
 from app.services.mcp import fetch_mcp_tools as svc_fetch_tools
 from app.services.mcp import invoke_mcp_tool as svc_invoke_tool
-from app.services.mcp import resolve_api_key
+from app.services.mcp import (
+    admin_api_key_secret_name,
+    legacy_admin_api_key_secret_name,
+    resolve_api_key,
+    user_api_key_secret_name,
+)
 from app.services.secrets import store_secret, delete_secret
 
 logger = logging.getLogger(__name__)
@@ -176,6 +185,44 @@ def _get_server_or_404(server_id: int, db: Session, user: UserInfo) -> McpServer
     return server
 
 
+def _assert_name_available(
+    db: Session, name: str, group: str, server_id: int | None = None,
+) -> None:
+    """Refuse a name already held by a server in a different loom:group.
+
+    The name is not just a label. It keys the per-user API key path that gets
+    embedded in deployed agents' config, and it used to key the admin API key
+    too — so creating or renaming a row onto another group's display name
+    aimed those lookups at that group's secret, which `tools/invoke` would
+    then send to the caller's own `endpoint_url`. Admin keys are keyed on the
+    server id now; this closes the collision itself, which is what makes the
+    remaining name-keyed path safe.
+
+    Scoped to the security boundary rather than enforced as global uniqueness:
+    two servers in the same group share an owner, so a collision there is a
+    naming annoyance and not a disclosure, and refusing it would be a breaking
+    change for existing deployments.
+
+    Compares the group tags directly rather than calling
+    check_resource_group_access, so the rule holds for a super-admin too — a
+    super-admin creating a colliding name would not be escalating their own
+    access, but they would be making another group's name ambiguous.
+    """
+    clashes = db.query(McpServer).filter(McpServer.name == name)
+    if server_id is not None:
+        clashes = clashes.filter(McpServer.id != server_id)
+    for other in clashes.all():
+        if other.get_tags().get("loom:group", "") != group:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Another MCP server is already named {name!r}. Names must be "
+                    "unique across groups because secrets and agent configuration "
+                    "are keyed on them."
+                ),
+            )
+
+
 # ---------------------------------------------------------------------------
 # CRUD endpoints
 # ---------------------------------------------------------------------------
@@ -201,15 +248,23 @@ def create_mcp_server(
     )
     # loom:group is what authorization is keyed on, so it is required rather
     # than optional — see require_group_tag.
-    server.set_tags(require_group_tag(request.tags, "MCP server"))
+    resolved_tags = require_group_tag(request.tags, "MCP server")
+    server.set_tags(resolved_tags)
+    _assert_name_available(db, request.name, resolved_tags["loom:group"])
     server.api_key_header_name = request.api_key_header_name
     server.supports_elicitation = "true" if request.supports_elicitation else "false"
     server.runtime_endpoint_url = request.runtime_endpoint_url
+    db.add(server)
+    # The admin key's secret name is keyed on the server id, so the row has to
+    # exist before the secret can be written.
+    db.flush()
     if request.auth_type == "api_key" and request.api_key:
         region = os.getenv("AWS_REGION", "us-east-1")
-        store_secret(f"loom/mcp/{request.name}/admin-api-key", request.api_key, region, description=f"Admin API key for MCP server {request.name}")
+        store_secret(
+            admin_api_key_secret_name(server.id), request.api_key, region,
+            description=f"Admin API key for MCP server {request.name}",
+        )
         server.has_admin_api_key = "true"
-    db.add(server)
     db.commit()
     db.refresh(server)
     return McpServerResponse(**server.to_dict())
@@ -225,6 +280,7 @@ def list_mcp_servers(
     if "t-user" in user.groups and "t-admin" not in user.groups:
         query = query.filter(or_(McpServer.registry_status == "APPROVED", McpServer.registry_status.is_(None)))
     servers = query.order_by(McpServer.created_at.desc()).all()
+    servers = filter_visible_resources(servers, user, resource_label="mcp server")
     return [McpServerResponse(**s.to_dict()) for s in servers]
 
 
@@ -238,6 +294,7 @@ def list_connectors(
     if "t-user" in user.groups and "t-admin" not in user.groups:
         query = query.filter(or_(McpServer.registry_status == "APPROVED", McpServer.registry_status.is_(None)))
     servers = query.order_by(McpServer.name.asc()).all()
+    servers = filter_visible_resources(servers, user, resource_label="mcp server")
     region = os.getenv("AWS_REGION", "us-east-1")
     from app.services.secrets import get_secret
     results: list[ConnectorInfo] = []
@@ -245,7 +302,7 @@ def list_connectors(
         has_key = False
         if server.auth_type == "api_key":
             try:
-                get_secret(f"loom/mcp/{server.name}/api-key/{user.sub}", region)
+                get_secret(user_api_key_secret_name(server.name, user.sub), region)
                 has_key = True
             except Exception:
                 pass
@@ -297,7 +354,7 @@ def export_mcp_server(
             data["oauth2_audience"] = server.oauth2_audience
     if server.auth_type == "api_key":
         data["api_key_header_name"] = server.api_key_header_name
-        data["api_key"] = resolve_api_key(server)
+        data["api_key"] = resolve_api_key(server, db=db)
     if server.supports_elicitation == "true":
         data["supports_elicitation"] = True
     return data
@@ -318,6 +375,14 @@ def update_mcp_server(
     # an update that touches tags must still supply loom:group.
     if "tags" in update_data:
         server.set_tags(require_group_tag(update_data.pop("tags"), "MCP server"))
+    # A rename is how this row gets aimed at another group's name-keyed
+    # secrets, so it is checked against the row's own (possibly just updated)
+    # group before it is applied.
+    if "name" in update_data:
+        _assert_name_available(
+            db, update_data["name"],
+            server.get_tags().get("loom:group", ""), server_id=server.id,
+        )
     if "supports_elicitation" in update_data:
         update_data["supports_elicitation"] = "true" if update_data["supports_elicitation"] else "false"
     for field, value in update_data.items():
@@ -325,7 +390,10 @@ def update_mcp_server(
 
     if new_api_key:
         region = os.getenv("AWS_REGION", "us-east-1")
-        store_secret(f"loom/mcp/{server.name}/admin-api-key", new_api_key, region, description=f"Admin API key for MCP server {server.name}")
+        store_secret(
+            admin_api_key_secret_name(server.id), new_api_key, region,
+            description=f"Admin API key for MCP server {server.name}",
+        )
         server.has_admin_api_key = "true"
 
     server.updated_at = datetime.utcnow()
@@ -351,7 +419,15 @@ def delete_mcp_server(
             logger.warning("Failed to delete registry record for MCP server %s: %s", server.id, reg_err)
     if server.has_admin_api_key == "true":
         region = os.getenv("AWS_REGION", "us-east-1")
-        delete_secret(f"loom/mcp/{server.name}/admin-api-key", region)
+        for secret_name in (
+            admin_api_key_secret_name(server.id),
+            # Servers created before the migration may still have theirs here.
+            legacy_admin_api_key_secret_name(server.name),
+        ):
+            try:
+                delete_secret(secret_name, region)
+            except Exception as e:
+                logger.warning("Failed to delete secret %s: %s", secret_name, e)
     result = McpServerResponse(**server.to_dict())
     db.delete(server)
     db.commit()
@@ -402,7 +478,7 @@ def test_connection(
     db: Session = Depends(get_db),
 ) -> TestConnectionResponse:
     server = _get_server_or_404(server_id, db, user)
-    api_key = resolve_api_key(server)
+    api_key = resolve_api_key(server, db=db)
     user_token = _extract_user_token(raw_request) if getattr(server, "delegation_mode", "m2m") == "obo" else None
     result = svc_test_connection(server, api_key=api_key, user_token=user_token)
     return TestConnectionResponse(**result)
@@ -430,7 +506,7 @@ def refresh_mcp_tools(
     db: Session = Depends(get_db),
 ) -> list[McpToolResponse]:
     server = _get_server_or_404(server_id, db, user)
-    api_key = resolve_api_key(server)
+    api_key = resolve_api_key(server, db=db)
     user_token = _extract_user_token(request) if getattr(server, "delegation_mode", "m2m") == "obo" else None
 
     fetched_tools = svc_fetch_tools(server, api_key=api_key, user_token=user_token)
@@ -485,7 +561,7 @@ def invoke_mcp_tool(
     db: Session = Depends(get_db),
 ) -> ToolInvokeResponse:
     server = _get_server_or_404(server_id, db, user)
-    api_key = resolve_api_key(server)
+    api_key = resolve_api_key(server, db=db)
     result = svc_invoke_tool(server, request.tool_name, request.arguments, api_key=api_key)
     return ToolInvokeResponse(**result)
 
@@ -511,7 +587,7 @@ def set_user_api_key(
     server = _get_server_or_404(server_id, db, user)
     region = os.getenv("AWS_REGION", "us-east-1")
     store_secret(
-        f"loom/mcp/{server.name}/api-key/{user.sub}",
+        user_api_key_secret_name(server.name, user.sub),
         request.api_key,
         region,
         description=f"User API key for MCP server {server.name}",
@@ -529,7 +605,7 @@ def get_user_api_key_status(
     region = os.getenv("AWS_REGION", "us-east-1")
     try:
         from app.services.secrets import get_secret
-        get_secret(f"loom/mcp/{server.name}/api-key/{user.sub}", region)
+        get_secret(user_api_key_secret_name(server.name, user.sub), region)
         return UserApiKeyStatusResponse(has_user_api_key=True)
     except Exception:
         return UserApiKeyStatusResponse(has_user_api_key=False)
@@ -543,7 +619,7 @@ def delete_user_api_key(
 ) -> UserApiKeyStatusResponse:
     server = _get_server_or_404(server_id, db, user)
     region = os.getenv("AWS_REGION", "us-east-1")
-    delete_secret(f"loom/mcp/{server.name}/api-key/{user.sub}", region)
+    delete_secret(user_api_key_secret_name(server.name, user.sub), region)
     return UserApiKeyStatusResponse(has_user_api_key=False)
 
 

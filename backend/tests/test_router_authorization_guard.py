@@ -38,12 +38,24 @@ SCOPED_MODELS = {
 ALLOWED_RAW_QUERY = {
     # The helpers themselves must query in order to check.
     "utils.py": "defines get_agent_or_404 / get_session_or_404 / visible_agent_ids",
-    # Resource owners: CRUD plus list routes that filter by loom:group inline.
-    # A create has no row to authorize yet; a list filters rather than resolves.
-    "agents.py": "agent CRUD and group-filtered list routes",
-    "memories.py": "memory CRUD and group-filtered list routes",
-    "mcp.py": "MCP server CRUD and group-filtered list routes",
-    "a2a.py": "A2A agent CRUD and group-filtered list routes",
+    # Resource owners: CRUD plus list routes. A create has no row to authorize
+    # yet; a list filters rather than resolves.
+    #
+    # These reasons were previously all written as "group-filtered list
+    # routes", which was not true of mcp.py or a2a.py — their listings had no
+    # loom:group filter at all, and that exemption is how this test gave a
+    # pass to the very gap it exists to catch. State what each one actually
+    # does, and nothing more.
+    "mcp.py": "MCP server CRUD; listings filtered via filter_visible_resources",
+    "a2a.py": "A2A agent CRUD; listings filtered via filter_visible_resources",
+    # KNOWN GAP, tracked separately: these two filter by loom:group only when
+    # the caller is not a t-admin, so any scoped admin group (g-admins-mcp,
+    # g-admins-memory, ...) still lists every group's rows. Fetch-by-ID is
+    # 403, so this leaks existence and metadata rather than contents. Not
+    # changed here because the read-everything behaviour is documented and
+    # deliberate for g-admins-demo, so narrowing it is a product decision.
+    "agents.py": "agent CRUD; list filters by loom:group for t-user only",
+    "memories.py": "memory CRUD; list filters by loom:group for t-user only",
     # Scoped reads that resolve the agent through get_agent_or_404 first, then
     # query child rows under it.
     "invocations.py": "session/invocation routes group-check the agent first",

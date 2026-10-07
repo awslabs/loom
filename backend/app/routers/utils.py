@@ -9,10 +9,13 @@ from app.models.agent import Agent
 def check_resource_group_access(resource, user: UserInfo, resource_label: str = "resource") -> None:
     """Enforce the same loom:group ownership check the agent invoke route applies.
 
-    List routes already filter by loom:group; this closes the matching gap on
-    single-object fetch-by-ID helpers, which previously resolved by ID alone
-    with no group check, letting any authenticated user read/write/delete
-    another group's resources by guessing/enumerating IDs. Super-admins
+    This closes the gap on single-object fetch-by-ID helpers, which previously
+    resolved by ID alone with no group check, letting any authenticated user
+    read/write/delete another group's resources by guessing/enumerating IDs.
+    List routes need the matching filter applied separately — see
+    filter_visible_resources and visible_agent_ids; an earlier version of this
+    docstring asserted that every list route already did, which was not true
+    of the MCP, connector and A2A listings. Super-admins
     (g-admins-super) bypass; other admins (g-admins-*) are confined to their
     own group; users (t-user) are confined to the union of their g-users-*
     groups.
@@ -117,6 +120,31 @@ def visible_agent_ids(db: Session, user: UserInfo) -> list[int] | None:
             continue
         allowed.append(agent.id)
     return allowed
+
+def filter_visible_resources(resources: list, user: UserInfo, resource_label: str = "resource") -> list:
+    """Drop the rows the caller's loom:group does not reach.
+
+    The list-route counterpart to check_resource_group_access. A list wants the
+    row omitted, not the whole response rejected — one unreachable row must not
+    make the page unusable — so this swallows the 403 per row rather than
+    letting it propagate.
+
+    Returning a resource here is what tells a caller the resource exists at
+    all. For MCP servers that mattered beyond metadata: the listing was the
+    source of the display name needed to aim a name-keyed secret lookup at
+    another group's credential.
+    """
+    if "g-admins-super" in user.groups:
+        return resources
+    visible = []
+    for resource in resources:
+        try:
+            check_resource_group_access(resource, user, resource_label=resource_label)
+        except HTTPException:
+            continue
+        visible.append(resource)
+    return visible
+
 
 def require_group_tag(tags: dict[str, str] | None, resource_label: str = "resource") -> dict[str, str]:
     """Reject a create/update whose tags carry no loom:group, and return them.

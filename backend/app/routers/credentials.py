@@ -81,10 +81,14 @@ def create_credential_provider(
     except CredentialProviderNameInUse as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except Exception as e:
+        # The boto3 kwargs for this call carry the client secret, and AWS
+        # validation errors sometimes echo the offending value back. Whether
+        # AgentCore does is unverified, so the message stays in the log rather
+        # than the response.
         logger.error("Failed to create credential provider via AgentCore: %s", e)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to create credential provider: {str(e)}"
+            detail="Failed to create the credential provider. Check the server logs for details.",
         )
 
     # Store in local DB

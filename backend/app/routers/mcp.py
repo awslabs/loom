@@ -371,6 +371,8 @@ def update_mcp_server(
 
     update_data = request.model_dump(exclude_unset=True)
     new_api_key = update_data.pop("api_key", None)
+    previous_endpoint = server.endpoint_url
+    previous_name = server.name
     # tags is a JSON column, so it goes through set_tags rather than setattr;
     # an update that touches tags must still supply loom:group.
     if "tags" in update_data:
@@ -388,6 +390,8 @@ def update_mcp_server(
     for field, value in update_data.items():
         setattr(server, field, value)
 
+    moved_endpoint = server.endpoint_url != previous_endpoint
+
     if new_api_key:
         region = os.getenv("AWS_REGION", "us-east-1")
         store_secret(
@@ -395,6 +399,40 @@ def update_mcp_server(
             description=f"Admin API key for MCP server {server.name}",
         )
         server.has_admin_api_key = "true"
+    if moved_endpoint and "oauth2_client_secret" not in update_data and server.oauth2_client_secret:
+        # Same rule for the M2M client secret: it is exchanged for a token
+        # that is then sent to endpoint_url, so it must not follow the move.
+        server.oauth2_client_secret = None
+        logger.warning(
+            "Cleared the OAuth2 client secret for MCP server %s: endpoint_url changed. "
+            "Re-enter it for the new endpoint.", server.id,
+        )
+
+    if moved_endpoint and server.has_admin_api_key == "true" and not new_api_key:
+        # The admin API key is keyed on server.id, so without this it would
+        # survive a change of endpoint_url and be sent, as an Authorization
+        # Bearer header, to whatever host the URL now names. A credential
+        # issued for one host must not silently follow the record to another:
+        # mcp:write is enough to repoint a server, and test-connection /
+        # tools/refresh / tools/invoke would then ship a key another admin
+        # configured. Clearing it forces deliberate re-entry against the new
+        # endpoint. Sent in the same request, api_key wins and no clear
+        # happens, so moving a server and supplying its new key is one call.
+        region = os.getenv("AWS_REGION", "us-east-1")
+        for secret_name in (
+            admin_api_key_secret_name(server.id),
+            legacy_admin_api_key_secret_name(previous_name),
+        ):
+            try:
+                delete_secret(secret_name, region)
+            except Exception as e:
+                logger.warning("Failed to delete secret %s on endpoint change: %s", secret_name, e)
+        server.has_admin_api_key = "false"
+        logger.warning(
+            "Cleared the admin API key for MCP server %s: endpoint_url changed "
+            "from %s to %s. Re-enter the key for the new endpoint.",
+            server.id, previous_endpoint, server.endpoint_url,
+        )
 
     server.updated_at = datetime.utcnow()
     db.commit()

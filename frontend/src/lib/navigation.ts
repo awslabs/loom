@@ -38,3 +38,24 @@ export function assertHttpsUrl(url: string | null | undefined, what: string): st
 export function navigateToExternal(url: string | null | undefined, what: string): void {
   window.location.href = assertHttpsUrl(url, what);
 }
+
+/**
+ * Whether `url` is safe to put in an `href` the user can click.
+ *
+ * Use this for links whose target came from the server — a registry record's
+ * repository/website URL, for instance — where the right behaviour is to
+ * render the value as plain text rather than throw. Clicking a `javascript:`
+ * href runs in Loom's origin, where the session tokens live, so an unchecked
+ * server-supplied href is a one-click XSS.
+ *
+ * react-markdown's `defaultUrlTransform` already does this for links inside
+ * rendered markdown; this is for hrefs built in JSX by hand.
+ */
+export function isSafeExternalUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    return new URL(url).protocol === "https:";
+  } catch {
+    return false;
+  }
+}

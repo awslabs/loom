@@ -276,7 +276,17 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
                 payload = access_token.split(".")[1]
                 payload += "=" * (4 - len(payload) % 4)
                 claims = json.loads(base64.urlsafe_b64decode(payload))
-                logger.info("OBO token claims: %s", json.dumps({k: v for k, v in claims.items() if k not in ("nonce", "x5t", "xms_cc")}, indent=2))
+                # A named subset, not the whole claim set. Dumping everything
+                # put the invoking user's email/upn/oid/groups into the
+                # backend log at INFO on every OBO exchange — PII and
+                # authorization context on a hot path, for no diagnostic gain
+                # over these fields.
+                logger.info(
+                    "OBO token claims: iss=%s aud=%s cid=%s scp=%s exp=%s",
+                    claims.get("iss"), claims.get("aud"),
+                    claims.get("cid") or claims.get("client_id"),
+                    claims.get("scp"), claims.get("exp"),
+                )
             except Exception:
                 pass
         return access_token

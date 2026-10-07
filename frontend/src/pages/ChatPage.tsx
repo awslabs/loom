@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { navigateToExternal } from "@/lib/navigation";
 import { Send, Plus, Brain, LogOut, Bot, User, X, Loader2, Sun, Moon, RefreshCw, ChevronDown, Wrench, Plug, KeyRound, Unplug, Link2, UserCheck, AlertTriangle } from "lucide-react";
 import { ApprovalRequestBubble } from "@/components/ApprovalDialog";
 import { ElicitationRequestBubble } from "@/components/ElicitationDialog";
@@ -204,7 +205,7 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
       sessionStorage.setItem("loom_link_auth_id", String(resolvedAuthorizerId));
       sessionStorage.setItem("loom_link_return_url", window.location.pathname);
       if (selectedAgentId != null) sessionStorage.setItem("loom_link_agent_id", String(selectedAgentId));
-      window.location.href = authorize_url;
+      navigateToExternal(authorize_url, "authorizer sign-in URL");
     } catch {
       setLinkStatus("unlinked");
     }

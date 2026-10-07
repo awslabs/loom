@@ -534,3 +534,148 @@ class TestLoomCannotWriteIam(unittest.TestCase):
             if "PermissionRequest" in p.read_text()
         ]
         self.assertEqual([], offenders, f"PermissionRequest still referenced in {offenders}")
+
+
+# ---------------------------------------------------------------------------
+# 5. Server-supplied URLs reach the browser only through the guard
+# ---------------------------------------------------------------------------
+# Scanning TypeScript from a Python test is not elegant, but the frontend has
+# no test runner of its own (no vitest, no jest, no test files), and pytest is
+# the only suite CI can run. The alternative is no check at all, which is how
+# three navigation sinks beyond the reported one went unnoticed: the reported
+# bug was Link Account's authorize_url, while the login redirect and both
+# logout redirects were fed the same IdP-derived values through the
+# *unauthenticated* /api/auth/config.
+FRONTEND_SRC = APP_DIR.parent.parent / "frontend" / "src"
+
+NAV_SINK_PATTERNS = (
+    "window.location.href =",
+    "window.location.href=",
+    "location.assign(",
+    "location.replace(",
+    "window.open(",
+)
+
+# file -> why this sink does not need the https guard. Every reason here was
+# traced to the value's origin, not assumed.
+NAV_SINK_ALLOWED = {
+    "lib/navigation.ts": "defines assertHttpsUrl / navigateToExternal; is the guard",
+    "App.tsx": "location.replace of loom_link_return_url, written only as window.location.pathname",
+    "contexts/AuthContext.tsx": "same loom_link_return_url same-origin path; its two IdP redirects use navigateToExternal",
+    "pages/OAuthLinkCallbackPage.tsx": "same loom_link_return_url same-origin path",
+}
+
+# Files that build an href in JSX from a non-literal. Markdown anchors are
+# safe because react-markdown's defaultUrlTransform blanks unsafe schemes and
+# rehype-raw is not installed, so raw HTML never renders.
+JSX_HREF_ALLOWED = {
+    "pages/SkillsPage.tsx": "registry-supplied repository/website URL, gated on isSafeExternalUrl",
+    "components/MarkdownRenderer.tsx": "react-markdown anchor override; defaultUrlTransform already blanked the href",
+    "pages/ChatPage.tsx": "react-markdown anchor overrides; defaultUrlTransform applies",
+    "components/EvaluationRail.tsx": "hard-coded https console URL; region is encodeURIComponent'd",
+    "components/EvaluationTestCases.tsx": "hard-coded https console URL from lib/evaluations.ts",
+    "components/AgentRegistrationForm.tsx": "blob: object URL for a local download",
+    "pages/AdminDashboardPage.tsx": "blob: object URL for a local download",
+    "pages/SessionDetailPage.tsx": "blob: object URL for a local download",
+}
+
+
+def _frontend_files():
+    if not FRONTEND_SRC.is_dir():
+        return []
+    return sorted(
+        p for p in FRONTEND_SRC.rglob("*")
+        if p.suffix in {".ts", ".tsx"} and "node_modules" not in p.parts
+    )
+
+
+class TestServerSuppliedUrlsAreGuarded(unittest.TestCase):
+    def test_frontend_source_is_present(self) -> None:
+        """A scan that silently finds no files is not a check."""
+        self.assertTrue(_frontend_files(), f"no frontend sources under {FRONTEND_SRC}")
+
+    def test_navigation_sinks_are_allowlisted(self) -> None:
+        offenders = []
+        for path in _frontend_files():
+            rel = path.relative_to(FRONTEND_SRC).as_posix()
+            if rel in NAV_SINK_ALLOWED:
+                continue
+            text = path.read_text()
+            for pattern in NAV_SINK_PATTERNS:
+                if pattern in text:
+                    offenders.append(f"{rel}: {pattern}")
+        self.assertEqual(
+            [], offenders,
+            "This navigates to a URL without the https guard. If the target "
+            "comes from the server it can be a javascript: URL, which runs in "
+            "Loom's origin where the session tokens live. Use "
+            "navigateToExternal() from lib/navigation.ts, or add the file to "
+            "NAV_SINK_ALLOWED with a reason you have traced:\n  "
+            + "\n  ".join(offenders),
+        )
+
+    def test_jsx_hrefs_are_allowlisted(self) -> None:
+        """A clickable href is a navigation sink too — that is what the
+        registry-supplied skill repository URL was."""
+        offenders = []
+        for path in _frontend_files():
+            rel = path.relative_to(FRONTEND_SRC).as_posix()
+            if rel in JSX_HREF_ALLOWED:
+                continue
+            if "href={" in path.read_text():
+                offenders.append(rel)
+        self.assertEqual(
+            [], offenders,
+            "This builds an href from a non-literal. If the value comes from "
+            "the server, gate it on isSafeExternalUrl() and render plain text "
+            "when it fails, or add the file to JSX_HREF_ALLOWED with a "
+            f"reason: {offenders}",
+        )
+
+    # Where an allowlist entry's reason is "it is gated on X", the entry is
+    # only true while X is still called in that file. A file-level allowlist
+    # catches a NEW sink but not a regression inside a file already reviewed —
+    # neutering the SkillsPage check kept the suite green until this was
+    # added. Same weakness that let the MCP listing exemption stand.
+    REQUIRED_MARKERS = {
+        "pages/SkillsPage.tsx": "isSafeExternalUrl",
+        "components/EvaluationRail.tsx": "encodeURIComponent",
+        "components/InvokePanel.tsx": "navigateToExternal",
+        "pages/ChatPage.tsx": "navigateToExternal",
+        "api/auth.ts": "navigateToExternal",
+        "api/security.ts": "assertHttpsUrl",
+        "contexts/AuthContext.tsx": "navigateToExternal",
+    }
+
+    def test_allowlisted_files_still_call_their_guard(self) -> None:
+        offenders = []
+        for rel, marker in self.REQUIRED_MARKERS.items():
+            path = FRONTEND_SRC / rel
+            if not path.exists():
+                offenders.append(f"{rel}: file is gone")
+            elif marker not in path.read_text():
+                offenders.append(f"{rel}: no longer calls {marker}()")
+        self.assertEqual(
+            [], offenders,
+            "A file is exempt, or safe, only because it calls this guard. It "
+            "no longer does:\n  " + "\n  ".join(offenders),
+        )
+
+    def test_allowlists_have_no_stale_entries(self) -> None:
+        missing = [
+            rel for rel in (*NAV_SINK_ALLOWED, *JSX_HREF_ALLOWED)
+            if not (FRONTEND_SRC / rel).exists()
+        ]
+        self.assertEqual([], missing, f"allowlists name missing files: {missing}")
+
+    def test_raw_html_rendering_stays_unavailable(self) -> None:
+        """react-markdown drops HTML nodes unless rehype-raw is added, which is
+        what keeps agent and tool output from injecting script. Adding that
+        dependency, or overriding urlTransform, would undo it silently."""
+        pkg = (FRONTEND_SRC.parent / "package.json").read_text()
+        for dangerous in ("rehype-raw", "dangerously-set", "marked"):
+            self.assertNotIn(dangerous, pkg, f"{dangerous} would re-enable raw HTML rendering")
+        for path in _frontend_files():
+            text = path.read_text()
+            self.assertNotIn("urlTransform", text, f"{path.name} overrides react-markdown's URL sanitiser")
+            self.assertNotIn("dangerouslySetInnerHTML", text, f"{path.name} injects raw HTML")

@@ -151,8 +151,15 @@ def exchange_token(request: TokenExchangeRequest) -> dict:
             timeout=10,
         )
         if resp.status_code != 200:
+            # POST /api/auth/token is unauthenticated by necessity (it is the
+            # login code exchange), so the identity provider's response body
+            # must not be relayed verbatim to an anonymous caller — it is
+            # uncontrolled third-party output. Keep the detail in the log.
             logger.warning("Token exchange failed (HTTP %d): %s", resp.status_code, resp.text)
-            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+            raise HTTPException(
+                status_code=resp.status_code,
+                detail="The identity provider rejected the sign-in. Check the server logs for the provider's response.",
+            )
 
         return resp.json()
     finally:

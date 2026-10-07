@@ -281,12 +281,26 @@ def update_a2a_agent(
     agent = _get_agent_or_404(agent_id, db, user)
 
     update_data = request.model_dump(exclude_unset=True)
+    previous_base_url = agent.base_url
     # The column is resource_tags and holds JSON, so tags goes through
     # set_tags rather than setattr; loom:group stays required.
     if "tags" in update_data:
         agent.set_tags(require_group_tag(update_data.pop("tags"), "A2A agent"))
     for field, value in update_data.items():
         setattr(agent, field, value)
+
+    # Same reasoning as the MCP endpoint change: a2a:write is enough to
+    # repoint an agent, and the stored OAuth2 client secret would otherwise be
+    # exchanged against whatever host base_url now names. Clearing it forces
+    # deliberate re-entry. Supplying a new secret in the same request wins.
+    if agent.base_url != previous_base_url and "oauth2_client_secret" not in update_data:
+        if agent.oauth2_client_secret:
+            agent.oauth2_client_secret = None
+            logger.warning(
+                "Cleared the OAuth2 client secret for A2A agent %s: base_url changed "
+                "from %s to %s. Re-enter the secret for the new endpoint.",
+                agent.id, previous_base_url, agent.base_url,
+            )
 
     # Assign AgentCore session ID if base_url changed to an AgentCore endpoint
     if "base_url" in update_data:

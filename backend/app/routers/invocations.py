@@ -66,6 +66,28 @@ def _decode_jwt_claims(token: str) -> dict[str, Any] | None:
         return None
 
 
+# The agent harness builds token_info from an allowlist, but two of the queue's
+# producers accept arbitrary content from a remote MCP server: a
+# __TOKEN_INFO__-prefixed tool result, and an MCP `logging` notification whose
+# logger is "token_info". Both were relayed verbatim into the SSE stream and
+# the UI's token panel, so a third-party MCP server could put whatever it liked
+# in a privileged-looking place. Re-apply the same allowlist on receipt.
+_TOKEN_INFO_FIELDS = ("token_type", "source", "credential_provider", "server")
+_TOKEN_INFO_CLAIMS = ("iss", "sub", "aud", "cid", "scp", "roles", "act", "exp", "iat")
+
+
+def _safe_token_info(token_info: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the fields the harness is supposed to emit."""
+    safe: dict[str, Any] = {
+        k: token_info[k] for k in _TOKEN_INFO_FIELDS
+        if isinstance(token_info.get(k), (str, int, bool))
+    }
+    claims = token_info.get("claims")
+    if isinstance(claims, dict):
+        safe["claims"] = {k: claims[k] for k in _TOKEN_INFO_CLAIMS if k in claims}
+    return safe
+
+
 def _extract_token_summary(token: str, token_type: str = "user", source: str | None = None) -> dict[str, Any] | None:  # nosec B107 — "user" is a token-type label, not a password
     """Extract key claims from a JWT for admin display."""
     claims = _decode_jwt_claims(token)
@@ -639,7 +661,7 @@ async def invoke_agent_stream(
                     token_info = structured.get("token_info")
                     if isinstance(token_info, dict):
                         logger.info("Token info event: type=%s provider=%s", token_info.get("token_type"), token_info.get("credential_provider"))
-                        yield format_sse_event("token_info", token_info)
+                        yield format_sse_event("token_info", _safe_token_info(token_info))
                         continue
                     # MCP elicitation: tool paused waiting for user input
                     elicitation_data = structured.get("elicitation")

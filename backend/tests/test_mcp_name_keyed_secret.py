@@ -279,3 +279,104 @@ class TestListRoutesFilterByGroup(McpSecretTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCredentialsDoNotFollowAMovedEndpoint(McpSecretTestCase):
+    """A credential issued for one host must not follow the record to another.
+
+    The admin API key is keyed on `server.id`, so it survived a change of
+    `endpoint_url` — and `mcp:write` is enough to make that change. Any of
+    test-connection, tools/refresh or tools/invoke then resolves the key and
+    sends it as an `Authorization: Bearer` header to whatever host the URL now
+    names. The key may have been configured by a different admin, and on an
+    OBO invocation the same endpoint receives every invoking user's downstream
+    access token.
+
+    Repointing a server is a legitimate admin action; silently re-aiming its
+    stored credential at the new host is not. Moving the endpoint now clears
+    the key, so it has to be re-entered deliberately.
+    """
+
+    def _server_with_key(self, group: str = "demo"):
+        self._as(["t-admin", "g-admins-demo"])
+        created = self._create("own-server", group, endpoint="https://original.example.com/mcp")
+        self.assertEqual(201, created.status_code)
+        server_id = created.json()["id"]
+        self.assertIn(f"loom/mcp/{server_id}/admin-api-key", self.vault.store)
+        return server_id
+
+    def test_moving_the_endpoint_clears_the_admin_key(self) -> None:
+        server_id = self._server_with_key()
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertNotIn(f"loom/mcp/{server_id}/admin-api-key", self.vault.store)
+        self.assertFalse(resp.json()["has_admin_api_key"])
+
+    def test_resolve_returns_nothing_after_the_move(self) -> None:
+        """The end that matters: nothing is left to send to the new host."""
+        server_id = self._server_with_key()
+        self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        server = self.db.query(McpServer).filter(McpServer.id == server_id).first()
+        self.assertIsNone(resolve_api_key(server, db=self.db))
+
+    def test_moving_the_endpoint_clears_the_oauth_client_secret(self) -> None:
+        self._as(["t-admin", "g-admins-super"])
+        created = self.client.post("/api/mcp/servers", json={
+            "name": "oauth-server", "description": "d",
+            "endpoint_url": "https://original.example.com/mcp",
+            "transport_type": "streamable_http", "auth_type": "oauth2",
+            "oauth2_well_known_url": "https://idp.example.com/.well-known/openid-configuration",
+            "oauth2_client_id": "cid",
+            "oauth2_client_secret": "M2M-SECRET",  # nosec B106
+            "tags": {"loom:group": "demo"},
+        })
+        self.assertEqual(201, created.status_code)
+        server_id = created.json()["id"]
+
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertFalse(resp.json()["has_oauth2_secret"])
+
+    # -- the move must stay usable in one call, and unrelated edits untouched --
+
+    def test_supplying_a_new_key_with_the_move_keeps_it(self) -> None:
+        """Moving a server and giving it the new host's key is one request."""
+        server_id = self._server_with_key()
+        resp = self.client.put(f"/api/mcp/servers/{server_id}", json={
+            "endpoint_url": "https://new-home.example.com/mcp",
+            "api_key": "key-for-the-new-host",  # nosec B106
+        })
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.json()["has_admin_api_key"])
+        self.assertEqual(
+            "key-for-the-new-host",
+            self.vault.store[f"loom/mcp/{server_id}/admin-api-key"],
+        )
+
+    def test_editing_something_else_keeps_the_key(self) -> None:
+        server_id = self._server_with_key()
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}", json={"description": "renamed only"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.json()["has_admin_api_key"])
+        self.assertIn(f"loom/mcp/{server_id}/admin-api-key", self.vault.store)
+
+    def test_rewriting_the_same_endpoint_keeps_the_key(self) -> None:
+        """An idempotent PUT from a UI form must not wipe the credential."""
+        server_id = self._server_with_key()
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://original.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.json()["has_admin_api_key"])

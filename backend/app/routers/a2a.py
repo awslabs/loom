@@ -14,7 +14,7 @@ from sqlalchemy import or_
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.a2a import A2aAgent, A2aAgentSkill, A2aAgentAccess
-from app.routers.utils import check_resource_group_access
+from app.routers.utils import check_resource_group_access, require_group_tag
 from app.services.a2a import (
     _build_headers,
     _is_agentcore_url,
@@ -42,6 +42,7 @@ class A2aAgentCreateRequest(BaseModel):
     oauth2_scopes: str | None = Field(None, description="OAuth2 scopes (space-separated)")
     delegation_mode: str = Field(default="m2m", description="OAuth2 delegation mode: 'm2m' or 'obo'")
     obo_grant_type: str | None = Field(None, description="OBO grant type: 'JWT_AUTHORIZATION_GRANT' (Entra ID) or 'TOKEN_EXCHANGE' (Okta)")
+    tags: dict[str, str] | None = Field(None, description="Resource tags from a tag profile; must include loom:group")
 
     @model_validator(mode="after")
     def validate_oauth2_fields(self):
@@ -64,6 +65,7 @@ class A2aAgentUpdateRequest(BaseModel):
     oauth2_scopes: str | None = None
     delegation_mode: str | None = None
     obo_grant_type: str | None = None
+    tags: dict[str, str] | None = None
 
 
 class A2aAgentResponse(BaseModel):
@@ -229,6 +231,8 @@ def create_a2a_agent(
         agentcore_session_id=str(uuid.uuid4()) if _is_agentcore_url(request.base_url) else None,
         last_fetched_at=datetime.utcnow(),
     )
+    # loom:group is what authorization is keyed on, so require it at creation.
+    agent.set_tags(require_group_tag(request.tags, "A2A agent"))
     db.add(agent)
     db.flush()
 
@@ -272,6 +276,10 @@ def update_a2a_agent(
     agent = _get_agent_or_404(agent_id, db, user)
 
     update_data = request.model_dump(exclude_unset=True)
+    # The column is resource_tags and holds JSON, so tags goes through
+    # set_tags rather than setattr; loom:group stays required.
+    if "tags" in update_data:
+        agent.set_tags(require_group_tag(update_data.pop("tags"), "A2A agent"))
     for field, value in update_data.items():
         setattr(agent, field, value)
 

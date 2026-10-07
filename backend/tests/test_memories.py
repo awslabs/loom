@@ -63,6 +63,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "test_memory",
             "event_expiry_duration": 30,
             "memory_strategies": [{"strategy_type": "semantic", "name": "default_semantic"}],
@@ -91,6 +92,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "summary_memory",
             "event_expiry_duration": 60,
             "memory_strategies": [{"strategy_type": "summary", "name": "default_summary"}],
@@ -116,6 +118,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "pref_memory",
             "event_expiry_duration": 30,
             "memory_strategies": [{"strategy_type": "user_preference", "name": "default_pref"}],
@@ -140,6 +143,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "episodic_memory",
             "event_expiry_duration": 30,
             "memory_strategies": [{"strategy_type": "episodic", "name": "default_episodic"}],
@@ -164,6 +168,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "custom_memory",
             "event_expiry_duration": 30,
             "memory_strategies": [{"strategy_type": "custom", "name": "my_custom"}],
@@ -199,6 +204,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "memory_one",
             "event_expiry_duration": 30,
         })
@@ -214,6 +220,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "memory_two",
             "event_expiry_duration": 60,
         })
@@ -237,6 +244,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         create_response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "get_test",
             "event_expiry_duration": 30,
         })
@@ -263,6 +271,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         create_response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "refresh_test",
             "event_expiry_duration": 30,
         })
@@ -299,6 +308,7 @@ class TestMemoriesRouter(unittest.TestCase):
         mock_delete.return_value = {"memoryId": "mem-del1", "status": "DELETING"}
 
         create_response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "delete_test",
             "event_expiry_duration": 30,
         })
@@ -326,6 +336,7 @@ class TestMemoriesRouter(unittest.TestCase):
     def test_invalid_strategy_type(self):
         """Test that an invalid strategy type returns 400."""
         response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "bad_strategy",
             "event_expiry_duration": 30,
             "memory_strategies": [{"strategy_type": "nonexistent", "name": "bad"}],
@@ -337,6 +348,7 @@ class TestMemoriesRouter(unittest.TestCase):
     def test_invalid_memory_name(self):
         """Test that a hyphenated memory name returns 400."""
         response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "bad-name",
             "event_expiry_duration": 30,
         })
@@ -347,6 +359,7 @@ class TestMemoriesRouter(unittest.TestCase):
     def test_invalid_strategy_name(self):
         """Test that a hyphenated strategy name returns 400."""
         response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "valid_name",
             "event_expiry_duration": 30,
             "memory_strategies": [{"strategy_type": "semantic", "name": "bad-strategy-name"}],
@@ -359,12 +372,14 @@ class TestMemoriesRouter(unittest.TestCase):
         """Test that missing required fields returns 422."""
         # Missing event_expiry_duration
         response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "no_expiry",
         })
         self.assertEqual(response.status_code, 422)
 
         # Missing name
         response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "event_expiry_duration": 30,
         })
         self.assertEqual(response.status_code, 422)
@@ -394,6 +409,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         create_response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "record_test",
             "event_expiry_duration": 30,
         })
@@ -456,6 +472,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         create_response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "isolation_test",
             "event_expiry_duration": 30,
         })
@@ -494,6 +511,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         create_response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "mapping_test",
             "event_expiry_duration": 30,
         })
@@ -543,6 +561,7 @@ class TestMemoriesRouter(unittest.TestCase):
         }
 
         create_response = self.client.post("/api/memories", json={
+            "tags": {"loom:group": "demo"},
             "name": "filter_test",
             "event_expiry_duration": 30,
         })

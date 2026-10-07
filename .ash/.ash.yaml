@@ -122,6 +122,9 @@ global_settings:
     - path: backend/tests/test_credential_service.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using placeholder API keys to exercise credential provider logic.
+    - path: backend/tests/test_credential_provider_overwrite.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder client secrets/API keys to prove a credential provider name collision is not overwritten with them.
     - path: backend/tests/test_litellm_service.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using a placeholder API key env var to exercise LiteLLM proxy config fallback logic.

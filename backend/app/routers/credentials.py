@@ -12,7 +12,12 @@ from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.credential_provider import CredentialProvider
 from app.routers.utils import get_agent_or_404
-from app.services.credential import create_oauth2_credential_provider, delete_credential_provider
+from app.services.credential import (
+    CredentialProviderNameInUse,
+    create_oauth2_credential_provider,
+    credential_provider_name,
+    delete_credential_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,18 +61,25 @@ def create_credential_provider(
     """Create a credential provider for an agent."""
     agent = get_agent_or_404(agent_id, db, user)
 
+    # request.name is caller-supplied and provider names share one flat
+    # namespace per account, so it is never used as the AgentCore resource name
+    # directly — it becomes a label inside a name keyed on this agent's id.
+    cp_name = credential_provider_name(agent_id, request.name, "custom")
+
     # Call AgentCore API to create the OAuth2 credential provider
     callback_url = None
     try:
         response = create_oauth2_credential_provider(
-            name=request.name,
+            name=cp_name,
             client_id=request.client_id,
             client_secret=request.client_secret,
             auth_server_url=request.auth_server_url,
-            scopes=request.scopes,
-            region=agent.region
+            region=agent.region,
+            tags=agent.get_tags(),
         )
         callback_url = response.get("callbackUrl")
+    except CredentialProviderNameInUse as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except Exception as e:
         logger.error("Failed to create credential provider via AgentCore: %s", e)
         raise HTTPException(
@@ -78,7 +90,7 @@ def create_credential_provider(
     # Store in local DB
     provider = CredentialProvider(
         agent_id=agent_id,
-        name=request.name,
+        name=cp_name,
         vendor=request.vendor,
         callback_url=callback_url,
         scopes=json.dumps(request.scopes),

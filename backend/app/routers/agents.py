@@ -31,7 +31,7 @@ from app.models.tag_policy import TagPolicy
 from app.models.tag_profile import TagProfile
 from app.models.managed_role import ManagedRole
 from app.models.vpc_config import VpcConfig
-from app.routers.utils import get_agent_or_404
+from app.routers.utils import get_agent_or_404, require_group_tag
 
 from app.services.agentcore import describe_runtime, list_runtime_endpoints
 from app.services.deployment import (
@@ -58,6 +58,7 @@ from app.services.iam import (
 from app.services.credential import (
     create_api_key_credential_provider,
     create_oauth2_credential_provider,
+    credential_provider_name,
     delete_api_key_credential_provider,
     delete_credential_provider,
 )
@@ -1096,7 +1097,8 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     account_id = os.getenv("AWS_ACCOUNT_ID", "")
 
     # Resolve tags from tag policies + user-supplied profile values
-    resolved_tags, tag_policy_dicts = _resolve_tags(db, request.tags)
+    # loom:group is what authorization is keyed on, so require it at creation.
+    resolved_tags, tag_policy_dicts = _resolve_tags(db, require_group_tag(request.tags, "agent"))
 
     # Model config (system prompt is built after the agent record exists, so
     # any attached skills' content can be folded in via their Integration rows)
@@ -1366,7 +1368,7 @@ def _deploy_agent_background(
                 "endpoint_url": server["endpoint_url"],
             }
             if server["auth_type"] == "oauth2":
-                cp_name = f"loom-{request.name}-mcp-{server['name']}"
+                cp_name = credential_provider_name(agent_id, request.name, "mcp", server["name"])
                 mcp_delegation = server.get("delegation_mode") or "m2m"
                 mcp_obo_grant = server.get("obo_grant_type")
                 try:
@@ -1379,6 +1381,9 @@ def _deploy_agent_background(
                         tags=resolved_tags,
                         delegation_mode=mcp_delegation,
                         obo_grant_type=mcp_obo_grant,
+                        # The name embeds this agent's id, so a collision here
+                        # is only ever our own leftover from a failed deploy.
+                        allow_update=True,
                     )
                     logger.info(
                         "Created credential provider '%s' for MCP server '%s' (delegation=%s callback=%s)",
@@ -1428,7 +1433,7 @@ def _deploy_agent_background(
                 "endpoint_url": a2a["base_url"],
             }
             if a2a["auth_type"] == "oauth2":
-                cp_name = f"loom-{request.name}-a2a-{a2a['name']}"
+                cp_name = credential_provider_name(agent_id, request.name, "a2a", a2a["name"])
                 a2a_delegation = a2a.get("delegation_mode") or "m2m"
                 a2a_obo_grant = a2a.get("obo_grant_type")
                 try:
@@ -1441,6 +1446,7 @@ def _deploy_agent_background(
                         tags=resolved_tags,
                         delegation_mode=a2a_delegation,
                         obo_grant_type=a2a_obo_grant,
+                        allow_update=True,
                     )
                     logger.info(
                         "Created credential provider '%s' for A2A agent '%s' (delegation=%s callback=%s)",
@@ -1879,7 +1885,7 @@ def _update_deploy_agent_background(
                 "endpoint_url": server["endpoint_url"],
             }
             if server["auth_type"] == "oauth2":
-                cp_name = f"loom-{request.name}-mcp-{server['name']}"
+                cp_name = credential_provider_name(agent_id, request.name, "mcp", server["name"])
                 new_cp_names.add(cp_name)
                 mcp_delegation = server.get("delegation_mode") or "m2m"
                 mcp_obo_grant = server.get("obo_grant_type")
@@ -1894,6 +1900,11 @@ def _update_deploy_agent_background(
                             tags=resolved_tags,
                             delegation_mode=mcp_delegation,
                             obo_grant_type=mcp_obo_grant,
+                            # Config is only written on success, so a failed
+                            # update can leave this agent's own provider behind
+                            # with no record of it. The agent id in the name
+                            # means that leftover is the only thing we can hit.
+                            allow_update=True,
                         )
                         logger.info("Created credential provider '%s' for MCP server '%s'", cp_name, server["name"])
                     except Exception as e:
@@ -1945,7 +1956,7 @@ def _update_deploy_agent_background(
                 "endpoint_url": a2a["base_url"],
             }
             if a2a["auth_type"] == "oauth2":
-                cp_name = f"loom-{request.name}-a2a-{a2a['name']}"
+                cp_name = credential_provider_name(agent_id, request.name, "a2a", a2a["name"])
                 new_cp_names.add(cp_name)
                 a2a_delegation = a2a.get("delegation_mode") or "m2m"
                 a2a_obo_grant = a2a.get("obo_grant_type")
@@ -1960,6 +1971,7 @@ def _update_deploy_agent_background(
                             tags=resolved_tags,
                             delegation_mode=a2a_delegation,
                             obo_grant_type=a2a_obo_grant,
+                            allow_update=True,
                         )
                     except Exception as e:
                         logger.error("Failed to create credential provider for A2A '%s': %s", a2a["name"], e)
@@ -2225,7 +2237,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
     region = os.getenv("AWS_REGION", DEFAULT_REGION)
     account_id = os.getenv("AWS_ACCOUNT_ID", "")
 
-    resolved_tags, _ = _resolve_tags(db, request.tags)
+    resolved_tags, _ = _resolve_tags(db, require_group_tag(request.tags, "agent"))
 
     # Validate skill record IDs — must resolve to an APPROVED SKILL record
     _validate_skill_ids(request.skill_ids)
@@ -2452,17 +2464,17 @@ def _deploy_harness_background(
             # provider the harness reads at invocation time.
             virtual_key = vend_virtual_key(agent_id, name, [model_id], db)
             if virtual_key:
-                # apiKeyArn's harness-side regex only allows [a-zA-Z0-9-.] in
-                # the provider-name segment, so underscores in the agent name
-                # must become hyphens or CreateHarness rejects the ARN AWS
-                # itself just handed back from create_api_key_credential_provider.
-                sanitized_name = re.sub(r"[^a-zA-Z0-9-.]", "-", name)
-                litellm_cp_name = f"loom-{sanitized_name}-litellm-key"
+                # credential_provider_name sanitizes to [a-zA-Z0-9-.], which
+                # apiKeyArn's harness-side regex requires of the provider-name
+                # segment — otherwise CreateHarness rejects the ARN AWS itself
+                # just handed back from create_api_key_credential_provider.
+                litellm_cp_name = credential_provider_name(agent_id, name, "litellm-key")
                 try:
                     cp_response = create_api_key_credential_provider(
                         name=litellm_cp_name,
                         api_key=virtual_key,
                         region=region,
+                        allow_update=True,
                     )
                     litellm_cp_arn = cp_response.get("credentialProviderArn")
                     logger.info(
@@ -2500,7 +2512,7 @@ def _deploy_harness_background(
             cp_name: str | None = None
             cp_arn: str | None = None
             if server["auth_type"] == "oauth2":
-                cp_name = f"loom-{name}-mcp-{server['name']}"
+                cp_name = credential_provider_name(agent_id, name, "mcp", server["name"])
                 mcp_delegation = server.get("delegation_mode") or "m2m"
                 mcp_obo_grant = server.get("obo_grant_type")
                 try:
@@ -2513,6 +2525,7 @@ def _deploy_harness_background(
                         tags=resolved_tags if resolved_tags else None,
                         delegation_mode=mcp_delegation,
                         obo_grant_type=mcp_obo_grant,
+                        allow_update=True,
                     )
                     cp_arn = cp_response.get("arn") or cp_response.get("credentialProviderArn")
                     logger.info(
@@ -2824,13 +2837,12 @@ def _update_harness_background(
         for server in mcp_snapshots:
             cp_name: str | None = None
             if server["auth_type"] == "oauth2":
-                cp_name = f"loom-{name}-mcp-{server['name']}"
+                cp_name = credential_provider_name(agent_id, name, "mcp", server["name"])
                 new_cp_names.add(cp_name)
                 mcp_delegation = server.get("delegation_mode") or "m2m"
                 mcp_obo_grant = server.get("obo_grant_type")
                 if cp_name not in old_cp_names:
                     try:
-                        from app.services.deployment import create_oauth2_credential_provider
                         create_oauth2_credential_provider(
                             name=cp_name,
                             client_id=server["oauth2_client_id"] or "",
@@ -2840,6 +2852,7 @@ def _update_harness_background(
                             tags=resolved_tags if resolved_tags else None,
                             delegation_mode=mcp_delegation,
                             obo_grant_type=mcp_obo_grant,
+                            allow_update=True,
                         )
                         logger.info("Created credential provider '%s' for MCP server '%s'", cp_name, server["name"])
                     except Exception as e:
@@ -3935,6 +3948,8 @@ def redeploy_deploy_agent(
         for m in memory_records
     ]
 
+    # A resource with no loom:group is unreachable for anyone but a super-admin
+    # (check_resource_group_access fails closed), so refuse to create one.
     resolved_tags, tag_policy_dicts = _resolve_tags(db, request.tags)
     _validate_skill_ids(request.skill_ids)
     _sync_attached_skills(agent.id, request.skill_ids, db)
@@ -4043,10 +4058,11 @@ def redeploy_harness_agent(
             or request.base_url
             or old_agent_config.get("base_url")
         )
-        sanitized_name = re.sub(r"[^a-zA-Z0-9-.]", "-", agent.name)
+        # The stored name wins: agents deployed before provider names were
+        # namespaced by agent id still carry the older, un-namespaced form.
         litellm_cp_name = (
             old_agent_config.get("litellm_api_key_credential_provider_name")
-            or f"loom-{sanitized_name}-litellm-key"
+            or credential_provider_name(agent.id, agent.name, "litellm-key")
         )
         litellm_cp_arn = old_agent_config.get(
             "litellm_api_key_credential_provider_arn"

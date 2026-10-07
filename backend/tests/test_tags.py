@@ -410,8 +410,10 @@ class TestDeployWithTags(unittest.TestCase):
             "model_id": "us.anthropic.claude-sonnet-4-6",
         })
 
+        # Rejected either by require_group_tag (unconditional) or by the
+        # required tag policy — both name loom:group, and which fires first is
+        # not what this test is about.
         self.assertEqual(response.status_code, 400)
-        self.assertIn("Missing required tags", response.json()["detail"])
         self.assertIn("loom:group", response.json()["detail"])
 
     @patch("app.routers.agents.create_runtime")
@@ -430,6 +432,7 @@ class TestDeployWithTags(unittest.TestCase):
         }
 
         response = self.client.post("/api/agents", json={
+            "tags": {"loom:group": "demo"},
             "source": "deploy",
             "name": "no_policy_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
@@ -460,6 +463,7 @@ class TestDeployWithTags(unittest.TestCase):
         }
 
         self.client.post("/api/agents", json={
+            "tags": {"loom:group": "demo"},
             "source": "deploy",
             "name": "pass_tags_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
@@ -488,6 +492,7 @@ class TestDeployWithTags(unittest.TestCase):
         }
 
         create_resp = self.client.post("/api/agents", json={
+            "tags": {"loom:group": "demo"},
             "source": "deploy",
             "name": "resp_tags_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
@@ -526,6 +531,7 @@ class TestDeployWithTags(unittest.TestCase):
 
         # Deploy without providing the custom tag — should use default
         response = self.client.post("/api/agents", json={
+            "tags": {"loom:group": "demo"},
             "source": "deploy",
             "name": "custom_tag_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
@@ -559,7 +565,7 @@ class TestDeployWithTags(unittest.TestCase):
             "source": "deploy",
             "name": "override_agent",
             "model_id": "us.anthropic.claude-sonnet-4-6",
-            "tags": {"cost-center": "eng-42"},
+            "tags": {"loom:group": "demo", "cost-center": "eng-42"},
         })
 
         self.assertEqual(response.status_code, 201)
@@ -618,6 +624,7 @@ class TestRegisterWithTags(unittest.TestCase):
         }
 
         response = self.client.post("/api/agents", json={
+            "tags": {"loom:group": "demo"},
             "source": "register",
             "arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/reg-tags",
         })
@@ -642,6 +649,7 @@ class TestRegisterWithTags(unittest.TestCase):
         mock_control_client.list_tags_for_resource.side_effect = Exception("API unavailable")
 
         response = self.client.post("/api/agents", json={
+            "tags": {"loom:group": "demo"},
             "source": "register",
             "arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/reg-notags",
         })

@@ -6,6 +6,7 @@ through the AgentCore control plane for agent integrations.
 """
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -13,6 +14,46 @@ logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 4
 _BASE_DELAY = 2.0  # seconds
+
+# The apiKeyArn regex AgentCore Harness applies to the provider-name segment
+# only allows these characters, so every provider name is built from this set.
+_UNSAFE_NAME_CHARS = re.compile(r"[^a-zA-Z0-9.-]")
+
+
+class CredentialProviderNameInUse(Exception):
+    """A provider with this name already exists in the account's token vault.
+
+    Raised instead of silently updating it. Credential provider names live in
+    one flat per-account namespace shared by every loom:group, so an update
+    triggered by a name collision would write the caller's client secret over
+    whatever provider already held that name.
+    """
+
+
+def credential_provider_name(
+    agent_id: int,
+    agent_name: str,
+    kind: str,
+    resource_name: str | None = None,
+) -> str:
+    """Build a credential provider name that cannot collide across groups.
+
+    The agent id is what makes this safe. Provider names share a single flat
+    namespace per AWS account, while an agent belongs to exactly one
+    loom:group, so keying the name on the server-assigned agent id means no
+    caller can derive a name that lands on another group's provider. The agent
+    name stays in front of it for operator readability only; it is not load
+    bearing, and it is not the group name because that would push long names
+    past the control plane's limit.
+
+    Because the name is unforgeable in this way, a name collision can only ever
+    be the same agent's own leftover from an earlier failed deploy — which is
+    why the deploy paths, and only the deploy paths, may pass allow_update.
+    """
+    segments = [f"loom-{_UNSAFE_NAME_CHARS.sub('-', agent_name or '')}-{agent_id}", kind]
+    if resource_name:
+        segments.append(_UNSAFE_NAME_CHARS.sub("-", resource_name))
+    return "-".join(segments)
 
 
 def create_oauth2_credential_provider(
@@ -24,6 +65,7 @@ def create_oauth2_credential_provider(
     tags: dict[str, str] | None = None,
     delegation_mode: str = "m2m",
     obo_grant_type: str | None = None,
+    allow_update: bool = False,
 ) -> dict[str, Any]:
     """
     Create an OAuth2 credential provider via the AgentCore control plane.
@@ -32,7 +74,8 @@ def create_oauth2_credential_provider(
     ConflictException from Secrets Manager).
 
     Args:
-        name: Name for the credential provider
+        name: Name for the credential provider. Build it with
+            credential_provider_name() so it embeds the agent id.
         client_id: OAuth2 client ID
         client_secret: OAuth2 client secret
         auth_server_url: OAuth2 authorization server URL
@@ -44,12 +87,18 @@ def create_oauth2_credential_provider(
             "JWT_AUTHORIZATION_GRANT" (RFC 7523, for Microsoft Entra ID) or
             "TOKEN_EXCHANGE" (RFC 8693, for Okta and others).
             Defaults to "TOKEN_EXCHANGE" if not specified.
+        allow_update: Whether to overwrite an existing provider of the same
+            name instead of failing. Only safe for callers whose name came
+            from credential_provider_name(), where a collision can only be
+            the same agent's own leftover.
 
     Returns:
         Dictionary with provider details from the API response,
         including callback_url for OAuth2 flow completion
 
     Raises:
+        CredentialProviderNameInUse: If the name is taken and allow_update is
+            False.
         Exception: If creation fails after all retries.
     """
     import boto3
@@ -98,6 +147,11 @@ def create_oauth2_credential_provider(
             return response
         except client.exceptions.ValidationException as e:
             if "already exists" in str(e):
+                if not allow_update:
+                    raise CredentialProviderNameInUse(
+                        f"A credential provider named '{name}' already exists and "
+                        "will not be overwritten"
+                    ) from e
                 logger.info(
                     "Credential provider '%s' already exists, updating instead",
                     name,
@@ -139,7 +193,12 @@ def delete_credential_provider(provider_name: str, region: str) -> None:
     client.delete_oauth2_credential_provider(name=provider_name)
 
 
-def create_api_key_credential_provider(name: str, api_key: str, region: str) -> dict[str, Any]:
+def create_api_key_credential_provider(
+    name: str,
+    api_key: str,
+    region: str,
+    allow_update: bool = False,
+) -> dict[str, Any]:
     """
     Create an API key credential provider via the AgentCore control plane.
 
@@ -149,13 +208,20 @@ def create_api_key_credential_provider(name: str, api_key: str, region: str) -> 
     Secrets Manager (which is used for non-harness LLM provider API keys).
 
     Args:
-        name: Name for the credential provider
+        name: Name for the credential provider. Build it with
+            credential_provider_name() so it embeds the agent id.
         api_key: The raw API key value
         region: AWS region name
+        allow_update: Whether to overwrite an existing provider of the same
+            name instead of failing. See create_oauth2_credential_provider.
 
     Returns:
         Dictionary with provider details from the API response, including
         `credentialProviderArn`.
+
+    Raises:
+        CredentialProviderNameInUse: If the name is taken and allow_update is
+            False.
     """
     import boto3
 
@@ -165,6 +231,11 @@ def create_api_key_credential_provider(name: str, api_key: str, region: str) -> 
         return client.create_api_key_credential_provider(name=name, apiKey=api_key)
     except client.exceptions.ValidationException as e:
         if "already exists" in str(e):
+            if not allow_update:
+                raise CredentialProviderNameInUse(
+                    f"An API key credential provider named '{name}' already exists "
+                    "and will not be overwritten"
+                ) from e
             logger.info(
                 "API key credential provider '%s' already exists, updating instead",
                 name,

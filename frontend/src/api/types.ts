@@ -827,6 +827,9 @@ export interface McpServerCreateRequest {
   api_key?: string;
   supports_elicitation?: boolean;
   runtime_endpoint_url?: string;
+  /** Resource tags from a tag profile. Must include loom:group — the API
+   *  rejects a create without it, since authorization is keyed on that tag. */
+  tags?: Record<string, string>;
 }
 
 export interface McpServerUpdateRequest {
@@ -938,6 +941,8 @@ export interface A2aAgentCreateRequest {
   oauth2_scopes?: string;
   delegation_mode?: "m2m" | "obo";
   obo_grant_type?: "JWT_AUTHORIZATION_GRANT" | "TOKEN_EXCHANGE";
+  /** Resource tags from a tag profile. Must include loom:group. */
+  tags?: Record<string, string>;
 }
 
 export interface A2aAgentUpdateRequest {

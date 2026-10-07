@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
+from app.routers.utils import get_agent_or_404
 from app.models.agent import Agent
 from app.models.memory import Memory
 from app.routers.agents import derive_log_group
@@ -92,15 +93,16 @@ def _format_events(events: list[dict]) -> list[LogEvent]:
 def _resolve_agent_and_log_group(
     agent_id: int,
     qualifier: str,
-    db: Session
+    db: Session,
+    user: UserInfo,
 ) -> tuple[Agent, str]:
-    """Look up agent, validate qualifier, and derive log group."""
-    agent = db.query(Agent).filter(Agent.id == agent_id).first()
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agent with ID {agent_id} not found"
-        )
+    """Look up agent, validate qualifier, and derive log group.
+
+    Takes the caller so the loom:group check happens here, once, for every log
+    route — these resolved by ID alone, so any holder of agent:read could read
+    another group's runtime logs, which carry the agent's own input and output.
+    """
+    agent = get_agent_or_404(agent_id, db, user)
 
     available_qualifiers = agent.get_available_qualifiers()
     if qualifier not in available_qualifiers:
@@ -125,7 +127,7 @@ def get_log_stream_list(
 
     Useful for populating a frontend dropdown to select which stream to view.
     """
-    agent, log_group = _resolve_agent_and_log_group(agent_id, qualifier, db)
+    agent, log_group = _resolve_agent_and_log_group(agent_id, qualifier, db, user)
 
     try:
         streams = list_log_streams(log_group, agent.region)
@@ -149,7 +151,7 @@ def get_agent_logs(
     limit: int = Query(default=10000, ge=1, le=10000, description="Max number of log events"),
     start_time: Optional[str] = Query(default=None, description="Filter events after this ISO 8601 timestamp"),
     end_time: Optional[str] = Query(default=None, description="Filter events before this ISO 8601 timestamp"),
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> LogResponse:
     """
@@ -158,7 +160,7 @@ def get_agent_logs(
     By default, returns events from the latest log stream. Use the stream
     parameter to query a specific stream (see /logs/streams for available names).
     """
-    agent, log_group = _resolve_agent_and_log_group(agent_id, qualifier, db)
+    agent, log_group = _resolve_agent_and_log_group(agent_id, qualifier, db, user)
 
     # Resolve which stream to query
     stream_name = stream
@@ -210,7 +212,7 @@ def get_session_logs(
     session_id: str,
     qualifier: str = Query(default="DEFAULT", description="Endpoint qualifier"),
     limit: int = Query(default=1000, ge=1, le=10000, description="Max number of log events"),
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> LogResponse:
     """
@@ -218,7 +220,7 @@ def get_session_logs(
 
     Searches across all streams since the session may span multiple streams.
     """
-    agent, log_group = _resolve_agent_and_log_group(agent_id, qualifier, db)
+    agent, log_group = _resolve_agent_and_log_group(agent_id, qualifier, db, user)
 
     # Fetch log events filtered by session_id (searches across streams with retry)
     try:
@@ -268,11 +270,9 @@ class VendedLogSourcesResponse(BaseModel):
     sources: List[VendedLogSource]
 
 
-def _resolve_agent(agent_id: int, db: Session) -> Agent:
-    agent = db.query(Agent).filter(Agent.id == agent_id).first()
-    if not agent:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-    return agent
+def _resolve_agent(agent_id: int, db: Session, user: UserInfo) -> Agent:
+    """Resolve an agent for the vended-log routes, with the group check."""
+    return get_agent_or_404(agent_id, db, user)
 
 
 @router.get("/{agent_id}/logs/vended-sources", response_model=VendedLogSourcesResponse)
@@ -282,8 +282,20 @@ def list_vended_log_sources(
     db: Session = Depends(get_db),
 ) -> VendedLogSourcesResponse:
     """List available vended log sources (runtime and memory) for an agent."""
-    agent = _resolve_agent(agent_id, db)
+    agent = _resolve_agent(agent_id, db, user)
+    return VendedLogSourcesResponse(sources=_vended_sources_for(agent, agent_id, db))
 
+
+def _vended_sources_for(agent: Agent, agent_id: int, db: Session) -> list[VendedLogSource]:
+    """Every vended log group/stream this agent legitimately owns.
+
+    Derived server-side from the agent's runtime_id and its linked memory
+    resources. This is both the listing and the allowlist: get_vended_logs
+    validates the caller's requested pair against it, because the ECS task role
+    is prefix-wide over /aws/vendedlogs/bedrock-agentcore/*, so a caller who
+    could name an arbitrary log group could read another group's logs using an
+    agent id of their own — a group check on agent_id alone does not close it.
+    """
     sources: list[VendedLogSource] = []
 
     # Runtime vended logs
@@ -325,7 +337,7 @@ def list_vended_log_sources(
         except (json.JSONDecodeError, TypeError):
             pass
 
-    return VendedLogSourcesResponse(sources=sources)
+    return sources
 
 
 @router.get("/{agent_id}/logs/vended", response_model=LogResponse)
@@ -336,11 +348,18 @@ def get_vended_logs(
     limit: int = Query(default=10000, ge=1, le=10000),
     start_time: Optional[str] = Query(default=None),
     end_time: Optional[str] = Query(default=None),
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> LogResponse:
     """Retrieve log events from a vended log group."""
-    agent = _resolve_agent(agent_id, db)
+    agent = _resolve_agent(agent_id, db, user)
+
+    allowed = {(src.log_group, src.stream) for src in _vended_sources_for(agent, agent_id, db)}
+    if (log_group, stream) not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="That log group and stream do not belong to this agent",
+        )
 
     start_time_ms = iso_to_timestamp_ms(start_time) if start_time else None
     end_time_ms = iso_to_timestamp_ms(end_time) if end_time else None

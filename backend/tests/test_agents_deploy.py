@@ -72,6 +72,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "register",
                 "arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/reg-test",
             },
@@ -102,6 +103,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "my_deploy_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -139,6 +141,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "default_framework_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -172,6 +175,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "adk_agent_test",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -204,6 +208,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "success_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -235,6 +240,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "fail_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -274,6 +280,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "redeploy_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -324,6 +331,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "config_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -354,6 +362,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "update_config_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -392,6 +401,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "delete_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -424,6 +434,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "delete_agent_cleanup",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -443,6 +454,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -464,6 +476,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "my-agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -477,6 +490,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "1agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -520,6 +534,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "status_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
@@ -557,6 +572,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "delete_poll_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
@@ -648,6 +664,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "mcp_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
@@ -703,6 +720,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "oauth_mcp_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
@@ -721,16 +739,17 @@ class TestAgentsDeployRouter(unittest.TestCase):
             mcp_configs[0]["auth"]["well_known_endpoint"],
             "http://auth.example.com/.well-known/openid-configuration",
         )
+        # Provider names are keyed on the agent id, so no other group can
+        # derive a name that lands on this provider.
+        expected_cp = f"loom-oauth-mcp-agent-{response.json()['id']}-mcp-oauth-mcp"
         self.assertEqual(
-            mcp_configs[0]["auth"]["credential_provider_name"],
-            "loom-oauth_mcp_agent-mcp-oauth_mcp",
+            mcp_configs[0]["auth"]["credential_provider_name"], expected_cp,
         )
         self.assertEqual(mcp_configs[0]["auth"]["scopes"], "read write")
 
-        # Verify credential provider was created with agent-name-based naming
         mock_create_cp.assert_called_once()
         cp_kwargs = mock_create_cp.call_args[1]
-        self.assertEqual(cp_kwargs["name"], "loom-oauth_mcp_agent-mcp-oauth_mcp")
+        self.assertEqual(cp_kwargs["name"], expected_cp)
         self.assertEqual(cp_kwargs["client_id"], "my-client")
         self.assertEqual(cp_kwargs["client_secret"], "my-test-secret")
         # Empty tags passed when no tag policies configured (filtered in service layer)
@@ -741,6 +760,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "bad_mcp_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
@@ -791,6 +811,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "autogrant_test_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
@@ -844,6 +865,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "no_autogrant_test_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
@@ -906,6 +928,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "a2a_autogrant_test_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
@@ -966,6 +989,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
                 "name": "registry_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",

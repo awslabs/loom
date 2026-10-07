@@ -45,6 +45,7 @@ class TestMcpRouter(unittest.TestCase):
 
     def _create_server(self, **overrides) -> dict:
         payload = {
+            "tags": {"loom:group": "demo"},
             "name": "test-server",
             "endpoint_url": "http://localhost:3000/mcp",
             "transport_type": "sse",
@@ -90,6 +91,7 @@ class TestMcpRouter(unittest.TestCase):
 
     def test_create_server_oauth2_missing_well_known(self):
         response = self.client.post("/api/mcp/servers", json={
+            "tags": {"loom:group": "demo"},
             "name": "bad",
             "endpoint_url": "http://localhost:3000/mcp",
             "transport_type": "sse",
@@ -100,6 +102,7 @@ class TestMcpRouter(unittest.TestCase):
 
     def test_create_server_oauth2_missing_client_id(self):
         response = self.client.post("/api/mcp/servers", json={
+            "tags": {"loom:group": "demo"},
             "name": "bad",
             "endpoint_url": "http://localhost:3000/mcp",
             "transport_type": "sse",

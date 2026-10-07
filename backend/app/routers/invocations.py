@@ -27,7 +27,7 @@ from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
 from app.models.mcp import McpServer
 from app.models.approval_policy import ApprovalPolicy
-from app.routers.utils import check_resource_group_access
+from app.routers.utils import assert_session_readable, check_resource_group_access, get_agent_or_404, get_session_or_404
 
 from app.services.agentcore import invoke_agent, invoke_agent_ws
 from app.services.harness import invoke_harness_stream
@@ -37,6 +37,7 @@ from app.services.cloudwatch import (
     parse_memory_telemetry, parse_usage_telemetry,
 )
 from app.services.cognito import get_cognito_token
+from app.services.credential import credential_provider_name
 from app.services.latency import compute_client_duration, compute_cold_start
 from app.services.secrets import get_secret
 from app.services.tokens import count_input_tokens, count_output_tokens
@@ -1617,7 +1618,9 @@ async def invoke_agent_endpoint(
                     "api_key_header_name": server.api_key_header_name or "x-api-key",
                 }
             elif server.auth_type == "oauth2":
-                cred_provider = getattr(server, "credential_provider_name", None) or f"loom-{agent.name}-mcp-{server.name}"
+                cred_provider = getattr(server, "credential_provider_name", None) or credential_provider_name(
+                    agent.id, agent.name, "mcp", server.name
+                )
                 auth_entry: dict[str, str] = {
                     "type": "oauth2",
                     "well_known_endpoint": server.oauth2_well_known_url or "",
@@ -1959,16 +1962,14 @@ def get_agent_token(
 def list_sessions(
     agent_id: int,
     user_id: Optional[str] = Query(None, description="Filter sessions by user_id"),
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> List[SessionResponse]:
     """List all invocation sessions for an agent with their invocations."""
-    agent = db.query(Agent).filter(Agent.id == agent_id).first()
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agent with ID {agent_id} not found"
-        )
+    # Group check before anything else: this route used to load the Agent by ID
+    # with no check, so any t-admin holding agent:read read every conversation
+    # on every agent regardless of loom:group.
+    get_agent_or_404(agent_id, db, user)
 
     filters = [
         InvocationSession.agent_id == agent_id,
@@ -2001,20 +2002,13 @@ def list_sessions(
 def get_session(
     agent_id: int,
     session_id: str,
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> SessionResponse:
     """Get a specific session with all its invocations."""
-    session = db.query(InvocationSession).filter(
-        InvocationSession.agent_id == agent_id,
-        InvocationSession.session_id == session_id
-    ).first()
-
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {session_id} not found for agent {agent_id}"
-        )
+    # Resolving by UUID used to skip both the group check and any ownership
+    # check, so agent:read was enough to read any conversation anywhere.
+    session = get_session_or_404(agent_id, session_id, db, user)
 
     live_status = compute_live_status(session, db)
     _backfill_idle_costs(session, live_status, db)
@@ -2063,21 +2057,12 @@ def get_invocation(
     agent_id: int,
     session_id: str,
     invocation_id: str,
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> InvocationResponse:
     """Get a specific invocation within a session."""
-    # Look up session first to validate agent_id
-    session = db.query(InvocationSession).filter(
-        InvocationSession.agent_id == agent_id,
-        InvocationSession.session_id == session_id
-    ).first()
-
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {session_id} not found for agent {agent_id}"
-        )
+    # Group + ownership enforced here, same as get_session.
+    session = get_session_or_404(agent_id, session_id, db, user)
 
     # Look up invocation
     invocation = db.query(Invocation).filter(

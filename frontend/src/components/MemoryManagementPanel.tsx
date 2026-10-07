@@ -655,7 +655,7 @@ export function MemoryManagementPanel({ viewMode, readOnly, groupRestriction, ow
                       size="sm"
                       className="min-w-[120px]"
                       onClick={handleCreate}
-                      disabled={submitting || !formName.trim() || !!formExpiryError}
+                      disabled={submitting || !formName.trim() || !!formExpiryError || !tagValues["loom:group"]}
                     >
                       {submitting ? "Creating..." : "Create"}
                     </Button>

@@ -81,6 +81,7 @@ _code_interpreter: Optional[AgentCoreCodeInterpreterTools] = None
 _session_service = InMemorySessionService()
 _runner: Optional[Runner] = None
 _model_cache: dict[tuple[str, str, str], Any] = {}  # keyed by (provider, model_id, base_url)
+_approval_matcher: Optional[Any] = None
 
 
 def _prewarm_code_interpreter(ci: AgentCoreCodeInterpreterTools) -> None:
@@ -101,10 +102,10 @@ def _prewarm_code_interpreter(ci: AgentCoreCodeInterpreterTools) -> None:
 
 async def _get_runner() -> Runner:
     """Get or initialize the singleton agent/Runner instance."""
-    global _agent, _config, _plugins, _code_interpreter, _runner
+    global _agent, _config, _plugins, _code_interpreter, _runner, _approval_matcher
     if _runner is None:
         _config = load_config()
-        _agent, _plugins, _code_interpreter = await build_agent(_config)
+        _agent, _plugins, _code_interpreter, _approval_matcher = await build_agent(_config)
         if _code_interpreter is not None:
             t = threading.Thread(target=_prewarm_code_interpreter, args=(_code_interpreter,), daemon=True)
             t.start()
@@ -319,6 +320,20 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
         async for event in _run_turn(session_id, actor_id, content, runtime_model_id):
             yield event
         return
+
+    # Inject approval policies from the invocation payload (sent by Loom),
+    # mirroring strands_agent/src/handler.py. Without this the matcher only
+    # ever held what LOOM_APPROVAL_POLICIES carried at cold start — nothing,
+    # since deploy does not set it — so operator-configured HITL gates did not
+    # apply to ADK agents at all.
+    invocation_policies = payload.get("approval_policies")
+    if invocation_policies and isinstance(invocation_policies, list) and _approval_matcher is not None:
+        _approval_matcher.policies = invocation_policies
+        logger.info("Injected %d approval policy(ies) from payload", len(invocation_policies))
+    elif _approval_matcher is not None:
+        # An invocation with no policies must not inherit the previous one's:
+        # the runtime is a warm singleton shared across callers.
+        _approval_matcher.policies = []
 
     prompt = payload.get("prompt", "")
     logger.info("Processing invocation session_id=%s actor_id=%s model=%s", session_id, actor_id, runtime_model_id or "default")

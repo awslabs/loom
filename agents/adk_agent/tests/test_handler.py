@@ -1,6 +1,7 @@
 """Tests for the handler entry point."""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from google.genai import types
@@ -218,3 +219,41 @@ class TestInvokeEntrypoint(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInvokeAppliesApprovalPolicies(unittest.IsolatedAsyncioTestCase):
+    """invoke() must push the payload's approval policies onto the live matcher.
+
+    Loom ships enabled require_approval policies on the AgentCore invoke
+    payload (backend services/agentcore.py). Strands' handler assigns them
+    onto its loop hook on every call; ADK's handler never read the key at all,
+    so an operator-configured HITL gate did not pause ADK tools.
+    """
+
+    async def _invoke(self, payload):
+        async def fake_run_turn(session_id, actor_id, content, runtime_model_id=None):
+            yield "ok"
+
+        with patch("src.handler._run_turn", side_effect=fake_run_turn):
+            return [e async for e in invoke(payload)]
+
+    async def test_payload_policies_are_pushed_onto_the_matcher(self) -> None:
+        matcher = SimpleNamespace(policies=[])
+        policies = [{
+            "enabled": True, "policy_type": "loop_hook",
+            "tool_match_rules": ["danger_tool"],
+        }]
+        with patch("src.handler._approval_matcher", matcher):
+            await self._invoke({
+                "prompt": "hi", "session_id": "s1", "actor_id": "a1",
+                "approval_policies": policies,
+            })
+        self.assertEqual(policies, matcher.policies)
+
+    async def test_matcher_is_cleared_when_payload_has_none(self) -> None:
+        """The runtime is a warm singleton, so a previous caller's policies
+        must not linger into an invocation that carries none."""
+        matcher = SimpleNamespace(policies=[{"enabled": True, "tool_match_rules": ["x"]}])
+        with patch("src.handler._approval_matcher", matcher):
+            await self._invoke({"prompt": "hi", "session_id": "s1", "actor_id": "a1"})
+        self.assertEqual([], matcher.policies)

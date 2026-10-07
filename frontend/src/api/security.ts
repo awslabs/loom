@@ -105,8 +105,41 @@ export function checkAuthorizerLinkStatus(authId: number): Promise<{ linked: boo
   return apiFetch<{ linked: boolean; linkable: boolean }>(`/api/security/authorizers/${authId}/link/status`);
 }
 
-export function getAuthorizerLinkAuthorizeUrl(authId: number): Promise<{ authorize_url: string; code_verifier: string; state: string; redirect_uri: string }> {
-  return apiFetch(`/api/security/authorizers/${authId}/link/authorize`);
+export type AuthorizerLinkAuthorize = {
+  authorize_url: string;
+  code_verifier: string;
+  state: string;
+  redirect_uri: string;
+};
+
+/**
+ * The returned `authorize_url` is assigned to `window.location.href` by every
+ * caller, and it is built from an OIDC discovery document served by whatever
+ * host an authorizer's `discovery_url` points at. A `javascript:` URL there
+ * would execute in Loom's own origin, where the session tokens live in
+ * sessionStorage.
+ *
+ * The backend validates the scheme at discovery-persist time and again before
+ * returning it. This is the third check, placed in the shared fetcher rather
+ * than in each caller so a new navigation site cannot miss it: the browser is
+ * where the consequence lands, so the browser refuses too.
+ */
+export async function getAuthorizerLinkAuthorizeUrl(authId: number): Promise<AuthorizerLinkAuthorize> {
+  const result = await apiFetch<AuthorizerLinkAuthorize>(
+    `/api/security/authorizers/${authId}/link/authorize`,
+  );
+  let parsed: URL;
+  try {
+    parsed = new URL(result.authorize_url);
+  } catch {
+    throw new Error("The authorizer returned a malformed sign-in URL; link aborted.");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error(
+      `The authorizer's sign-in URL uses the unsupported scheme "${parsed.protocol}"; link aborted.`,
+    );
+  }
+  return result;
 }
 
 export function submitAuthorizerLinkCallback(

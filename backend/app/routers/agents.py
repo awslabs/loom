@@ -31,7 +31,13 @@ from app.models.tag_policy import TagPolicy
 from app.models.tag_profile import TagProfile
 from app.models.managed_role import ManagedRole
 from app.models.vpc_config import VpcConfig
-from app.routers.utils import assert_bindable, get_agent_or_404, require_group_tag
+from app.routers.utils import (
+    assert_bindable,
+    assert_role_arn_bindable,
+    bindable_role_arns,
+    get_agent_or_404,
+    require_group_tag,
+)
 
 from app.services.agentcore import describe_runtime, list_runtime_endpoints
 from app.services.deployment import (
@@ -80,12 +86,12 @@ from app.services.secrets import store_secret, get_secret, delete_secret
 
 logger = logging.getLogger(__name__)
 
-def _sync_role_policy_for_provider_update(agent: Agent, db: Session) -> None:
+def _sync_role_policy_for_provider_update(agent: Agent, db: Session, user: UserInfo) -> None:
     """Refresh the agent's execution role policy after a provider/api_key change."""
     from app.routers.integrations import _sync_role_policy
 
     try:
-        _sync_role_policy(agent, db)
+        _sync_role_policy(agent, db, user)
     except HTTPException:
         raise
     except Exception:
@@ -727,10 +733,24 @@ def _build_system_prompt(request: AgentCreateRequest, skill_prompt_text: str = "
 # Discovery endpoints
 # ---------------------------------------------------------------------------
 @router.get("/roles")
-def list_roles(user: UserInfo = Depends(require_scopes("agent:read"))) -> list[dict]:
-    """List available IAM roles with bedrock-agentcore trust policy."""
+def list_roles(
+    user: UserInfo = Depends(require_scopes("agent:read")),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """List IAM roles with a bedrock-agentcore trust policy that this caller
+    may actually attach.
+
+    Unfiltered, this returned every AgentCore-trusting role in the AWS
+    account to any holder of agent:read — both an inventory of the account's
+    IAM and the pick-list for the role-takeover path that
+    assert_role_arn_bindable now closes.
+    """
     region = os.getenv("AWS_REGION", DEFAULT_REGION)
-    return list_agentcore_roles(region)
+    roles = list_agentcore_roles(region)
+    allowed = bindable_role_arns(db, user)
+    if allowed is None:
+        return roles
+    return [r for r in roles if r.get("role_arn") in allowed]
 
 
 @router.get("/cognito-pools")
@@ -1167,6 +1187,11 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
     # privilege escalation rather than disclosure. Validated at request time
     # because the two deploy paths that consume it run in background tasks,
     # where there is no caller to check against.
+    # role_arn names an IAM role whose inline policy _sync_role_policy will
+    # later PutRolePolicy-replace, so attaching one is effectively a write to
+    # it. The agent was group-checked; the role never was.
+    assert_role_arn_bindable(request.role_arn, db, user)
+
     if request.code_interpreter_role_id:
         assert_bindable(
             db.query(ManagedRole).filter(
@@ -2306,6 +2331,11 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
     # privilege escalation rather than disclosure. Validated at request time
     # because the two deploy paths that consume it run in background tasks,
     # where there is no caller to check against.
+    # role_arn names an IAM role whose inline policy _sync_role_policy will
+    # later PutRolePolicy-replace, so attaching one is effectively a write to
+    # it. The agent was group-checked; the role never was.
+    assert_role_arn_bindable(request.role_arn, db, user)
+
     if request.code_interpreter_role_id:
         assert_bindable(
             db.query(ManagedRole).filter(
@@ -3982,6 +4012,11 @@ def redeploy_deploy_agent(
     # privilege escalation rather than disclosure. Validated at request time
     # because the two deploy paths that consume it run in background tasks,
     # where there is no caller to check against.
+    # role_arn names an IAM role whose inline policy _sync_role_policy will
+    # later PutRolePolicy-replace, so attaching one is effectively a write to
+    # it. The agent was group-checked; the role never was.
+    assert_role_arn_bindable(request.role_arn, db, user)
+
     if request.code_interpreter_role_id:
         assert_bindable(
             db.query(ManagedRole).filter(
@@ -4217,6 +4252,11 @@ def redeploy_harness_agent(
     # privilege escalation rather than disclosure. Validated at request time
     # because the two deploy paths that consume it run in background tasks,
     # where there is no caller to check against.
+    # role_arn names an IAM role whose inline policy _sync_role_policy will
+    # later PutRolePolicy-replace, so attaching one is effectively a write to
+    # it. The agent was group-checked; the role never was.
+    assert_role_arn_bindable(request.role_arn, db, user)
+
     if request.code_interpreter_role_id:
         assert_bindable(
             db.query(ManagedRole).filter(
@@ -4573,7 +4613,7 @@ def patch_agent(
     db.commit()
     db.refresh(agent)
     if provider_fields_set:
-        _sync_role_policy_for_provider_update(agent, db)
+        _sync_role_policy_for_provider_update(agent, db, user)
     return _agent_response(agent, db)
 
 

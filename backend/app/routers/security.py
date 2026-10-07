@@ -645,7 +645,7 @@ def get_link_status(auth_id: int, user: UserInfo = Depends(require_scopes("agent
 @router.get("/authorizers/{auth_id}/link/authorize")
 def get_link_authorize_url(auth_id: int, request: Request, user: UserInfo = Depends(require_scopes("agent:read")), db: Session = Depends(get_db)) -> dict:
     """Return the authorization URL for the user to link their account via OAuth popup."""
-    from app.services.oidc import fetch_discovery
+    from app.services.oidc import fetch_discovery, require_https_endpoint
     auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
     if not auth:
         raise HTTPException(status_code=404, detail="Authorizer not found")
@@ -679,6 +679,11 @@ def get_link_authorize_url(auth_id: int, request: Request, user: UserInfo = Depe
         "prompt": "login",
     }
     import urllib.parse
+    # Re-checked here, not just at discovery persist time: an authorizer
+    # registered before that check existed can still hold a non-https
+    # authorization_endpoint, and this value is about to be handed to the SPA,
+    # which assigns it to window.location.href.
+    require_https_endpoint("authorization_endpoint", disc["authorization_endpoint"])
     authorize_url = f"{disc['authorization_endpoint']}?{urllib.parse.urlencode(params)}"
 
     return {

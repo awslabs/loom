@@ -1,6 +1,7 @@
 """OIDC discovery document fetcher."""
 
 import json
+import urllib.parse
 import logging
 from typing import Any
 
@@ -11,6 +12,29 @@ logger = logging.getLogger(__name__)
 
 class OIDCDiscoveryError(Exception):
     """Raised when OIDC discovery fails."""
+
+
+def require_https_endpoint(field: str, value: str) -> str:
+    """Reject a discovery endpoint that is not an absolute https:// URL.
+
+    The discovery document is attacker-influenced: registering an authorizer
+    or identity provider takes `security:write`, and the document itself is
+    served by whatever host that URL points at. Three of its fields are used
+    as URLs afterwards, and `authorization_endpoint` is the dangerous one —
+    it is concatenated into `authorize_url` and handed to the SPA, which
+    assigns it to `window.location.href`. A `javascript:` URL there executes
+    in Loom's own origin, where the session tokens live in sessionStorage.
+
+    Scheme-checked here at persist time *and* again before the SPA navigates,
+    because rows written before this check existed are still in the database.
+    """
+    parsed = urllib.parse.urlparse(value or "")
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise OIDCDiscoveryError(
+            f"Discovery document field {field!r} must be an absolute https:// URL, got "
+            f"{(parsed.scheme or 'no scheme')!r}"
+        )
+    return value
 
 
 def fetch_discovery(issuer_url: str) -> dict[str, Any]:
@@ -40,6 +64,9 @@ def fetch_discovery(issuer_url: str) -> dict[str, Any]:
     missing = [f for f in required_fields if not doc.get(f)]
     if missing:
         raise OIDCDiscoveryError(f"Discovery document missing required fields: {', '.join(missing)}")
+
+    for field in required_fields:
+        require_https_endpoint(field, doc[field])
 
     return {
         "jwks_uri": doc["jwks_uri"],

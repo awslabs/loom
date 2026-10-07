@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.dependencies.auth import UserInfo
 from app.models.agent import Agent
+from app.models.managed_role import ManagedRole
 
 
 def check_resource_group_access(resource, user: UserInfo, resource_label: str = "resource") -> None:
@@ -120,6 +121,66 @@ def visible_agent_ids(db: Session, user: UserInfo) -> list[int] | None:
             continue
         allowed.append(agent.id)
     return allowed
+
+def bindable_role_arns(db: Session, user: UserInfo) -> set[str] | None:
+    """Execution-role ARNs this caller may legitimately attach to an agent.
+
+    None means unrestricted (super-admin).
+
+    An IAM role is not a group-owned Loom row in general — `iam.list_roles`
+    returns every role in the account that trusts bedrock-agentcore, and most
+    have no Loom record at all. So entitlement is defined as either:
+
+      (a) the ARN has a ManagedRole row the caller can reach, or
+      (b) the ARN is already the execution role of an agent the caller can
+          reach — which covers the roles Loom creates for itself during
+          deploy, since those get no ManagedRole row, and keeps redeploy of
+          an existing agent working.
+
+    Without this, `agent:write` was enough to take over any AgentCore-trusting
+    role in the account: the discovery endpoint listed them all, deploy
+    accepted any ARN, and _sync_role_policy then PutRolePolicy-replaced
+    `loom-agent-base-policy` on whatever name that ARN ended in. The agent was
+    group-checked; the role was not.
+    """
+    if "g-admins-super" in user.groups:
+        return None
+    allowed: set[str] = set()
+    for role in db.query(ManagedRole).all():
+        try:
+            check_resource_group_access(role, user, resource_label="managed role")
+        except HTTPException:
+            continue
+        if role.role_arn:
+            allowed.add(role.role_arn)
+    for agent in db.query(Agent).all():
+        try:
+            check_resource_group_access(agent, user, resource_label="agent")
+        except HTTPException:
+            continue
+        if agent.execution_role_arn:
+            allowed.add(agent.execution_role_arn)
+    return allowed
+
+
+def assert_role_arn_bindable(
+    role_arn: str | None, db: Session, user: UserInfo,
+) -> None:
+    """Refuse an execution role ARN the caller is not entitled to attach."""
+    if not role_arn:
+        return
+    allowed = bindable_role_arns(db, user)
+    if allowed is None or role_arn in allowed:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "You cannot attach that execution role. Use a role registered "
+            "under Security > Roles in your own group, or leave it unset to "
+            "have one created for this agent."
+        ),
+    )
+
 
 def assert_bindable(resources: list, user: UserInfo, resource_label: str = "resource") -> None:
     """Group-check every row a request is attaching to an agent by primary key.

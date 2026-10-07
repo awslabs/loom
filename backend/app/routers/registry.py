@@ -123,6 +123,34 @@ def _find_resource_by_record_id(record_id: str, db: Session) -> McpServer | A2aA
 
 
 
+def _owned_resource_or_403(record_id: str, user: UserInfo, db: Session):
+    """Resolve the Loom resource behind a record_id and authorize the caller.
+
+    Every status transition below stamps `registry_status` on this row, and
+    approval is both the deploy gate and the t-user catalog gate — so stamping
+    a row is a write to it. `registry:write` alone used to be enough, with no
+    loom:group check, letting one group drive another group's resource to
+    APPROVED and publish its invoke URL / endpoint into the site-wide
+    registry.
+
+    Called *before* the registry API call in each route, not after: the remote
+    transition is the side effect that cannot be rolled back, so it must not
+    happen for a caller who is going to be refused.
+
+    Returns None when no Loom resource is linked (skill records have none),
+    which leaves those records governed by `registry:write` as before.
+    """
+    resource = _find_resource_by_record_id(record_id, db)
+    if resource is None:
+        return None
+    label = {
+        McpServer: "mcp server", A2aAgent: "a2a agent", Agent: "agent",
+    }.get(type(resource), "resource")
+    check_resource_group_access(resource, user, resource_label=label)
+    return resource
+
+
+
 def _to_record_type(descriptor_type: str) -> str:
     """Map Loom's internal descriptor type (MCP/A2A) to the AWS `recordType`
     enum (AGENT/MCP/SKILL/CUSTOM). A2A agent cards are recordType AGENT —
@@ -371,6 +399,8 @@ def update_record(
     resource (mcp/a2a/agent), or from re-submitted content for a skill, which
     has no linked Loom resource to derive descriptors from."""
     client = get_registry_client()
+    # Re-publishes this resource's descriptors into the site-wide registry.
+    _owned_resource_or_403(record_id, user, db)
 
     server = db.query(McpServer).filter(McpServer.registry_record_id == record_id).first()
     if server:
@@ -447,9 +477,9 @@ def submit_for_approval(
 ) -> RegistryRecordResponse:
     """Submit a registry record for approval."""
     client = get_registry_client()
+    resource = _owned_resource_or_403(record_id, user, db)
     result = _call_registry(lambda: client.submit_for_approval(record_id))
 
-    resource = _find_resource_by_record_id(record_id, db)
     if resource:
         resource.registry_status = "PENDING_APPROVAL"
         db.commit()
@@ -468,9 +498,9 @@ def approve_record(
 ) -> RegistryRecordResponse:
     """Approve a registry record."""
     client = get_registry_client()
+    resource = _owned_resource_or_403(record_id, user, db)
     result = _call_registry(lambda: client.approve_record(record_id, reason=body.reason))
 
-    resource = _find_resource_by_record_id(record_id, db)
     if resource:
         resource.registry_status = "APPROVED"
         db.commit()
@@ -489,9 +519,9 @@ def reject_record(
 ) -> RegistryRecordResponse:
     """Reject a registry record with a reason."""
     client = get_registry_client()
+    resource = _owned_resource_or_403(record_id, user, db)
     result = _call_registry(lambda: client.reject_record(record_id, reason=body.reason))
 
-    resource = _find_resource_by_record_id(record_id, db)
     if resource:
         resource.registry_status = "REJECTED"
         db.commit()
@@ -509,9 +539,9 @@ def delete_record(
 ) -> dict:
     """Delete a registry record and clear the Loom resource link."""
     client = get_registry_client()
+    resource = _owned_resource_or_403(record_id, user, db)
     _call_registry(lambda: client.delete_record(record_id))
 
-    resource = _find_resource_by_record_id(record_id, db)
     if resource:
         resource.registry_record_id = None
         resource.registry_status = None

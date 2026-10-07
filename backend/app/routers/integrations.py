@@ -10,7 +10,7 @@ from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.agent import Agent
 from app.models.integration import Integration
-from app.routers.utils import get_agent_or_404
+from app.routers.utils import assert_role_arn_bindable, get_agent_or_404
 from app.services.iam import update_role_policy
 
 logger = logging.getLogger(__name__)
@@ -44,10 +44,21 @@ class IntegrationResponse(BaseModel):
     updated_at: str | None
 
 
-def _sync_role_policy(agent: Agent, db: Session) -> None:
-    """Update the agent's IAM role policy based on current enabled integrations."""
+def _sync_role_policy(agent: Agent, db: Session, user: UserInfo) -> None:
+    """Update the agent's IAM role policy based on current enabled integrations.
+
+    Takes the caller so the role itself is authorized, not just the agent.
+    This is a PutRolePolicy that fully replaces `loom-agent-base-policy` on
+    whatever role the agent's execution_role_arn ends in, so an agent carrying
+    a role from another group would rewrite that group's policy. Attaching
+    such a role is refused at deploy time now, but agents that had one
+    attached before that check existed are still in the database — this is
+    where those stop short of the IAM write.
+    """
     if not agent.execution_role_arn:
         return
+
+    assert_role_arn_bindable(agent.execution_role_arn, db, user)
 
     role_name = agent.execution_role_arn.split("/")[-1]
     enabled_integrations = db.query(Integration).filter(
@@ -105,7 +116,7 @@ def create_integration(
     db.commit()
     db.refresh(integration)
 
-    _sync_role_policy(agent, db)
+    _sync_role_policy(agent, db, user)
 
     return IntegrationResponse(**integration.to_dict())
 
@@ -154,7 +165,7 @@ def update_integration(
     db.commit()
     db.refresh(integration)
 
-    _sync_role_policy(agent, db)
+    _sync_role_policy(agent, db, user)
 
     return IntegrationResponse(**integration.to_dict())
 
@@ -184,4 +195,4 @@ def delete_integration(
     db.delete(integration)
     db.commit()
 
-    _sync_role_policy(agent, db)
+    _sync_role_policy(agent, db, user)

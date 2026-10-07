@@ -20,7 +20,11 @@ from app.models.memory import Memory
 from app.models.session import InvocationSession
 from app.models.tag_policy import TagPolicy
 from app.models.tag_profile import TagProfile
-from app.routers.utils import check_resource_group_access, require_group_tag
+from app.routers.utils import (
+    check_resource_group_access,
+    filter_visible_resources,
+    require_group_tag,
+)
 from app.services.memory import (
     create_memory as svc_create_memory,
     get_memory as svc_get_memory,
@@ -466,14 +470,12 @@ def list_memories(
     """List all memory resources."""
     memories = db.query(Memory).order_by(Memory.created_at.desc()).all()
 
-    # Tag-based filtering:
-    # - Admins (t-admin): See ALL resources including untagged
-    # - Users (t-user): See only resources tagged with their groups (g-users-* → strip prefix)
-    if "t-admin" not in user.groups:
-        # User view: filter by group tags (strip "g-users-" prefix)
-        user_groups = [g for g in user.groups if g.startswith("g-users-")]
-        allowed_tags = [g.replace("g-users-", "", 1) for g in user_groups]
-        memories = [m for m in memories if m.get_tags().get("loom:group") in allowed_tags]
+    # Same shared helper as every other group check: super-admin sees all,
+    # everyone else only their own groups, and untagged is super-admin-only.
+    # Previously the filter ran only for non-admins, so a memory-domain admin
+    # (g-admins-memory) listed every group's memory resources with their AWS
+    # memory_id and ARN, and untagged ones too, while GET /{id} returned 403.
+    memories = filter_visible_resources(memories, user, resource_label="memory resource")
 
     return [_build_memory_response(m, db) for m in memories]
 

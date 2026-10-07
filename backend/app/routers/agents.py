@@ -33,6 +33,7 @@ from app.models.managed_role import ManagedRole
 from app.models.vpc_config import VpcConfig
 from app.routers.utils import (
     assert_bindable,
+    filter_visible_resources,
     assert_role_arn_bindable,
     bindable_role_arns,
     get_agent_or_404,
@@ -3239,14 +3240,17 @@ def list_agents(
     """List all registered agents."""
     agents = db.query(Agent).order_by(Agent.registered_at.desc()).all()
 
-    # Tag-based filtering:
-    # - Admins (t-admin): See ALL resources including untagged
-    # - Users (t-user): See only resources tagged with their groups (g-users-* → strip prefix)
-    if "t-admin" not in user.groups:
-        # User view: filter by group tags (strip "g-users-" prefix)
-        user_groups = [g for g in user.groups if g.startswith("g-users-")]
-        allowed_tags = [g.replace("g-users-", "", 1) for g in user_groups]
-        agents = [a for a in agents if a.get_tags().get("loom:group") in allowed_tags]
+    # Group filtering goes through the shared helper, which means a super-admin
+    # sees everything, everyone else sees only their own groups, and an
+    # untagged row is visible to a super-admin alone.
+    #
+    # This used to apply the filter only `if "t-admin" not in user.groups`, so
+    # every admin got the unfiltered query: another group's agents, and
+    # untagged ones, were listed with their ARN, account id, execution role
+    # and model — while GET /{id} on the same row returned 403, and while the
+    # release notes said untagged resources were super-admin-only. An inlined
+    # half-rule like that is how the invoke path drifted too.
+    agents = filter_visible_resources(agents, user, resource_label="agent")
 
     # Registry visibility: when registry is enabled, t-user only sees APPROVED agents
     if "t-admin" not in user.groups:

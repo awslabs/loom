@@ -62,14 +62,6 @@ INLINE_RULE_TOKENS = (
 INLINE_RULE_ALLOWED = {
     "routers/utils.py": "defines check_resource_group_access; is the rule",
     "routers/security.py": "_get_user_group extracts the caller's own group for tagging defaults, not an access decision",
-    # KNOWN GAP, deliberately open — see SPECIFICATIONS.md. These two filter by
-    # loom:group only when the caller is not a t-admin, so a scoped admin
-    # group still lists every group's rows. Fetch-by-id is 403, so this
-    # discloses existence and metadata rather than contents. Narrowing it is a
-    # product decision because reading across all groups is intended for
-    # g-admins-demo.
-    "routers/agents.py": "list_agents t-user filter (known gap, tracked)",
-    "routers/memories.py": "list_memories t-user filter (known gap, tracked)",
 }
 
 
@@ -363,6 +355,70 @@ class TestUntaggedResourcesFailClosedEverywhere(unittest.TestCase):
                     f"{label} ({method} {url}) returned {resp.status_code} for an "
                     "UNTAGGED resource; the fail-closed guarantee says 403",
                 )
+
+    # (label, factory, listing path, json key holding the rows)
+    LIST_CASES = (
+        ("agents", "_agent", "/api/agents"),
+        ("memories", "_memory", "/api/memories"),
+        ("mcp servers", "_mcp", "/api/mcp/servers"),
+        ("a2a agents", "_a2a", "/api/a2a/agents"),
+    )
+
+    def test_untagged_resource_is_absent_from_every_listing(self) -> None:
+        """The guarantee covers listings, not just fetch-by-id.
+
+        It did not, originally: list_agents and list_memories applied their
+        group filter only `if "t-admin" not in user.groups`, so an untagged
+        row was listed to any admin while GET /{id} on it returned 403. The
+        earlier version of this class only exercised single-object routes, so
+        it never saw that — a guarantee has to be checked on every route shape
+        that can expose the resource, or the untested shape is where it drifts.
+        """
+        self._as_non_super()
+        for label, factory_name, path in self.LIST_CASES:
+            with self.subTest(listing=label):
+                row = getattr(self, factory_name)(None)
+                resp = self.client.get(path)
+                self.assertEqual(200, resp.status_code, f"{label} listing failed")
+                ids = [item.get("id") for item in resp.json()]
+                self.assertNotIn(
+                    row.id, ids,
+                    f"{label} listing exposed UNTAGGED id {row.id}; the "
+                    "fail-closed guarantee says super-admins only",
+                )
+
+    def test_other_groups_resource_is_absent_from_every_listing(self) -> None:
+        """A listing must not expose a row the caller could not open."""
+        self._as_non_super()
+        for label, factory_name, path in self.LIST_CASES:
+            with self.subTest(listing=label):
+                row = getattr(self, factory_name)("mcp")  # caller is g-admins-demo
+                resp = self.client.get(path)
+                self.assertEqual(200, resp.status_code)
+                ids = [item.get("id") for item in resp.json()]
+                self.assertNotIn(row.id, ids, f"{label} listing exposed another group's row")
+
+    def test_own_group_resource_is_present_in_every_listing(self) -> None:
+        """Positive control: the filter must not simply empty the page."""
+        self._as_non_super()
+        for label, factory_name, path in self.LIST_CASES:
+            with self.subTest(listing=label):
+                row = getattr(self, factory_name)("demo")
+                resp = self.client.get(path)
+                self.assertEqual(200, resp.status_code)
+                ids = [item.get("id") for item in resp.json()]
+                self.assertIn(row.id, ids, f"{label} listing hid the caller's own row")
+
+    def test_super_admin_still_sees_untagged_in_listings(self) -> None:
+        app.dependency_overrides[get_current_user] = lambda: UserInfo(
+            sub="s", username="super@example.com",
+            groups=["t-admin", "g-admins-super"], scopes=self.all_scopes,
+        )
+        for label, factory_name, path in self.LIST_CASES:
+            with self.subTest(listing=label):
+                row = getattr(self, factory_name)(None)
+                ids = [item.get("id") for item in self.client.get(path).json()]
+                self.assertIn(row.id, ids, f"{label} listing hid an untagged row from a super-admin")
 
     def test_positive_control_same_group_is_not_refused(self) -> None:
         """Proves the 403s above come from the missing tag and not from the

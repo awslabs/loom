@@ -13,6 +13,44 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+def _navigable_endpoints_are_safe(idp) -> bool:
+    """Whether this IdP's config is safe to hand to the login page.
+
+    `authorization_endpoint` and `issuer_url` are both assigned to
+    `window.location.href` by the SPA — the first to start the login redirect,
+    the second to build the IdP logout URL. A non-https value there (a
+    `javascript:` URL, say) would execute in Loom's own origin, where the
+    session tokens live in sessionStorage.
+
+    `fetch_discovery` rejects such values now, so a newly registered or
+    updated provider cannot carry one. This covers the rows written before
+    that check existed, and it matters more here than on the Link Account
+    route: `/api/auth/config` is unauthenticated, so this sink needs no scope
+    at all.
+
+    Returns False rather than raising. The caller then falls through to the
+    Cognito default, so a bad row costs the external login path and surfaces
+    in the logs, instead of 500ing the endpoint the whole UI boots from.
+    """
+    from app.services.oidc import OIDCDiscoveryError, require_https_endpoint
+
+    for field in ("authorization_endpoint", "issuer_url"):
+        value = getattr(idp, field, None)
+        if not value:
+            continue
+        try:
+            require_https_endpoint(field, value)
+        except OIDCDiscoveryError as e:
+            logger.error(
+                "Refusing to serve identity provider %r to the login page: %s. "
+                "Re-save the provider to repopulate it from discovery.",
+                idp.name, e,
+            )
+            return False
+    return True
+
+
+
 @router.get("/config")
 def get_auth_config() -> dict:
     """Return authentication configuration for the frontend.
@@ -29,7 +67,7 @@ def get_auth_config() -> dict:
         db = SessionLocal()
         try:
             idp = db.query(IdentityProvider).filter(IdentityProvider.status == "active").first()
-            if idp:
+            if idp and _navigable_endpoints_are_safe(idp):
                 return {
                     "provider_type": idp.provider_type,
                     "authorization_endpoint": idp.authorization_endpoint,

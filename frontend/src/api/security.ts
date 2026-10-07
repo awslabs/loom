@@ -1,4 +1,5 @@
 import { apiFetch } from "./client";
+import { assertHttpsUrl } from "@/lib/navigation";
 import type {
   ManagedRole,
   ManagedRoleCreateRequest,
@@ -125,17 +126,7 @@ export async function getAuthorizerLinkAuthorizeUrl(authId: number): Promise<Aut
   const result = await apiFetch<AuthorizerLinkAuthorize>(
     `/api/security/authorizers/${authId}/link/authorize`,
   );
-  let parsed: URL;
-  try {
-    parsed = new URL(result.authorize_url);
-  } catch {
-    throw new Error("The authorizer returned a malformed sign-in URL; link aborted.");
-  }
-  if (parsed.protocol !== "https:") {
-    throw new Error(
-      `The authorizer's sign-in URL uses the unsupported scheme "${parsed.protocol}"; link aborted.`,
-    );
-  }
+  assertHttpsUrl(result.authorize_url, "authorizer sign-in URL");
   return result;
 }
 

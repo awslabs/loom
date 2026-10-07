@@ -7,6 +7,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import { assertHttpsUrl, navigateToExternal } from "@/lib/navigation";
 import {
   fetchAuthConfig,
   initiateAuth,
@@ -542,15 +543,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (currentConfig && isExternalOIDC(currentConfig) && currentConfig.issuer_url && idToken) {
       // Only redirect to IdP logout if we have a valid id_token_hint — otherwise the
       // IdP may reject the request (e.g. after authorization server change).
-      const issuer = currentConfig.issuer_url.replace(/\/+$/, "");
+      // issuer_url is server-supplied and becomes a navigation target below.
+      const issuer = assertHttpsUrl(currentConfig.issuer_url, "sign-out URL").replace(/\/+$/, "");
       const returnUrl = window.location.origin;
       if (currentConfig.provider_type === "okta") {
         const params = new URLSearchParams({ post_logout_redirect_uri: returnUrl, id_token_hint: idToken });
-        window.location.href = `${issuer}/v1/logout?${params.toString()}`;
+        navigateToExternal(`${issuer}/v1/logout?${params.toString()}`, "sign-out URL");
       } else if (currentConfig.provider_type === "entra_id") {
         const params = new URLSearchParams({ post_logout_redirect_uri: returnUrl });
         const authority = issuer.replace(/\/v2\.0$/i, "");
-        window.location.href = `${authority}/oauth2/v2.0/logout?${params.toString()}`;
+        navigateToExternal(`${authority}/oauth2/v2.0/logout?${params.toString()}`, "sign-out URL");
       }
     }
   }, [tokens, logout]);

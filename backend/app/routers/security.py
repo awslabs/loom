@@ -526,8 +526,15 @@ def delete_credential(auth_id: int, cred_id: int, user: UserInfo = Depends(requi
 
 
 @router.post("/authorizers/{auth_id}/credentials/{cred_id}/token")
-def get_credential_token(auth_id: int, cred_id: int, user: UserInfo = Depends(require_scopes("security:read")), db: Session = Depends(get_db)) -> dict:
-    """Generate an access token using a credential's client_id and client_secret."""
+def get_credential_token(auth_id: int, cred_id: int, user: UserInfo = Depends(require_scopes("security:write")), db: Session = Depends(get_db)) -> dict:
+    """Mint an access token from a stored client credential.
+
+    Gated on security:write, not security:read: this does not read
+    configuration, it produces a usable bearer token for a machine identity.
+    g-admins-demo holds security:read and not security:write, so under the
+    read scope the group documented as "read-only to all pages" could mint a
+    credential another admin had configured.
+    """
     auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == auth_id).first()
     if not auth:
         raise HTTPException(status_code=404, detail="Authorizer not found")

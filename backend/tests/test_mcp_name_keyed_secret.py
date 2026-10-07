@@ -380,3 +380,105 @@ class TestCredentialsDoNotFollowAMovedEndpoint(McpSecretTestCase):
         )
         self.assertEqual(200, resp.status_code)
         self.assertTrue(resp.json()["has_admin_api_key"])
+
+
+class TestOauth2ClientSecretsLiveInSecretsManager(McpSecretTestCase):
+    """The OAuth2 client secret must not be a database column.
+
+    `McpServer.oauth2_client_secret` and `A2aAgent.oauth2_client_secret` were
+    the only secrets in Loom kept in the database rather than Secrets Manager.
+    That made a dump or RDS snapshot directly credential-bearing, left secret
+    reads with no CloudTrail trail, and made the `admin:write` export route a
+    plaintext database read. Every other secret in the system — authorizer and
+    identity-provider client secrets, the LiteLLM master key, MCP admin and
+    per-user API keys — already went to Secrets Manager with only a flag or an
+    ARN persisted.
+    """
+
+    def _create_oauth2_server(self, group: str = "demo", name: str = "oauth-srv"):
+        self._as(["t-admin", "g-admins-super"])
+        resp = self.client.post("/api/mcp/servers", json={
+            "name": name, "description": "d",
+            "endpoint_url": "https://srv.example.com/mcp",
+            "transport_type": "streamable_http", "auth_type": "oauth2",
+            "oauth2_well_known_url": "https://idp.example.com/.well-known/openid-configuration",
+            "oauth2_client_id": "cid",
+            "oauth2_client_secret": "M2M-CLIENT-SECRET",  # nosec B105,B106
+            "tags": {"loom:group": group},
+        })
+        self.assertEqual(201, resp.status_code, resp.text)
+        return resp.json()["id"]
+
+    def test_create_puts_the_secret_in_secrets_manager_not_the_column(self) -> None:
+        server_id = self._create_oauth2_server()
+        self.assertEqual(
+            "M2M-CLIENT-SECRET",
+            self.vault.store[f"loom/mcp/{server_id}/oauth2-client-secret"],
+        )
+        row = self.db.query(McpServer).filter(McpServer.id == server_id).first()
+        self.assertIsNone(
+            row.oauth2_client_secret,
+            "the plaintext column must stay empty — that is the whole point",
+        )
+
+    def test_the_response_still_reports_that_a_secret_exists(self) -> None:
+        """has_oauth2_secret was derived from the column, so it needed a real
+        flag once the column stopped being written."""
+        server_id = self._create_oauth2_server()
+        resp = self.client.get(f"/api/mcp/servers/{server_id}")
+        self.assertTrue(resp.json()["has_oauth2_secret"])
+        self.assertNotIn("M2M-CLIENT-SECRET", resp.text)
+
+    def test_an_unmigrated_row_still_resolves_and_is_migrated(self) -> None:
+        """Existing deployments upgrade without re-entering anything, and the
+        plaintext copy stops existing the first time it is used."""
+        from app.services.mcp import resolve_oauth2_client_secret
+
+        legacy = McpServer(
+            name="legacy-srv", description="d",
+            endpoint_url="https://legacy.example.com/mcp",
+            transport_type="streamable_http", auth_type="oauth2",
+            oauth2_well_known_url="https://idp.example.com/.well-known/openid-configuration",
+            oauth2_client_id="cid",
+            oauth2_client_secret="OLD-PLAINTEXT-SECRET",  # nosec B106
+        )
+        legacy.set_tags({"loom:group": "demo"})
+        self.db.add(legacy)
+        self.db.commit()
+        self.db.refresh(legacy)
+
+        self.assertEqual("OLD-PLAINTEXT-SECRET", resolve_oauth2_client_secret(legacy))
+        self.assertEqual(
+            "OLD-PLAINTEXT-SECRET",
+            self.vault.store[f"loom/mcp/{legacy.id}/oauth2-client-secret"],
+            "resolving an un-migrated row should move it to Secrets Manager",
+        )
+
+    def test_secrets_manager_wins_over_a_stale_column(self) -> None:
+        """If both exist, the authoritative copy is the one in Secrets Manager."""
+        from app.services.mcp import resolve_oauth2_client_secret
+
+        server_id = self._create_oauth2_server()
+        row = self.db.query(McpServer).filter(McpServer.id == server_id).first()
+        row.oauth2_client_secret = "STALE-COLUMN-VALUE"  # nosec B105
+        self.db.commit()
+        self.assertEqual("M2M-CLIENT-SECRET", resolve_oauth2_client_secret(row))
+
+    def test_deleting_the_server_deletes_the_secret(self) -> None:
+        server_id = self._create_oauth2_server()
+        path = f"loom/mcp/{server_id}/oauth2-client-secret"
+        self.assertIn(path, self.vault.store)
+        self.assertEqual(200, self.client.delete(f"/api/mcp/servers/{server_id}").status_code)
+        self.assertNotIn(path, self.vault.store)
+
+    def test_moving_the_endpoint_clears_the_secrets_manager_copy(self) -> None:
+        """The earlier endpoint-move rule has to reach the new location too."""
+        server_id = self._create_oauth2_server()
+        path = f"loom/mcp/{server_id}/oauth2-client-secret"
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertNotIn(path, self.vault.store)
+        self.assertFalse(resp.json()["has_oauth2_secret"])

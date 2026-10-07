@@ -523,6 +523,79 @@ class TestLoomCannotWriteIam(unittest.TestCase):
         public -= {"logging", "Any"}
         self.assertEqual({"list_agentcore_roles", "list_cognito_pools"}, public)
 
+    def test_no_secret_is_stored_in_a_database_column(self) -> None:
+        """Secrets belong in Secrets Manager, not in the database.
+
+        Every secret in Loom goes to Secrets Manager with only a flag or an ARN
+        persisted — except McpServer.oauth2_client_secret and
+        A2aAgent.oauth2_client_secret, which were plaintext columns. A dump or
+        RDS snapshot was therefore directly credential-bearing and secret reads
+        had no CloudTrail trail. Those two columns are retained read-only for
+        un-migrated rows; nothing may write a *new* secret-bearing column.
+
+        Narrowed two ways so the rule is principled rather than a keyword
+        guess: only textual columns can hold a secret, which excludes
+        `invocations.input_tokens` (an INTEGER count) and
+        `agent_config_entries.is_secret` (a BOOLEAN flag); and a name that
+        denotes a *reference* rather than a value is allowed, which covers
+        `client_secret_arn`, `api_key_header_name` and `token_endpoint`.
+        """
+        from sqlalchemy import String, Text
+
+        from app.db import Base
+
+        allowed_suffixes = ("_arn", "_name", "_id", "_path", "_endpoint", "_url", "_header")
+        allowed_prefixes = ("has_", "is_")
+        known_legacy = {
+            ("mcp_servers", "oauth2_client_secret"),
+            ("a2a_agents", "oauth2_client_secret"),
+        }
+        offenders = []
+        for cls in Base.registry._class_registry.values():
+            table = getattr(cls, "__tablename__", None)
+            if not table:
+                continue
+            for col in cls.__table__.columns:
+                name = col.name
+                if not any(w in name for w in ("secret", "password", "api_key", "apikey", "token")):
+                    continue
+                if not isinstance(col.type, (String, Text)):
+                    continue  # a count or a flag, not a value
+                if name.startswith(allowed_prefixes) or name.endswith(allowed_suffixes):
+                    continue
+                if (table, name) in known_legacy:
+                    continue
+                offenders.append(f"{table}.{name}")
+        self.assertEqual(
+            [], offenders,
+            "This column looks like it holds a secret value. Store it in "
+            "Secrets Manager and keep only a flag or an ARN here:\n  "
+            + "\n  ".join(sorted(offenders)),
+        )
+
+    def test_the_legacy_secret_columns_are_never_written(self) -> None:
+        """The two retained columns are read-only. A write would recreate the
+        plaintext storage the migration exists to remove."""
+        offenders = []
+        for path in sorted(APP_DIR.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.Assign):
+                    continue
+                for target in node.targets:
+                    if (
+                        isinstance(target, ast.Attribute)
+                        and target.attr == "oauth2_client_secret"
+                        and not (isinstance(node.value, ast.Constant) and node.value.value is None)
+                    ):
+                        offenders.append(
+                            f"{path.relative_to(APP_DIR).as_posix()}:{node.lineno}"
+                        )
+        self.assertEqual(
+            [], offenders,
+            "Assigning a value to the legacy plaintext column recreates "
+            f"database-stored secrets. Only `= None` is allowed: {offenders}",
+        )
+
     def test_permission_requests_are_gone(self) -> None:
         """The feature existed only to have Loom apply statements to a role."""
         import app.models as models

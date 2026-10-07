@@ -32,10 +32,63 @@ def admin_api_key_secret_name(server_id: int) -> str:
     return f"loom/mcp/{server_id}/admin-api-key"
 
 
+def oauth2_client_secret_name(server_id: int) -> str:
+    """Secrets Manager name for a server's OAuth2 client secret.
+
+    This used to be a plaintext `oauth2_client_secret` column — the only
+    secrets in the system that were not in Secrets Manager. That made a
+    database dump or RDS snapshot directly credential-bearing and left secret
+    reads with no CloudTrail trail. Keyed on the server id for the same reason
+    the admin key is: the id is server-assigned and immutable, so renaming or
+    repointing a row cannot retarget the lookup.
+    """
+    return f"loom/mcp/{server_id}/oauth2-client-secret"
+
+
 def legacy_admin_api_key_secret_name(name: str) -> str:
     """The pre-migration, name-keyed location. Read-only, and only ever read
     through `_resolve_legacy_admin_api_key`, which refuses an ambiguous name."""
     return f"loom/mcp/{name}/admin-api-key"
+
+
+def resolve_oauth2_client_secret(server: Any) -> str | None:
+    """The OAuth2 client secret for an MCP server or A2A agent.
+
+    Reads Secrets Manager first. Falls back to the row's legacy plaintext
+    column so deployments upgrade without re-entering every secret, and
+    migrates the value across on the way through, so the plaintext copy stops
+    existing the first time it is used. `scripts/migrate_oauth2_secrets.py`
+    does the same thing eagerly for every row.
+    """
+    legacy = getattr(server, "oauth2_client_secret", None)
+    if getattr(server, "id", None) is None:
+        # A detached or stub row — nothing to key a Secrets Manager name on,
+        # so there is only the in-memory value to return.
+        return legacy
+    region = os.getenv("AWS_REGION", "us-east-1")
+    name = secret_name_for(server)
+    try:
+        return get_secret(name, region)
+    except Exception:
+        pass
+    if not legacy:
+        return None
+    try:
+        store_secret(name, legacy, region, description=f"OAuth2 client secret for {name}")
+        logger.info("Migrated a plaintext OAuth2 client secret into %s", name)
+    except Exception as e:
+        logger.warning("Could not migrate the plaintext OAuth2 client secret to %s: %s", name, e)
+    return legacy
+
+
+def secret_name_for(resource: Any) -> str:
+    """Dispatch on the row's table so one resolver serves MCP and A2A."""
+    table = getattr(getattr(resource, "__table__", None), "name", "")
+    if not table:
+        table = "a2a_agents" if hasattr(resource, "base_url") else "mcp_servers"
+    if table == "a2a_agents":
+        return f"loom/a2a/{resource.id}/oauth2-client-secret"
+    return oauth2_client_secret_name(resource.id)
 
 
 def user_api_key_secret_name(server_name: str, user_sub: str) -> str:
@@ -93,7 +146,8 @@ def _resolve_legacy_admin_api_key(server: Any, region: str, db: Any) -> str | No
 
 def _get_oauth2_token(server: Any) -> str | None:
     """Exchange OAuth2 client credentials for an access token."""
-    if server.auth_type != "oauth2" or not server.oauth2_client_id or not server.oauth2_client_secret:
+    client_secret = resolve_oauth2_client_secret(server)
+    if server.auth_type != "oauth2" or not server.oauth2_client_id or not client_secret:
         return None
 
     token_url = None
@@ -124,7 +178,7 @@ def _get_oauth2_token(server: Any) -> str | None:
         data: dict[str, str] = {
             "grant_type": "client_credentials",
             "client_id": server.oauth2_client_id,
-            "client_secret": server.oauth2_client_secret,
+            "client_secret": client_secret,
         }
         if server.oauth2_scopes:
             data["scope"] = server.oauth2_scopes
@@ -178,7 +232,8 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
     requested_token_use=on_behalf_of. Okta/others use the standard RFC 8693
     token-exchange grant.
     """
-    if not server.oauth2_well_known_url or not server.oauth2_client_id or not server.oauth2_client_secret:
+    client_secret = resolve_oauth2_client_secret(server)
+    if not server.oauth2_well_known_url or not server.oauth2_client_id or not client_secret:
         return None
 
     token_url = None
@@ -229,7 +284,7 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
                 "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
                 "assertion": user_token,
                 "client_id": server.oauth2_client_id,
-                "client_secret": server.oauth2_client_secret,
+                "client_secret": client_secret,
                 "requested_token_use": "on_behalf_of",
             }
             if server.oauth2_scopes:
@@ -248,7 +303,7 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
 
             # Okta: actor identified by Basic Auth credentials
             basic_creds = _b64.b64encode(
-                f"{server.oauth2_client_id}:{server.oauth2_client_secret}".encode()
+                f"{server.oauth2_client_id}:{client_secret}".encode()
             ).decode()
             basic_headers = {
                 "Authorization": f"Basic {basic_creds}",

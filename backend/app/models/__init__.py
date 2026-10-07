@@ -18,6 +18,12 @@ from app.models.approval_policy import ApprovalPolicy
 from app.models.approval_log import ApprovalLog
 from app.models.vpc_config import VpcConfig
 from app.models.evaluation import EvaluationTestCase, EvaluationRun
+# a2a and identity_provider were missing here. They worked at runtime only
+# because a router imports them, so `import app.models` left their tables out
+# of the metadata and any standalone script that relied on it saw no such
+# table. Same latent bug that was fixed for evaluation.py.
+from app.models.a2a import A2aAgent, A2aAgentSkill, A2aAgentAccess
+from app.models.identity_provider import IdentityProvider
 
 __all__ = [
     "Agent", "InvocationSession", "Invocation", "ConfigEntry",
@@ -28,4 +34,5 @@ __all__ = [
     "AuditLogin", "AuditAction", "AuditPageView",
     "ApprovalPolicy", "ApprovalLog", "VpcConfig",
     "EvaluationTestCase", "EvaluationRun",
+    "A2aAgent", "A2aAgentSkill", "A2aAgentAccess", "IdentityProvider",
 ]

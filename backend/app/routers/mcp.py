@@ -24,6 +24,8 @@ from app.services.mcp import fetch_mcp_tools as svc_fetch_tools
 from app.services.mcp import invoke_mcp_tool as svc_invoke_tool
 from app.services.mcp import (
     admin_api_key_secret_name,
+    oauth2_client_secret_name,
+    resolve_oauth2_client_secret,
     legacy_admin_api_key_secret_name,
     resolve_api_key,
     user_api_key_secret_name,
@@ -240,7 +242,8 @@ def create_mcp_server(
         auth_type=request.auth_type,
         oauth2_well_known_url=request.oauth2_well_known_url,
         oauth2_client_id=request.oauth2_client_id,
-        oauth2_client_secret=request.oauth2_client_secret,
+        # oauth2_client_secret is deliberately not set: it goes to Secrets
+        # Manager once the row has an id to key it on, just below.
         oauth2_scopes=request.oauth2_scopes,
         delegation_mode=request.delegation_mode or "m2m",
         obo_grant_type=request.obo_grant_type,
@@ -258,6 +261,14 @@ def create_mcp_server(
     # The admin key's secret name is keyed on the server id, so the row has to
     # exist before the secret can be written.
     db.flush()
+    if request.oauth2_client_secret:
+        region = os.getenv("AWS_REGION", "us-east-1")
+        store_secret(
+            oauth2_client_secret_name(server.id), request.oauth2_client_secret, region,
+            description=f"OAuth2 client secret for MCP server {request.name}",
+        )
+        server.has_oauth2_secret = "true"
+
     if request.auth_type == "api_key" and request.api_key:
         region = os.getenv("AWS_REGION", "us-east-1")
         store_secret(
@@ -345,7 +356,7 @@ def export_mcp_server(
     if server.auth_type == "oauth2":
         data["oauth2_well_known_url"] = server.oauth2_well_known_url
         data["oauth2_client_id"] = server.oauth2_client_id
-        data["oauth2_client_secret"] = server.oauth2_client_secret or None
+        data["oauth2_client_secret"] = resolve_oauth2_client_secret(server)
         data["oauth2_scopes"] = server.oauth2_scopes
         data["delegation_mode"] = server.delegation_mode
         if server.obo_grant_type:
@@ -371,6 +382,7 @@ def update_mcp_server(
 
     update_data = request.model_dump(exclude_unset=True)
     new_api_key = update_data.pop("api_key", None)
+    new_oauth2_secret = update_data.pop("oauth2_client_secret", None)
     previous_endpoint = server.endpoint_url
     previous_name = server.name
     # tags is a JSON column, so it goes through set_tags rather than setattr;
@@ -399,10 +411,23 @@ def update_mcp_server(
             description=f"Admin API key for MCP server {server.name}",
         )
         server.has_admin_api_key = "true"
-    if moved_endpoint and "oauth2_client_secret" not in update_data and server.oauth2_client_secret:
+    region = os.getenv("AWS_REGION", "us-east-1")
+    if new_oauth2_secret:
+        store_secret(
+            oauth2_client_secret_name(server.id), new_oauth2_secret, region,
+            description=f"OAuth2 client secret for MCP server {server.name}",
+        )
+        server.has_oauth2_secret = "true"
+        server.oauth2_client_secret = None
+    elif moved_endpoint and server.has_oauth2_secret == "true":
         # Same rule for the M2M client secret: it is exchanged for a token
         # that is then sent to endpoint_url, so it must not follow the move.
+        try:
+            delete_secret(oauth2_client_secret_name(server.id), region)
+        except Exception as e:
+            logger.warning("Failed to delete the OAuth2 client secret for server %s: %s", server.id, e)
         server.oauth2_client_secret = None
+        server.has_oauth2_secret = "false"
         logger.warning(
             "Cleared the OAuth2 client secret for MCP server %s: endpoint_url changed. "
             "Re-enter it for the new endpoint.", server.id,
@@ -455,8 +480,12 @@ def delete_mcp_server(
             logger.info("Deleted registry record %s for MCP server %s", server.registry_record_id, server.id)
         except Exception as reg_err:
             logger.warning("Failed to delete registry record for MCP server %s: %s", server.id, reg_err)
+    region = os.getenv("AWS_REGION", "us-east-1")
+    try:
+        delete_secret(oauth2_client_secret_name(server.id), region)
+    except Exception:
+        pass  # absent for servers with no OAuth2 secret, which is most of them
     if server.has_admin_api_key == "true":
-        region = os.getenv("AWS_REGION", "us-east-1")
         for secret_name in (
             admin_api_key_secret_name(server.id),
             # Servers created before the migration may still have theirs here.

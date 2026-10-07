@@ -157,6 +157,23 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   return JSON.parse(decoded) as Record<string, unknown>;
 }
 
+/**
+ * Whether `token`'s `iss` claim names the same host as `url`.
+ *
+ * Used to decide if an id_token may be sent to a logout endpoint as
+ * `id_token_hint`. If an administrator repoints `issuer_url` after tokens were
+ * issued, the hosts stop matching and the token is withheld.
+ */
+function issuedBySameHost(token: string, url: string): boolean {
+  try {
+    const iss = decodeJwtPayload(token)["iss"];
+    if (typeof iss !== "string") return false;
+    return new URL(iss).host === new URL(url).host;
+  } catch {
+    return false;
+  }
+}
+
 function isExternalOIDC(cfg: AuthConfig | null): boolean {
   return !!cfg?.provider_type && cfg.provider_type !== "cognito";
 }
@@ -547,7 +564,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const issuer = assertHttpsUrl(currentConfig.issuer_url, "sign-out URL").replace(/\/+$/, "");
       const returnUrl = window.location.origin;
       if (currentConfig.provider_type === "okta") {
-        const params = new URLSearchParams({ post_logout_redirect_uri: returnUrl, id_token_hint: idToken });
+        const params = new URLSearchParams({ post_logout_redirect_uri: returnUrl });
+        // id_token_hint is the only place a token ever enters a URL, so it
+        // goes in the query string of a top-level navigation and lands in
+        // browser history and the receiving host's access logs. The host here
+        // comes from issuer_url, which security:write controls — so send the
+        // hint only to the host that actually issued the token, read from its
+        // own iss claim. Allowlisting issuer_url against the deployment's
+        // trusted hosts would be circular: that set is built from issuer_url.
+        // Without a match we still sign out, just without the hint, which is
+        // what the Entra branch below already does.
+        if (issuedBySameHost(idToken, issuer)) {
+          params.set("id_token_hint", idToken);
+        }
         navigateToExternal(`${issuer}/v1/logout?${params.toString()}`, "sign-out URL");
       } else if (currentConfig.provider_type === "entra_id") {
         const params = new URLSearchParams({ post_logout_redirect_uri: returnUrl });

@@ -119,7 +119,7 @@ make cognito.set-passwords     # Set permanent passwords for demo users
 - `t-user` — User UI with limited navigation
 
 **Resource Groups** (determine access to resources):
-- `g-admins-super` — All 21 scopes (catalog:r/w, agent:r/w, memory:r/w, security:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, registry:r/w, admin:r/w, invoke)
+- `g-admins-super` — All 22 scopes (catalog:r/w, agent:r/w, memory:r/w, security:r/w, tagging:r/w, costs:r/w, mcp:r/w, a2a:r/w, registry:r/w, admin:r/w, session:read, invoke)
 - `g-admins-demo` — Read-only to all pages + read/write to demo group resources + costs:write
 - `g-admins-security` — security:read/write
 - `g-admins-memory` — memory:read/write

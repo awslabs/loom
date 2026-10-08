@@ -2,13 +2,13 @@ import { useState } from "react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { RoleManagementPanel } from "@/components/RoleManagementPanel";
 import { AuthorizerManagementPanel } from "@/components/AuthorizerManagementPanel";
-import { PermissionRequestsPanel } from "@/components/PermissionRequestsPanel";
 import { IdentityProviderPanel } from "@/components/IdentityProviderPanel";
 import { ApprovalPolicyPanel } from "@/components/ApprovalPolicyPanel";
 import type { AgentResponse } from "@/api/types";
 import { UsageLimitsPanel } from "@/components/UsageLimitsPanel";
 
-type SecurityTab = "identity" | "roles" | "authorizers" | "permissions" | "approvals" | "usage-limits";
+type SecurityTab = "identity" | "roles" | "authorizers" | "approvals" | "usage-limits";
+
 
 
 export function SecurityAdminPage({ readOnly, agents = [] }: { readOnly?: boolean; agents?: AgentResponse[] }) {
@@ -23,7 +23,7 @@ export function SecurityAdminPage({ readOnly, agents = [] }: { readOnly?: boolea
     { key: "authorizers", label: "Authorizers" },
     { key: "approvals", label: "Approval policies" },
     { key: "usage-limits", label: "Usage limits" },
-    { key: "permissions", label: "Permission requests" },
+  ];
   ];
 
   return (
@@ -48,9 +48,8 @@ export function SecurityAdminPage({ readOnly, agents = [] }: { readOnly?: boolea
         <TabsContent value="identity" className="pt-4"><IdentityProviderPanel readOnly={readOnly} onCountChange={setCount("identity")} /></TabsContent>
         <TabsContent value="roles" className="pt-4"><RoleManagementPanel readOnly={readOnly} agents={agents} onCountChange={setCount("roles")} /></TabsContent>
         <TabsContent value="authorizers" className="pt-4"><AuthorizerManagementPanel readOnly={readOnly} onCountChange={setCount("authorizers")} /></TabsContent>
-        <TabsContent value="permissions" className="pt-4"><PermissionRequestsPanel readOnly={readOnly} onCountChange={setCount("permissions")} /></TabsContent>
         <TabsContent value="approvals" className="pt-4"><ApprovalPolicyPanel readOnly={readOnly} onCountChange={setCount("approvals")} /></TabsContent>
-                <TabsContent value="usage-limits" className="pt-4"><UsageLimitsPanel readOnly={readOnly} onCountChange={setCount("usage-limits")} /></TabsContent>
+        <TabsContent value="usage-limits" className="pt-4"><UsageLimitsPanel readOnly={readOnly} onCountChange={setCount("usage-limits")} /></TabsContent>
       
       </Tabs>
     </div>

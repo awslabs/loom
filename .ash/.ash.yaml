@@ -47,6 +47,15 @@ global_settings:
     - path: backend/app/models/mcp.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Boolean flag field name (has_oauth2_secret/has_admin_api_key), not a secret value.
+    - path: backend/app/routers/a2a.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Assignments to the has_oauth2_secret boolean flag field, not secret values.
+    - path: backend/app/models/a2a.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Boolean flag field name (has_oauth2_secret), not a secret value.
+    - path: backend/scripts/migrate_oauth2_secrets.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Migration script that moves OAuth2 client secrets into Secrets Manager; references the has_oauth2_secret flag and secret path names, never a secret value.
     - path: backend/app/routers/mcp.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Secrets Manager path prefix string ("loom/mcp/.../admin-api-key") used to store a secret, not the secret value itself.
@@ -122,6 +131,18 @@ global_settings:
     - path: backend/tests/test_credential_service.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using placeholder API keys to exercise credential provider logic.
+    - path: backend/tests/test_credential_provider_overwrite.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using placeholder client secrets/API keys to prove a credential provider name collision is not overwritten with them.
+    - path: backend/tests/test_authorization_invariants.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Constant names describing Secrets Manager path prefixes used by a structural test, not secret values.
+    - path: backend/tests/test_secret_redaction.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: A placeholder secret used to prove AWS errors are scrubbed before being logged; the whole module is about not leaking it.
+    - path: backend/tests/test_mcp_name_keyed_secret.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture using a placeholder MCP API key plus the has_admin_api_key boolean flag field name, to prove a renamed server cannot resolve another group's secret.
     - path: backend/tests/test_litellm_service.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using a placeholder API key env var to exercise LiteLLM proxy config fallback logic.

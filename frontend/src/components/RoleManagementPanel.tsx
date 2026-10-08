@@ -155,7 +155,7 @@ export function RoleManagementPanel({ readOnly, agents = [], onCountChange }: { 
       const profile = tagProfiles.find((p) => p.id.toString() === selectedProfileId);
       const tags = profile?.tags ?? {};
       if (user && browserSessionId) trackAction(user.username ?? user.sub, browserSessionId, 'security', 'add_role', importArn.trim());
-      await createRole({ mode: "import", role_arn: importArn.trim(), role_type: importRoleType, tags });
+      await createRole({ role_arn: importArn.trim(), role_type: importRoleType, tags });
       setImportArn("");
       setImportRoleType("agent");
       setSelectedProfileId("");

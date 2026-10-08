@@ -45,12 +45,16 @@ class TestMcpRouter(unittest.TestCase):
 
     def _create_server(self, **overrides) -> dict:
         payload = {
+            "tags": {"loom:group": "demo"},
             "name": "test-server",
             "endpoint_url": "http://localhost:3000/mcp",
             "transport_type": "sse",
         }
         payload.update(overrides)
-        response = self.client.post("/api/mcp/servers", json=payload)
+        # An OAuth2 client secret now goes to Secrets Manager rather than a
+        # database column, and the suite is offline by design.
+        with patch("app.routers.mcp.store_secret", return_value="arn:aws:secretsmanager:::secret:stub"):
+            response = self.client.post("/api/mcp/servers", json=payload)
         self.assertEqual(response.status_code, 201)
         return response.json()
 
@@ -90,6 +94,7 @@ class TestMcpRouter(unittest.TestCase):
 
     def test_create_server_oauth2_missing_well_known(self):
         response = self.client.post("/api/mcp/servers", json={
+            "tags": {"loom:group": "demo"},
             "name": "bad",
             "endpoint_url": "http://localhost:3000/mcp",
             "transport_type": "sse",
@@ -100,6 +105,7 @@ class TestMcpRouter(unittest.TestCase):
 
     def test_create_server_oauth2_missing_client_id(self):
         response = self.client.post("/api/mcp/servers", json={
+            "tags": {"loom:group": "demo"},
             "name": "bad",
             "endpoint_url": "http://localhost:3000/mcp",
             "transport_type": "sse",

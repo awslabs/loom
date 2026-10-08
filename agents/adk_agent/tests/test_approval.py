@@ -220,3 +220,77 @@ class TestCheckAccess(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPayloadPoliciesReachTheMatcher(unittest.TestCase):
+    """HITL policies were honoured for Strands agents and silently ignored for ADK.
+
+    Two bugs compounded. ApprovalPolicyMatcher() seeds itself from
+    LOOM_APPROVAL_POLICIES, an env var deploy never sets, so it was always
+    empty at cold start. build_agent then attached the confirmation predicate
+    to tools only `if approval_matcher.policies:` — so with an empty env the
+    predicate was never attached at all. And handler.invoke never read
+    payload["approval_policies"], which is what Loom actually ships the
+    enabled policies in (services/agentcore.py), and which Strands' handler
+    assigns onto its loop hook on every call.
+
+    Net effect: a require_approval policy an operator enabled in the UI did
+    not pause ADK tools, no approval_request was raised, and the owner check
+    on approve/deny never ran because there was nothing to approve.
+    """
+
+    def test_build_agent_attaches_the_predicate_with_no_static_policies(self):
+        """The gate has to be wired before any policy exists, because the
+        policies arrive later, per invocation. Asserted by patching the
+        attach call rather than inspecting tools, so it holds for a config
+        with no tools too."""
+        import asyncio
+        from src import agent as agent_module
+        from src.agent import build_agent
+        from src.config import AgentConfig, IntegrationsConfig, MemoryConfig
+
+        config = AgentConfig(
+            system_prompt="x",
+            model_id="us.anthropic.claude-sonnet-4-6",
+            integrations=IntegrationsConfig(
+                mcp_servers=[], a2a_agents=[], memory=MemoryConfig(enabled=False),
+            ),
+        )
+        with patch.dict(os.environ, {"LOOM_APPROVAL_POLICIES": "[]"}, clear=False), \
+             patch.object(agent_module, "apply_confirmation_to_tools") as attach:
+            _agent, _plugins, _ci, matcher = asyncio.run(build_agent(config))
+
+        self.assertIsNotNone(matcher, "build_agent must hand back the matcher")
+        self.assertEqual([], matcher.policies)
+        attach.assert_called_once()
+        self.assertIs(
+            matcher, attach.call_args[0][1],
+            "the matcher handed to the handler must be the one the tools consult",
+        )
+
+    def test_matcher_gates_a_tool_once_policies_are_injected(self):
+        """Assigning payload policies onto the matcher must take effect on a
+        predicate that was attached while the matcher was empty."""
+        matcher = ApprovalPolicyMatcher(policies=[])
+        self.assertIsNone(matcher.find_matching_policy("danger_tool"))
+
+        matcher.policies = [{
+            "enabled": True,
+            "policy_type": "loop_hook",
+            "tool_match_rules": ["danger_tool"],
+            "approval_mode": "require_approval",
+        }]
+        matched = matcher.find_matching_policy("danger_tool")
+        self.assertIsNotNone(matched, "injected policy must gate the tool")
+        self.assertEqual("require_approval", matched["approval_mode"])
+
+    def test_policies_do_not_leak_between_invocations(self):
+        """The runtime is a warm singleton shared across callers, so one
+        caller's policy list must not persist into the next invocation."""
+        matcher = ApprovalPolicyMatcher(policies=[{
+            "enabled": True, "policy_type": "loop_hook",
+            "tool_match_rules": ["danger_tool"],
+        }])
+        self.assertIsNotNone(matcher.find_matching_policy("danger_tool"))
+        matcher.policies = []
+        self.assertIsNone(matcher.find_matching_policy("danger_tool"))

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { getRegistryConfig } from "@/api/settings";
+import { getRegistryRecord } from "@/api/registry";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -31,7 +32,7 @@ import { Input } from "@/components/ui/input";
 import { SortableCardGrid, SortButton, loadSortDirection, toggleSortDirection, saveSortDirection, type SortDirection } from "@/components/SortableCardGrid";
 import { SortableTableHead, sortRows } from "@/components/SortableTableHead";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
-import { RegistryActions } from "@/components/RegistryActions";
+import { RegistryCard } from "@/components/RegistryCard";
 import type { McpServer, McpServerCreateRequest, AgentResponse } from "@/api/types";
 
 interface McpServersPageProps {
@@ -69,6 +70,10 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<number | null>(null);
   const [editingServer, setEditingServer] = useState<McpServer | null>(null);
   const [registryEnabled, setRegistryEnabled] = useState(false);
+  // The registry record's own statusReason — why an approver approved or
+  // rejected it. Lives on the record rather than the server row, so it needs
+  // its own fetch, same as the agent and skill detail views.
+  const [registryStatusReason, setRegistryStatusReason] = useState<string | null>(null);
 
   useEffect(() => {
     getRegistryConfig().then((c) => setRegistryEnabled(c.enabled)).catch(() => {});
@@ -92,6 +97,18 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
   };
 
   const selectedServer = servers.find((s) => s.id === selectedServerId) ?? null;
+
+  useEffect(() => {
+    if (!selectedServer?.registry_record_id) {
+      setRegistryStatusReason(null);
+      return;
+    }
+    getRegistryRecord(selectedServer.registry_record_id)
+      .then((rec) => setRegistryStatusReason(rec.status_reason ?? null))
+      .catch(() => setRegistryStatusReason(null));
+  }, [selectedServer?.registry_record_id]);
+
+  const canManageRegistry = !readOnly && registryEnabled;
 
   const dependentsOf = (serverName: string) => agents.filter((a) => a.mcp_names?.includes(serverName));
 
@@ -157,15 +174,6 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
               </div>
             </div>
             <div className="ml-auto flex shrink-0 items-center gap-2">
-              {!readOnly && registryEnabled && (
-                <RegistryActions
-                  resourceType="mcp"
-                  resourceId={selectedServer.id}
-                  registryRecordId={selectedServer.registry_record_id}
-                  registryStatus={selectedServer.registry_status}
-                  onAction={() => void fetchServers()}
-                />
-              )}
               {!readOnly && (
                 <button
                   type="button"
@@ -274,6 +282,18 @@ export function McpServersPage({ viewMode, onViewModeChange, readOnly, initialSe
                 )}
               </CardContent>
             </Card>
+
+            {registryEnabled && (
+              <RegistryCard
+                kind="mcp"
+                resourceId={selectedServer.id}
+                registryRecordId={selectedServer.registry_record_id}
+                registryStatus={selectedServer.registry_status}
+                statusReason={registryStatusReason}
+                canManage={canManageRegistry}
+                onAction={() => void fetchServers()}
+              />
+            )}
           </div>
         </TabsContent>
         <TabsContent value="access" className="pt-4">

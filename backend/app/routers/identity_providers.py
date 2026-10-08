@@ -125,7 +125,11 @@ def create_identity_provider(
     if existing:
         raise HTTPException(status_code=409, detail="Identity provider with this name already exists")
 
-    if request.group_mappings:
+    # Gate on "is not None", matching what actually gets persisted below, so
+    # the guard provably covers every value that can reach the database. A
+    # truthiness check left {} unasserted, which mattered because the login
+    # path used to treat an empty table as "trust the IdP's own group names".
+    if request.group_mappings is not None:
         _assert_group_mappings_within_caller_scopes(request.group_mappings, user)
 
     client_secret_arn = None
@@ -204,7 +208,9 @@ def update_identity_provider(
     if not idp:
         raise HTTPException(status_code=404, detail="Identity provider not found")
 
-    if request.group_mappings:
+    # See create_identity_provider: gated on "is not None" to match the persist
+    # condition below, so no settable value skips the guard.
+    if request.group_mappings is not None:
         _assert_group_mappings_within_caller_scopes(request.group_mappings, user)
 
     rerun_discovery = False

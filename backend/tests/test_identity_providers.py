@@ -20,7 +20,13 @@ from app.main import app
 from app.models.identity_provider import IdentityProvider
 from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
-from app.dependencies.auth import UserInfo, _map_external_groups, derive_scopes, get_current_user
+from app.dependencies.auth import (
+    UserInfo,
+    _build_user_from_external_claims,
+    _map_external_groups,
+    derive_scopes,
+    get_current_user,
+)
 from app.services.oidc import fetch_discovery, OIDCDiscoveryError
 from app.services.jwt_validator import validate_token, _jwks_cache
 
@@ -202,6 +208,69 @@ class TestGroupMapping(unittest.TestCase):
         result = _map_external_groups(["GroupA", "GroupB"], mappings)
         # t-admin should appear only once
         self.assertEqual(result.count("t-admin"), 1)
+
+
+class TestEmptyGroupMappingFailsClosed(unittest.TestCase):
+    """An empty mapping table must grant nothing, not pass the claim through.
+
+    The login path used to read an empty or missing table as "no restrictions
+    configured, trust the IdP" and copy the raw ``groups`` claim straight
+    through as Loom group names. Since the IdP's token is signed by whoever
+    controls that IdP, the claim is attacker-controlled: a caller holding only
+    security:write could stand up their own provider with no mappings, mint a
+    JWT claiming ``g-admins-super``, and authenticate as full super-admin.
+
+    ``_assert_group_mappings_within_caller_scopes`` guarded the mapping table
+    but was bypassed entirely by never putting the group name in the table.
+    """
+
+    def _idp(self, group_mappings) -> dict:
+        return {
+            "id": 1,
+            "provider_type": "okta",
+            "issuer_url": "https://attacker.example.com",
+            "client_id": "c",
+            "audience": None,
+            "jwks_uri": "https://attacker.example.com/keys",
+            "group_claim_path": "groups",
+            "group_mappings": group_mappings,
+        }
+
+    def test_empty_mapping_table_grants_no_groups(self) -> None:
+        user = _build_user_from_external_claims(
+            {"sub": "attacker", "groups": ["t-admin", "g-admins-super"]},
+            self._idp({}),
+        )
+        self.assertEqual(user.groups, [])
+        self.assertEqual(user.scopes, set())
+
+    def test_missing_mapping_table_grants_no_groups(self) -> None:
+        idp = self._idp({})
+        del idp["group_mappings"]
+        user = _build_user_from_external_claims(
+            {"sub": "attacker", "groups": ["t-admin", "g-admins-super"]}, idp
+        )
+        self.assertEqual(user.groups, [])
+        self.assertEqual(user.scopes, set())
+
+    def test_claimed_group_not_in_the_table_is_ignored(self) -> None:
+        """Partial tables must not leak the unmapped remainder through."""
+        user = _build_user_from_external_claims(
+            {"sub": "u", "groups": ["RealGroup", "g-admins-super"]},
+            self._idp({"RealGroup": ["t-user", "g-users-demo"]}),
+        )
+        self.assertEqual(user.groups, ["t-user", "g-users-demo"])
+        self.assertNotIn("g-admins-super", user.groups)
+        self.assertNotIn("admin:write", user.scopes)
+
+    def test_an_explicitly_mapped_group_still_works(self) -> None:
+        """Fail-closed must not break the supported configuration."""
+        user = _build_user_from_external_claims(
+            {"sub": "u", "groups": ["EntraAdmins"]},
+            self._idp({"EntraAdmins": ["t-admin", "g-admins-super"]}),
+        )
+        self.assertEqual(user.groups, ["t-admin", "g-admins-super"])
+        self.assertIn("admin:write", user.scopes)
 
     def test_derive_scopes_admin_super(self):
         scopes = derive_scopes(["t-admin", "g-admins-super"])
@@ -396,6 +465,49 @@ class TestIdentityProviderCRUD(unittest.TestCase):
         # Confirm nothing was persisted.
         list_resp = self.client.get("/api/settings/identity-providers")
         self.assertEqual(list_resp.json(), [])
+
+    @patch("app.routers.identity_providers.delete_secret")
+    @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
+    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    def test_omitting_or_emptying_mappings_cannot_escalate(self, mock_disc, mock_store, mock_del):
+        """The reported bypass of the guard above: rather than naming
+        g-admins-super in the mapping table and being rejected, leave the
+        table empty.
+
+        Creating with the field omitted, then PUTting ``{"group_mappings": {}}``,
+        both used to slip past the guard, which was gated on truthiness while
+        the update persisted on ``is not None``. An empty table then meant the
+        login path copied the IdP's own group claim through verbatim, so a
+        token claiming g-admins-super became super-admin.
+
+        Both requests are allowed here -- an IdP with no mappings is a valid
+        thing to create -- but the table they persist now grants nothing, so
+        there is no escalation left to reach.
+        """
+        self._override_user(["t-admin", "g-admins-security"])
+
+        create = self.client.post(
+            "/api/settings/identity-providers",
+            json=self._idp_payload(group_mappings=None),
+        )
+        self.assertEqual(create.status_code, 201)
+        idp_id = create.json()["id"]
+
+        emptied = self.client.put(
+            f"/api/settings/identity-providers/{idp_id}",
+            json={"group_mappings": {}},
+        )
+        self.assertEqual(emptied.status_code, 200)
+
+        # The persisted table confers nothing, so the claim cannot be laundered
+        # into Loom groups on the next login.
+        user = _build_user_from_external_claims(
+            {"sub": "attacker", "groups": ["t-admin", "g-admins-super"]},
+            {"id": idp_id, "provider_type": "okta", "group_claim_path": "groups",
+             "group_mappings": emptied.json().get("group_mappings") or {}},
+        )
+        self.assertEqual(user.groups, [])
+        self.assertNotIn("admin:write", user.scopes)
 
     @patch("app.routers.identity_providers.delete_secret")
     @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")

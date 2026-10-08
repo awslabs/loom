@@ -14,6 +14,7 @@ import { Loader2 } from "lucide-react";
 import { testConnectionPreCreate, exportMcpServer } from "@/api/mcp";
 import { JsonConfigSection } from "./JsonConfigSection";
 import { useAuth } from "@/contexts/AuthContext";
+import { ResourceTagFields } from "@/components/ResourceTagFields";
 import type { McpServerCreateRequest, TestConnectionResult } from "@/api/types";
 
 interface McpServerFormProps {
@@ -24,6 +25,9 @@ interface McpServerFormProps {
 
 export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerFormProps) {
   const { hasScope } = useAuth();
+  // loom:group is what authorization is keyed on, so the API refuses a create
+  // without it; the submit button stays disabled until a profile is chosen.
+  const [tagValues, setTagValues] = useState<Record<string, string>>(initialData?.tags ?? {});
   const [name, setName] = useState(initialData?.name ?? "");
   const [description, setDescription] = useState(initialData?.description ?? "");
   const [endpointUrl, setEndpointUrl] = useState(initialData?.endpoint_url ?? "");
@@ -72,6 +76,7 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
         if (apiKey) request.api_key = apiKey;
       }
       request.supports_elicitation = supportsElicitation;
+      request.tags = tagValues;
       await onSubmit(request);
     } finally {
       setSubmitting(false);
@@ -370,8 +375,10 @@ export function McpServerForm({ onSubmit, onCancel, initialData }: McpServerForm
         )}
       </div>
 
+      <ResourceTagFields onChange={setTagValues} />
+
       <div className="flex items-center gap-2 pt-2">
-        <Button size="sm" className="min-w-[120px]" onClick={handleSubmit} disabled={submitting || !name.trim() || !endpointUrl.trim()}>
+        <Button size="sm" className="min-w-[120px]" onClick={handleSubmit} disabled={submitting || !name.trim() || !endpointUrl.trim() || !tagValues["loom:group"]}>
           {submitting ? (initialData?.id ? "Updating..." : "Creating...") : (initialData?.id ? "Update" : "Create")}
         </Button>
         <Button size="sm" variant="ghost" onClick={onCancel}>

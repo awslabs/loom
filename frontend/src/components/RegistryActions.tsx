@@ -18,9 +18,13 @@ interface RegistryActionsProps {
   registryRecordId: string | null;
   registryStatus: string | null;
   onAction: () => void;  // callback to refresh parent data
+  /** "inline" is the compact toolbar used in headers and table rows. "card"
+   *  gives full-width buttons for the sidebar RegistryCard, where the action
+   *  is the card's purpose rather than one control among many. */
+  layout?: "inline" | "card";
 }
 
-export function RegistryActions({ resourceType, resourceId, registryRecordId, registryStatus, onAction }: RegistryActionsProps) {
+export function RegistryActions({ resourceType, resourceId, registryRecordId, registryStatus, onAction, layout = "inline" }: RegistryActionsProps) {
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -33,6 +37,12 @@ export function RegistryActions({ resourceType, resourceId, registryRecordId, re
   const [approveReason, setApproveReason] = useState("");
   const [showApproveInput, setShowApproveInput] = useState(false);
   const [namespace, setNamespace] = useState<McpNamespace>("aws.agentcore");
+
+  const card = layout === "card";
+  // Fixed pixel widths keep the inline toolbar from reflowing as labels change;
+  // in the card the button owns the full column instead.
+  const btn = (inlineWidth: string) => (card ? "w-full justify-center" : `h-6 text-xs ${inlineWidth} justify-center`);
+  const rowClass = card ? "flex flex-col gap-2 w-full" : "flex items-center gap-1.5";
 
   const timerActive = creating || submitting || approving || rejecting;
   useEffect(() => {
@@ -85,12 +95,12 @@ export function RegistryActions({ resourceType, resourceId, registryRecordId, re
     // — this branch should never be reached for one.
     if (resourceType === "skill") return null;
     return (
-      <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+      <div className={`${rowClass} min-w-0`} onClick={(e) => e.stopPropagation()}>
         {resourceType === "mcp" && (
           <select
             value={namespace}
             onChange={(e) => setNamespace(e.target.value as McpNamespace)}
-            className="h-6 text-xs border rounded px-1 bg-input-bg"
+            className={`text-xs border rounded bg-input-bg ${card ? "h-8 w-full px-2" : "h-6 px-1"}`}
             disabled={loading || creating}
           >
             {MCP_NAMESPACES.map((ns) => (
@@ -101,7 +111,7 @@ export function RegistryActions({ resourceType, resourceId, registryRecordId, re
         <Button
           size="sm"
           variant="outline"
-          className="h-6 text-xs w-[5.5rem] justify-center"
+          className={btn("w-[5.5rem]")}
           disabled={loading || creating}
           onClick={() => {
             setCreating(true);
@@ -127,11 +137,11 @@ export function RegistryActions({ resourceType, resourceId, registryRecordId, re
 
   if (registryStatus === "DRAFT" && registryRecordId) {
     return (
-      <div className="flex items-center gap-1.5">
+      <div className={rowClass}>
         <Button
           size="sm"
-          variant="outline"
-          className="h-6 text-xs w-[8.5rem] justify-center"
+          variant={card ? "default" : "outline"}
+          className={btn("w-[8.5rem]")}
           disabled={loading || submitting}
           onClick={(e) => {
             e.stopPropagation();
@@ -153,11 +163,11 @@ export function RegistryActions({ resourceType, resourceId, registryRecordId, re
     const actionInProgress = approving || rejecting;
     if (actionInProgress) {
       return (
-        <div className="flex items-center gap-1.5">
+        <div className={rowClass}>
           <Button
             size="sm"
             variant="outline"
-            className="h-6 text-xs w-[5rem] justify-center"
+            className={btn("w-[5rem]")}
             disabled
           >
             <Loader2 className="h-3 w-3 animate-spin" />
@@ -185,15 +195,15 @@ export function RegistryActions({ resourceType, resourceId, registryRecordId, re
             value={reason}
             onChange={(e) => setReason(e.target.value)}
             placeholder="Reason..."
-            className="h-6 text-xs border rounded px-1.5 bg-input-bg w-full"
+            className={`text-xs border rounded bg-input-bg w-full ${card ? "h-8 px-2" : "h-6 px-1.5"}`}
             autoFocus
           />
         )}
-        <div className="flex items-center gap-1 flex-wrap">
+        <div className={card ? "grid grid-cols-2 gap-2" : "flex items-center gap-1 flex-wrap"}>
           <Button
             size="sm"
-            variant="outline"
-            className="h-6 text-xs"
+            variant={card ? "default" : "outline"}
+            className={card ? "w-full justify-center" : "h-6 text-xs"}
             disabled={loading || (showApproveInput && !approveReason.trim())}
             onClick={() => {
               if (!showApproveInput) {
@@ -211,7 +221,9 @@ export function RegistryActions({ resourceType, resourceId, registryRecordId, re
           <Button
             size="sm"
             variant="outline"
-            className="h-6 text-xs text-destructive"
+            className={card
+              ? "w-full justify-center border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+              : "h-6 text-xs text-destructive"}
             disabled={loading || (showRejectInput && !rejectReason.trim())}
             onClick={() => {
               if (!showRejectInput) {
@@ -227,7 +239,12 @@ export function RegistryActions({ resourceType, resourceId, registryRecordId, re
             {showRejectInput ? "Confirm" : "Reject"}
           </Button>
           {showReasonInput && (
-            <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={cancel}>
+            <Button
+              size="sm"
+              variant="ghost"
+              className={card ? "col-span-2 w-full justify-center" : "h-6 text-xs"}
+              onClick={cancel}
+            >
               Cancel
             </Button>
           )}

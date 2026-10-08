@@ -12,7 +12,7 @@ interface StatusPillProps {
 export function StatusPill({ label, variant, className = "", pulse = false }: StatusPillProps) {
   return (
     <span
-      className={`inline-flex shrink-0 items-center gap-1 rounded-full border border-transparent px-1.5 py-0.5 text-[10px] font-medium tracking-wide ${
+      className={`inline-flex shrink-0 items-center gap-1 rounded-full border border-transparent px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase ${
         variant === "success" ? "bg-success-bg text-success"
         : variant === "warning" ? "bg-warning-bg text-warning"
         : variant === "destructive" ? "bg-destructive/10 text-destructive"

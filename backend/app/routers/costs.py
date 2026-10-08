@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
+from app.routers.utils import filter_visible_resources, visible_agent_ids
 from app.models.agent import Agent
 from app.models.invocation import Invocation
 from app.models.session import InvocationSession
@@ -39,6 +40,33 @@ _ZERO_COSTS: dict[str, Any] = {
 }
 
 
+def _agents_in_cost_scope(
+    db: Session,
+    user: UserInfo,
+    agents: list[Agent],
+    group: str | None,
+) -> tuple[list[Agent], str | None]:
+    """Narrow a cost query to the caller's own groups, then to ?group=.
+
+    ``visible_agent_ids`` returns None for a super-admin (unrestricted) and
+    otherwise the agents whose loom:group the caller administers or belongs to —
+    the same rule every other read route applies, rather than a second
+    hand-rolled copy of the group logic.
+    """
+    visible = visible_agent_ids(db, user)
+    if visible is not None:
+        allowed = set(visible)
+        agents = [a for a in agents if a.id in allowed]
+
+    if group:
+        agents = [a for a in agents if a.get_tags().get("loom:group") == group]
+    elif visible is not None:
+        # Display hint only: the first group the caller can actually see.
+        tags = [a.get_tags().get("loom:group") for a in agents]
+        group = next((t for t in tags if t), None)
+    return agents, group
+
+
 @router.get("/costs")
 def get_cost_dashboard(
     group: str | None = Query(None, description="Filter by loom:group tag"),
@@ -50,19 +78,12 @@ def get_cost_dashboard(
     # Build agent query
     agents = db.query(Agent).all()
 
-    # Filter by group parameter (for View As) or user's groups
-    # - Admins (t-admin): See ALL resources including untagged (unless group param is set for View As)
-    # - Users (t-user): See only resources tagged with their groups (g-users-* → strip prefix)
-    if group:
-        # Explicit group filter (used by admins for View As)
-        agents = [a for a in agents if a.get_tags().get("loom:group") == group]
-    elif "t-admin" not in user.groups:
-        # User view: filter by group tags (strip "g-users-" prefix)
-        user_groups = [g for g in user.groups if g.startswith("g-users-")]
-        allowed_tags = [g.replace("g-users-", "", 1) for g in user_groups]
-        agents = [a for a in agents if a.get_tags().get("loom:group") in allowed_tags]
-        # Use first group tag for display purposes
-        group = allowed_tags[0] if allowed_tags else None
+    # Restrict to the agents this caller may see, then let ?group= narrow
+    # *within* that. The two used to be alternatives: supplying ?group= skipped
+    # the caller's own restriction entirely, so any costs:read holder could read
+    # another group's spend by naming it, and a group-scoped t-admin saw every
+    # group by default.
+    agents, group = _agents_in_cost_scope(db, user, agents, group)
 
     agent_ids = [a.id for a in agents]
 
@@ -209,19 +230,12 @@ def pull_cost_actuals(
     # Find agents in scope
     agents = db.query(Agent).all()
 
-    # Filter by group parameter (for View As) or user's groups
-    # - Admins (t-admin): See ALL resources including untagged (unless group param is set for View As)
-    # - Users (t-user): See only resources tagged with their groups (g-users-* → strip prefix)
-    if group:
-        # Explicit group filter (used by admins for View As)
-        agents = [a for a in agents if a.get_tags().get("loom:group") == group]
-    elif "t-admin" not in user.groups:
-        # User view: filter by group tags (strip "g-users-" prefix)
-        user_groups = [g for g in user.groups if g.startswith("g-users-")]
-        allowed_tags = [g.replace("g-users-", "", 1) for g in user_groups]
-        agents = [a for a in agents if a.get_tags().get("loom:group") in allowed_tags]
-        # Use first group tag for display purposes
-        group = allowed_tags[0] if allowed_tags else None
+    # Restrict to the agents this caller may see, then let ?group= narrow
+    # *within* that. The two used to be alternatives: supplying ?group= skipped
+    # the caller's own restriction entirely, so any costs:read holder could read
+    # another group's spend by naming it, and a group-scoped t-admin saw every
+    # group by default.
+    agents, group = _agents_in_cost_scope(db, user, agents, group)
 
     if not agents:
         return {"group": group, "days": days, "agents": [], "summary": {"total_events": 0}}
@@ -369,15 +383,15 @@ def pull_cost_actuals(
     # Also include all Memory records in the DB (covers imported memories), filtered by group
     all_memories = db.query(Memory).filter(Memory.memory_id.isnot(None)).all()
 
-    # Filter memories by group parameter (for View As) or user's groups (same logic as agents)
+    # Narrow to what the caller may see FIRST, then apply the requested group
+    # as a further filter. The order is the whole point: this block used to
+    # read `if group: ... elif not t-admin: ...`, so passing ?group= skipped
+    # the caller's own restriction entirely and returned another group's
+    # memory spend. The agents half of this route was fixed by
+    # _agents_in_cost_scope; this half kept the original shape.
+    all_memories = filter_visible_resources(all_memories, user, resource_label="memory resource")
     if group:
-        # Explicit group filter (used by admins for View As)
         all_memories = [m for m in all_memories if m.get_tags().get("loom:group") == group]
-    elif "t-admin" not in user.groups:
-        # User view: filter by group tags (strip "g-users-" prefix)
-        user_groups = [g for g in user.groups if g.startswith("g-users-")]
-        allowed_tags = [g.replace("g-users-", "", 1) for g in user_groups]
-        all_memories = [m for m in all_memories if m.get_tags().get("loom:group") in allowed_tags]
 
     for mem in all_memories:
         if mem.memory_id:

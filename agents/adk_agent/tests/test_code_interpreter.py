@@ -42,7 +42,7 @@ class TestCodeInterpreterIntegration(unittest.IsolatedAsyncioTestCase):
         mock_build_ci.return_value = ([mock_tool], mock_ci_instance)
 
         config = _make_config(ci_enabled=True, ci_region="us-west-2")
-        agent, plugins, ci = await build_agent(config)
+        agent, plugins, ci, _matcher = await build_agent(config)
 
         mock_build_ci.assert_called_once()
         self.assertIn(mock_tool, agent.tools)
@@ -50,7 +50,7 @@ class TestCodeInterpreterIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_code_interpreter_disabled(self) -> None:
         config = _make_config(ci_enabled=False)
-        agent, plugins, ci = await build_agent(config)
+        agent, plugins, ci, _matcher = await build_agent(config)
 
         self.assertIsNone(ci)
         self.assertEqual(agent.tools, [])

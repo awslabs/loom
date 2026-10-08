@@ -13,6 +13,7 @@ from app.services.net_guard import (
     safe_get,
     safe_post,
 )
+from app.services.mcp import resolve_oauth2_client_secret
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,8 @@ def _is_salesforce_url(base_url: str) -> bool:
 
 def _get_oauth2_token(agent: Any) -> str | None:
     """Exchange OAuth2 client credentials for an access token."""
-    if agent.auth_type != "oauth2" or not agent.oauth2_client_id or not agent.oauth2_client_secret:
+    client_secret = resolve_oauth2_client_secret(agent)
+    if agent.auth_type != "oauth2" or not agent.oauth2_client_id or not client_secret:
         return None
 
     token_url = None
@@ -66,7 +68,7 @@ def _get_oauth2_token(agent: Any) -> str | None:
         data: dict[str, str] = {
             "grant_type": "client_credentials",
             "client_id": agent.oauth2_client_id,
-            "client_secret": agent.oauth2_client_secret,
+            "client_secret": client_secret,
         }
         if agent.oauth2_scopes:
             data["scope"] = agent.oauth2_scopes

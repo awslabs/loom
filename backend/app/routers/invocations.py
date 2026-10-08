@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 import threading
 
 from app.db import get_db, SessionLocal
-from app.dependencies.auth import UserInfo, require_scopes
+from app.dependencies.auth import UserInfo, authenticate_bearer_token, require_scopes
 from app.models.agent import Agent
 from app.models.session import InvocationSession
 from app.models.invocation import Invocation
@@ -28,7 +28,13 @@ from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
 from app.models.mcp import McpServer
 from app.models.approval_policy import ApprovalPolicy
-from app.routers.utils import check_resource_group_access
+from app.routers.utils import (
+    assert_bindable,
+    assert_session_readable,
+    check_resource_group_access,
+    get_agent_or_404,
+    get_session_or_404,
+)
 
 from app.services.agentcore import invoke_agent, invoke_agent_ws
 from app.services.harness import invoke_harness_stream
@@ -38,6 +44,8 @@ from app.services.cloudwatch import (
     parse_memory_telemetry, parse_usage_telemetry,
 )
 from app.services.cognito import get_cognito_token
+from app.services.credential import credential_provider_name
+from app.services.mcp import user_api_key_secret_name
 from app.services.latency import compute_client_duration, compute_cold_start
 from app.services.secrets import get_secret
 from app.services.tokens import count_input_tokens, count_output_tokens
@@ -57,6 +65,28 @@ def _decode_jwt_claims(token: str) -> dict[str, Any] | None:
         return json.loads(base64.urlsafe_b64decode(padded))
     except Exception:
         return None
+
+
+# The agent harness builds token_info from an allowlist, but two of the queue's
+# producers accept arbitrary content from a remote MCP server: a
+# __TOKEN_INFO__-prefixed tool result, and an MCP `logging` notification whose
+# logger is "token_info". Both were relayed verbatim into the SSE stream and
+# the UI's token panel, so a third-party MCP server could put whatever it liked
+# in a privileged-looking place. Re-apply the same allowlist on receipt.
+_TOKEN_INFO_FIELDS = ("token_type", "source", "credential_provider", "server")
+_TOKEN_INFO_CLAIMS = ("iss", "sub", "aud", "cid", "scp", "roles", "act", "exp", "iat")
+
+
+def _safe_token_info(token_info: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the fields the harness is supposed to emit."""
+    safe: dict[str, Any] = {
+        k: token_info[k] for k in _TOKEN_INFO_FIELDS
+        if isinstance(token_info.get(k), (str, int, bool))
+    }
+    claims = token_info.get("claims")
+    if isinstance(claims, dict):
+        safe["claims"] = {k: claims[k] for k in _TOKEN_INFO_CLAIMS if k in claims}
+    return safe
 
 
 def _extract_token_summary(token: str, token_type: str = "user", source: str | None = None) -> dict[str, Any] | None:  # nosec B107 — "user" is a token-type label, not a password
@@ -636,7 +666,7 @@ async def invoke_agent_stream(
                     token_info = structured.get("token_info")
                     if isinstance(token_info, dict):
                         logger.info("Token info event: type=%s provider=%s", token_info.get("token_type"), token_info.get("credential_provider"))
-                        yield format_sse_event("token_info", token_info)
+                        yield format_sse_event("token_info", _safe_token_info(token_info))
                         continue
                     # MCP elicitation: tool paused waiting for user input
                     elicitation_data = structured.get("elicitation")
@@ -1400,31 +1430,15 @@ async def invoke_agent_endpoint(
         )
 
     # ---- Group-based invoke restriction ----
-    # Super-admins (g-admins-super) can invoke any agent.
-    # Agents with no loom:group tag are accessible to any authenticated user with invoke scope.
-    # Other admins (g-admins-demo, etc.) can only invoke agents in their specific group.
-    # Users (t-user) can only invoke agents tagged with their groups (g-users-* → strip prefix).
-    # Check this BEFORE creating any session/invocation records.
-    if "g-admins-super" not in user.groups:
-        agent_group = agent.get_tags().get("loom:group", "")
-
-        if agent_group:
-            if "t-admin" in user.groups:
-                admin_groups = [g for g in user.groups if g.startswith("g-admins-")]
-                allowed_tags = [g.replace("g-admins-", "", 1) for g in admin_groups]
-            else:
-                user_groups = [g for g in user.groups if g.startswith("g-users-")]
-                allowed_tags = [g.replace("g-users-", "", 1) for g in user_groups]
-
-            if agent_group not in allowed_tags:
-                logger.warning(
-                    "Group-based 403 for user=%s groups=%s agent_id=%s agent_group=%s allowed_tags=%s",
-                    user.username, user.groups, agent_id, agent_group, allowed_tags,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"You can only invoke agents within your group (agent group: {agent_group})",
-                )
+    # Checked BEFORE creating any session/invocation records.
+    #
+    # This was an inlined copy of check_resource_group_access that skipped the
+    # whole check when the agent had no loom:group tag — `if agent_group:`. So
+    # when the shared helper was made to fail closed on untagged resources, the
+    # copy kept failing open and an untagged agent stayed invokable by anyone
+    # holding `invoke`. Calling the helper is the point: the rule lives in one
+    # place and cannot drift again.
+    check_resource_group_access(agent, user, resource_label="agent")
 
     # Validate runtime model_id if provided
     runtime_model_id: str | None = None
@@ -1541,6 +1555,13 @@ async def invoke_agent_endpoint(
         cred = db.query(AuthorizerCredential).filter(AuthorizerCredential.id == request_body.credential_id).first()
         if cred and cred.client_secret_arn:
             auth = db.query(AuthorizerConfig).filter(AuthorizerConfig.id == cred.authorizer_config_id).first()
+            # credential_id is caller-supplied and its client secret is used to
+            # mint an M2M token that is then handed to the agent. An
+            # AuthorizerCredential carries no loom:group of its own, so the
+            # owning AuthorizerConfig is what gets checked — otherwise any
+            # holder of `invoke` could borrow another group's credential.
+            if auth is not None:
+                check_resource_group_access(auth, user, resource_label="authorizer")
             if auth and auth.pool_id:
                 try:
                     import json as _json
@@ -1638,6 +1659,11 @@ async def invoke_agent_endpoint(
     if request_body.connector_ids:
         actor_id = user.actor_id
         mcp_records = db.query(McpServer).filter(McpServer.id.in_(request_body.connector_ids)).all()
+        # connector_ids comes straight from the request body, and the resolved
+        # server's OAuth client secret / admin API key is handed to the runtime
+        # for this invocation. An ID the caller cannot read is one they cannot
+        # attach.
+        assert_bindable(mcp_records, user, resource_label="mcp server")
         dynamic_mcp_servers = []
 
         for server in mcp_records:
@@ -1651,14 +1677,16 @@ async def invoke_agent_endpoint(
                 # Per-user keys are stored by the immutable IdP subject.  The
                 # actor_id is a separately formatted value used by AgentCore
                 # sessions and does not identify the Secrets Manager entry.
-                secret_name = f"loom/mcp/{server.name}/api-key/{user.sub}"
+                secret_name = user_api_key_secret_name(server.name, user.sub)
                 entry["auth"] = {
                     "type": "api_key",
                     "credentials_secret_arn": secret_name,
                     "api_key_header_name": server.api_key_header_name or "x-api-key",
                 }
             elif server.auth_type == "oauth2":
-                cred_provider = getattr(server, "credential_provider_name", None) or f"loom-{agent.name}-mcp-{server.name}"
+                cred_provider = getattr(server, "credential_provider_name", None) or credential_provider_name(
+                    agent.id, agent.name, "mcp", server.name
+                )
                 auth_entry: dict[str, str] = {
                     "type": "oauth2",
                     "well_known_endpoint": server.oauth2_well_known_url or "",
@@ -1815,19 +1843,64 @@ async def invoke_agent_websocket(
 
     db = SessionLocal()
     try:
+        # Authenticate from the first frame, before touching the database.
+        #
+        # This endpoint previously accepted the socket and served invocations
+        # with no authentication at all (CWE-306): no identity, no invoke
+        # scope, and no loom:group check, while the HTTP invoke route next door
+        # required all three. The SPA has always sent the Loom JWT as `token`
+        # on its first frame — the handler just never read it.
+        #
+        # Authenticating before the agent lookup also stops the "Agent N not
+        # found" reply from being an unauthenticated oracle for which agent IDs
+        # exist.
+        try:
+            first_message = await websocket.receive_json()
+        except (WebSocketDisconnect, ValueError):
+            await websocket.close(code=1008)
+            return
+
+        try:
+            user = authenticate_bearer_token(str(first_message.get("token") or ""), websocket)
+        except HTTPException:
+            logger.warning("Rejected unauthenticated websocket invoke for agent %d", agent_id)
+            await websocket.send_json({"type": "error", "content": "Unauthorized"})
+            await websocket.close(code=1008)
+            return
+
+        if "invoke" not in user.scopes:
+            logger.warning("Websocket invoke for agent %d denied: %s lacks the invoke scope",
+                           agent_id, user.username)
+            await websocket.send_json({"type": "error", "content": "Missing required scope: invoke"})
+            await websocket.close(code=1008)
+            return
+
         agent = db.query(Agent).filter(Agent.id == agent_id).first()
         if not agent:
             await websocket.send_json({"type": "error", "content": f"Agent {agent_id} not found"})
             await websocket.close()
             return
 
+        # Same loom:group rule the HTTP invoke route applies. This route
+        # queried Agent directly and so was missed when fetch-by-ID was routed
+        # through check_resource_group_access.
+        try:
+            check_resource_group_access(agent, user, resource_label="agent")
+        except HTTPException as exc:
+            logger.warning("Websocket invoke for agent %d denied by group check for %s",
+                           agent_id, user.username)
+            await websocket.send_json({"type": "error", "content": str(exc.detail)})
+            await websocket.close(code=1008)
+            return
+
         region = agent.region or os.environ.get("AWS_REGION", "us-east-1")
 
+        data = first_message
         while True:
-            data = await websocket.receive_json()
             msg_type = data.get("type", "prompt")
 
             if msg_type != "prompt":
+                data = await websocket.receive_json()
                 continue
 
             prompt = data.get("prompt", "")
@@ -1840,6 +1913,7 @@ async def invoke_agent_websocket(
             dynamic_mcp_servers = None
             if connector_ids:
                 mcp_servers = db.query(McpServer).filter(McpServer.id.in_(connector_ids)).all()
+                assert_bindable(mcp_servers, user, resource_label="mcp server")
                 dynamic_mcp_servers = []
                 for s in mcp_servers:
                     server_data: dict[str, Any] = {
@@ -1849,7 +1923,10 @@ async def invoke_agent_websocket(
                     }
                     dynamic_mcp_servers.append(server_data)
 
-            # Resolve access token (simplified — reuses same logic as HTTP path)
+            # Runtime bearer for JWT/OAuth-authorized agents, supplied by the
+            # caller. Note this is NOT the Loom session token authenticated
+            # above, and unlike the HTTP path it does not run the full
+            # resolution chain (manual token / credential ID / linked user).
             access_token = data.get("bearer_token")
 
             await websocket.send_json({"type": "session_start", "session_id": session_id})
@@ -1885,6 +1962,10 @@ async def invoke_agent_websocket(
             except Exception as e:
                 logger.error("WebSocket invocation error: %s", e)
                 await websocket.send_json({"type": "error", "content": str(e)})
+
+            # The first frame was consumed for authentication, so the loop
+            # reads the next one here rather than at the top.
+            data = await websocket.receive_json()
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for agent %d", agent_id)
@@ -1950,16 +2031,14 @@ def get_agent_token(
 def list_sessions(
     agent_id: int,
     user_id: Optional[str] = Query(None, description="Filter sessions by user_id"),
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> List[SessionResponse]:
     """List all invocation sessions for an agent with their invocations."""
-    agent = db.query(Agent).filter(Agent.id == agent_id).first()
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agent with ID {agent_id} not found"
-        )
+    # Group check before anything else: this route used to load the Agent by ID
+    # with no check, so any t-admin holding agent:read read every conversation
+    # on every agent regardless of loom:group.
+    get_agent_or_404(agent_id, db, user)
 
     filters = [
         InvocationSession.agent_id == agent_id,
@@ -1992,20 +2071,13 @@ def list_sessions(
 def get_session(
     agent_id: int,
     session_id: str,
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> SessionResponse:
     """Get a specific session with all its invocations."""
-    session = db.query(InvocationSession).filter(
-        InvocationSession.agent_id == agent_id,
-        InvocationSession.session_id == session_id
-    ).first()
-
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {session_id} not found for agent {agent_id}"
-        )
+    # Resolving by UUID used to skip both the group check and any ownership
+    # check, so agent:read was enough to read any conversation anywhere.
+    session = get_session_or_404(agent_id, session_id, db, user)
 
     live_status = compute_live_status(session, db)
     _backfill_idle_costs(session, live_status, db)
@@ -2054,21 +2126,12 @@ def get_invocation(
     agent_id: int,
     session_id: str,
     invocation_id: str,
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> InvocationResponse:
     """Get a specific invocation within a session."""
-    # Look up session first to validate agent_id
-    session = db.query(InvocationSession).filter(
-        InvocationSession.agent_id == agent_id,
-        InvocationSession.session_id == session_id
-    ).first()
-
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {session_id} not found for agent {agent_id}"
-        )
+    # Group + ownership enforced here, same as get_session.
+    session = get_session_or_404(agent_id, session_id, db, user)
 
     # Look up invocation
     invocation = db.query(Invocation).filter(

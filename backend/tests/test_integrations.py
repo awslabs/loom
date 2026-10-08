@@ -61,8 +61,7 @@ class TestIntegrationsRouter(unittest.TestCase):
         Base.metadata.drop_all(bind=self.engine)
         Base.metadata.create_all(bind=self.engine)
 
-    @patch("app.routers.integrations.update_role_policy")
-    def test_create_integration(self, mock_update_policy):
+    def test_create_integration(self):
         """Test creating an integration for an agent."""
         response = self.client.post(
             f"/api/agents/{self.agent.id}/integrations",
@@ -78,10 +77,8 @@ class TestIntegrationsRouter(unittest.TestCase):
         self.assertEqual(data["integration_config"]["bucket"], "my-bucket")
         self.assertTrue(data["enabled"])
         self.assertEqual(data["agent_id"], self.agent.id)
-        mock_update_policy.assert_called_once()
 
-    @patch("app.routers.integrations.update_role_policy")
-    def test_list_integrations(self, mock_update_policy):
+    def test_list_integrations(self):
         """Test listing integrations for an agent."""
         # Create two integrations
         self.client.post(
@@ -101,8 +98,7 @@ class TestIntegrationsRouter(unittest.TestCase):
         self.assertIn("s3", types)
         self.assertIn("bedrock", types)
 
-    @patch("app.routers.integrations.update_role_policy")
-    def test_update_integration_toggle(self, mock_update_policy):
+    def test_update_integration_toggle(self):
         """Test toggling an integration's enabled status."""
         create_resp = self.client.post(
             f"/api/agents/{self.agent.id}/integrations",
@@ -126,8 +122,7 @@ class TestIntegrationsRouter(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["enabled"])
 
-    @patch("app.routers.integrations.update_role_policy")
-    def test_delete_integration(self, mock_update_policy):
+    def test_delete_integration(self):
         """Test deleting an integration."""
         create_resp = self.client.post(
             f"/api/agents/{self.agent.id}/integrations",
@@ -144,19 +139,26 @@ class TestIntegrationsRouter(unittest.TestCase):
         list_resp = self.client.get(f"/api/agents/{self.agent.id}/integrations")
         self.assertEqual(len(list_resp.json()), 0)
 
-    @patch("app.routers.integrations.update_role_policy")
-    def test_integration_updates_iam_policy(self, mock_update_policy):
-        """Test that creating an integration triggers IAM policy update."""
-        self.client.post(
-            f"/api/agents/{self.agent.id}/integrations",
-            json={"integration_type": "dynamodb", "integration_config": {"table_arn": "arn:aws:dynamodb:us-east-1:123:table/t"}},
-        )
-
-        mock_update_policy.assert_called_once()
-        call_kwargs = mock_update_policy.call_args[1]
-        self.assertEqual(call_kwargs["role_name"], "loom-agent-integ-test")
-        self.assertEqual(call_kwargs["region"], "us-east-1")
-        self.assertEqual(call_kwargs["account_id"], "123456789012")
+    def test_integration_does_not_touch_iam(self) -> None:
+        """Integrations used to PutRolePolicy-replace the agent role's inline
+        policy on every change. Loom no longer writes IAM at all, so adding an
+        integration must not reach boto3 — the operator grants the permission
+        on the role themselves, outside Loom.
+        """
+        with patch("boto3.client") as mock_boto:
+            resp = self.client.post(
+                f"/api/agents/{self.agent.id}/integrations",
+                json={
+                    "integration_type": "dynamodb",
+                    "integration_config": {"table_arn": "arn:aws:dynamodb:us-east-1:123:table/t"},
+                },
+            )
+        self.assertEqual(201, resp.status_code)
+        iam_clients = [
+            c for c in mock_boto.call_args_list
+            if c.args and c.args[0] == "iam"
+        ]
+        self.assertEqual([], iam_clients, "integrations must not construct an IAM client")
 
     def test_create_integration_invalid_agent(self):
         """Test creating an integration for a non-existent agent returns 404."""
@@ -166,16 +168,14 @@ class TestIntegrationsRouter(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 404)
 
-    @patch("app.routers.integrations.update_role_policy")
-    def test_delete_nonexistent_integration(self, mock_update_policy):
+    def test_delete_nonexistent_integration(self):
         """Test deleting a non-existent integration returns 404."""
         response = self.client.delete(
             f"/api/agents/{self.agent.id}/integrations/9999"
         )
         self.assertEqual(response.status_code, 404)
 
-    @patch("app.routers.integrations.update_role_policy")
-    def test_update_nonexistent_integration(self, mock_update_policy):
+    def test_update_nonexistent_integration(self):
         """Test updating a non-existent integration returns 404."""
         response = self.client.put(
             f"/api/agents/{self.agent.id}/integrations/9999",

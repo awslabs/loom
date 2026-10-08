@@ -89,7 +89,11 @@ function OnlineEvaluationCard({
   onRefresh: () => void;
   refreshing: boolean;
 }) {
-  const consoleUrl = `https://${region}.console.aws.amazon.com/bedrock-agentcore/evaluations?region=${region}&tab=batch-evaluations`;
+  // region lands in the host label, so it is encoded: an unencoded value like
+  // "evil.com/" would move the host off console.aws.amazon.com. Real region
+  // names contain nothing encodeURIComponent touches.
+  const safeRegion = encodeURIComponent(region);
+  const consoleUrl = `https://${safeRegion}.console.aws.amazon.com/bedrock-agentcore/evaluations?region=${safeRegion}&tab=batch-evaluations`;
 
   if (!source) {
     return (

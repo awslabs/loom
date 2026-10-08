@@ -1,18 +1,94 @@
 # Loom for AWS
 
-Loom for AWS (Loom) is an enterprise-grade platform for building, deploying, and operating AI agents on Amazon Bedrock AgentCore Runtime and AWS Strands Agents. It provides a unified management UI with Cognito-based authentication, scope-based authorization, multi-persona navigation, and full lifecycle management for agents, memory, MCP servers, A2A integrations, and AWS Agent Registry governance.
+[![GitHub stars](https://img.shields.io/github/stars/awslabs/loom?style=flat&logo=github)](https://github.com/awslabs/loom/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/awslabs/loom?style=flat&logo=github)](https://github.com/awslabs/loom/network)
+[![License](https://img.shields.io/github/license/awslabs/loom?style=flat)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/awslabs/loom?style=flat&logo=github)](https://github.com/awslabs/loom/releases)
+
+**The management plane for AI agents on Amazon Bedrock AgentCore.** Deploy, govern, evaluate and cost-track agents across your whole organization from one place.
+
+Amazon Bedrock AgentCore gives you excellent runtime primitives. Turning those primitives into a platform several teams can share is a different job, e.g., IAM execution roles, OAuth2 and on-behalf-of token exchange, credential providers, approval workflows, resource tagging, cost attribution, and observability. Loom owns that wiring so your teams can ship agents faster, knowing they implement security best practices and apply organizational guardrails.
+
+![Loom Platform Catalog](assets/loom_catalog.png)
+
+## Why organizations use Loom
+
+- **Ship agents in minutes, not sprints.** A guided wizard provisions the execution role, credential providers, log groups and tags for you. Bring your own code or deploy a fully managed agent through AgentCore harness with no code at all.
+- **Run many teams in one deployment, safely.** Every resource is owned by a group via a `loom:group` tag, and a two-dimensional authorization model keeps teams to their own agents, memory, integrations and conversations.
+- **Prove an agent works before it ships.** Author a prompt plus a selection of AgentCore's built-in evaluators as a test case, run it against the real agent, and gate on a pass/fail threshold with judge explanations and run history.
+- **Govern what agents can reach.** Opt in to AWS Agent Registry so agents, MCP servers, A2A agents and skills need approval before use, plus human-in-the-loop approval policies for individual tool calls, with a queryable audit trail.
+- **Know what it costs.** Per-invocation token counting and a cost dashboard with per-agent breakdown, so spend is attributable from day one rather than reconstructed later.
+- **Keep your own identity provider.** Federate with Microsoft Entra ID, Okta, or any OIDC provider, and use on-behalf-of delegation (RFC 8693) so agents reach downstream systems with the *user's* permissions, not a shared service identity.
+- **Start on your laptop, deploy when ready.** A three-phase model takes you from local SQLite, to a shared RDS database over an SSM tunnel, to the full stack on ECS Fargate.
+
+**Who it's for:** platform and ML teams standardizing how agents get built and operated across an organization, especially where approvals, access boundaries, identity federation and cost attribution are hard requirements.
+
+## A closer look
+
+**Deploy an agent through a guided wizard.** Five steps behind a jumpable rail: runtime, prompt and models, access, tools and memory, lifecycle and tags with a review step that shows every resolved value before anything is created. Import a manifest by drag-and-drop, file picker, or pasted JSON, and export one back out.
+
+![Guided agent setup wizard](assets/loom_agent_wizard.png)
+
+**Evaluate agents on demand.** Test cases run against the live agent and are scored by AgentCore evaluators, with per-evaluator scores, judge explanations, and PASS/FAIL against a per-test-case threshold. Rescore an existing session without re-invoking the agent. Live-traffic scores from online evaluation configs appear alongside.
+
+![Agent evaluations with per-evaluator scores](assets/loom_agent_evals.png)
+
+**Curate reusable skills with governance.** Author and version skill records, review the rendered SKILL.md or its source, track which agents use a skill, and move it through submit/approve/reject before anyone can attach it. Approved skills fold into an agent's system prompt at deploy time.
+
+![Skill detail with rendered SKILL.md and registry status](assets/loom_skills.png)
+
+## Quick start
+
+Run the whole UI locally with SQLite and no deployed compute. See [DEPLOYMENT.md](DEPLOYMENT.md) for prerequisites and the full guide.
+
+```bash
+git clone https://github.com/awslabs/loom.git && cd loom
+
+# 1. Create the environment files, then fill in shared/etc/common.sh
+#    (AWS profile, region, account, VPC/subnets, bucket names, passwords)
+cp backend/etc/environment.sh.example backend/etc/environment.sh
+cp frontend/etc/environment.sh.example frontend/etc/environment.sh
+cp shared/etc/common.sh.example shared/etc/common.sh
+cp shared/etc/environment.sh.example shared/etc/environment.sh
+touch shared/etc/outputs.sh
+
+# 2. Deploy a Cognito user pool with groups and scopes (~1 min)
+cd shared && make cognito && make outputs && make cognito.set-passwords
+
+# 3. Start the backend — SQLite by default, tables auto-created
+cd ../backend && uv venv .venv && source .venv/bin/activate
+make install && make run
+
+# 4. Start the frontend (in a second terminal)
+cd frontend && make install && make dev
+```
+
+Then open `http://localhost:5173` and sign in as the super admin or one of the demo users, using the passwords you set in `shared/etc/common.sh`.
 
 ## Features
 
-Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to-agent integrations in a unified platform. It handles the complexity of IAM roles, credential providers, authentication flows, and resource tagging — making it simple to deploy agents with full observability and cost tracking from day one.
+Loom weaves together agents, memory, MCP servers, A2A agents, and skills in a unified platform.
 
 ![Loom Features](assets/loom_features.png)
 
+| Area | What you get |
+| --- | --- |
+| **Agents** | Custom code (Strands or Google ADK) or no-code managed agents via AgentCore Harness; VPC egress and PrivateLink ingress; SSE streaming invocation; cold-start measurement |
+| **Models** | Amazon Bedrock, or route per agent through a self-hosted LiteLLM proxy with automatically vended per-agent scoped keys |
+| **Memory** | AgentCore Memory resources with semantic, summary, user-preference, episodic and custom strategies |
+| **Integrations** | MCP servers with tool discovery, and A2A agents with automatic Agent Card fetching — both with OAuth2 and m2m/obo delegation |
+| **Governance** | Opt-in AWS Agent Registry approvals, skills lifecycle, human-in-the-loop tool approval policies, audit trail |
+| **Security** | Cognito or federated OIDC identity, group-based authorization across 22 scopes, OBO token exchange, IAM and credential management |
+| **Quality** | On-demand agent evaluations with AgentCore evaluators, plus live-traffic evaluation results |
+| **Operations** | OpenTelemetry traces with a waterfall timeline, per-agent cost dashboard, token counting, usage analytics |
+
+<details>
+<summary><strong>Full feature list</strong></summary>
+
 ### Agent Lifecycle
 - Deploy new agents or import existing AgentCore Runtime agents
-- Deploy managed agents via AgentCore Harness (no code required) with configurable model parameters, built-in tools (code interpreter, browser), and MCP server integration
-- **VPC-enabled agents:** deploy both custom and managed agents with VPC egress — configure subnets and security groups via named VPC config profiles for private access to VPC-internal resources
-- **PrivateLink ingress:** IaC template (`shared/iac/privatelink.yaml`) provisions an NLB and VPC Endpoint Service for invoking agents from within a VPC
+- Deploy managed agents via AgentCore harness (no code required) with configurable model parameters, built-in tools (code interpreter, browser), and MCP server integration
+- **VPC-enabled agents:** deploy both custom and managed agents with VPC egress, configure subnets and security groups via named VPC config profiles for private access to VPC-internal resources
 - Custom-code agent framework selection: Strands Agents (default) or Google Agent Development Kit (ADK), selectable per agent at deploy time with equivalent config schema, streaming event shapes, telemetry, and integration support
 - SSE streaming invocation with real-time response display
 - Progressive deployment status tracking and async deletion
@@ -22,8 +98,8 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 
 ### Alternate LLM Providers
 - Route an agent's model calls through a self-hosted LiteLLM proxy instead of Amazon Bedrock, selectable per agent (custom or managed/harness deployments)
-- Settings page connection management: enabled toggle, agent/discovery base URLs, write-only master key, live model catalog with per-provider enable/disable and a Refresh button
-- Per-agent scoped virtual keys vended automatically from the proxy — no shared credential is ever stored on an individual agent
+- Settings page connection management: enabled toggle, agent/discovery base URLs, write-only master key, live model catalog with per-provider enable/disable and a refresh button
+- Per-agent scoped virtual keys vended automatically from the proxy, no shared credential is ever stored on an individual agent
 - Dynamic model catalog merging curated static models with live Bedrock availability and the proxy's own reported models, so new proxy-side models appear without a Loom code change
 
 ### Memory Management
@@ -32,7 +108,7 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 
 ### MCP Servers
 - Register and manage MCP servers with tool discovery
-- OAuth2 authentication and credential provider support with delegation mode (m2m or obo)
+- OAuth2 authentication and credential provider support with delegation mode (M2M or OBO)
 - Per-persona access control (all_tools or selected_tools)
 - Resource export/edit system with pencil-to-edit and JSON export
 
@@ -59,7 +135,7 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 ### Security and Access Control
 - Cognito user authentication with automatic token refresh
 - 3rd-party identity provider support: federate with Microsoft Entra ID, Okta, Auth0, or any Generic OIDC provider via Authorization Code + PKCE flow, with configurable group claim mapping to Loom groups and client_type (public/confidential) toggle
-- Two-dimensional group-based authorization: Type groups (t-admin, t-user) for UI view and Resource groups (g-admins-*, g-users-*) for access control (21 scopes total)
+- Two-dimensional group-based authorization: Type groups (t-admin, t-user) for UI view and Resource groups (g-admins-*, g-users-*) for access control (22 scopes total)
 - IAM role, authorizer, and credential management
 - Admin user view switching to preview scoped experiences
 - Human-in-the-loop (HITL) approval policies: configurable policies for tool-level human oversight with four methods — agentic loop hooks, tool context interrupts, MCP elicitation, and harness inline functions
@@ -98,6 +174,8 @@ Loom seamlessly weaves together agents, memory stores, MCP servers, and agent-to
 - Drag-to-reorder cards with persistent ordering
 - JSON import/export on deploy and create forms
 - Two themes (light, dark) with WCAG AA contrast compliance, and timezone-aware timestamps
+
+</details>
 
 ## Project Structure
 

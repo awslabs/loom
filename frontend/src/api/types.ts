@@ -392,19 +392,20 @@ export interface PolicyStatement {
   Sid?: string;
 }
 
+/**
+ * Registers an IAM role that already exists. There is no create mode — Loom
+ * does not provision IAM roles, so the ARN is required.
+ */
 export interface ManagedRoleCreateRequest {
-  mode: "import" | "wizard";
-  role_arn?: string;
-  role_name?: string;
+  role_arn: string;
   role_type?: "agent" | "code_interpreter";
   description?: string;
-  policy_document?: PolicyDocument;
   tags?: Record<string, string>;
 }
 
+/** Only the description is editable; Loom cannot apply a policy change. */
 export interface ManagedRoleUpdateRequest {
   description?: string;
-  policy_document?: PolicyDocument;
 }
 
 export interface CognitoPool {
@@ -465,32 +466,6 @@ export interface AuthorizerConfigUpdateRequest {
   user_client_id?: string;
   user_client_secret?: string;
   user_redirect_uri?: string;
-}
-
-export interface PermissionRequestResponse {
-  id: number;
-  managed_role_id: number;
-  role_name: string | null;
-  role_arn: string | null;
-  requested_actions: string[];
-  requested_resources: string[];
-  justification: string;
-  status: "pending" | "approved" | "denied";
-  reviewer_notes: string | null;
-  created_at: string | null;
-  updated_at: string | null;
-}
-
-export interface PermissionRequestCreateRequest {
-  managed_role_id: number;
-  requested_actions: string[];
-  requested_resources: string[];
-  justification: string;
-}
-
-export interface PermissionRequestReviewRequest {
-  status: "approved" | "denied";
-  reviewer_notes?: string;
 }
 
 // Memory types
@@ -843,6 +818,9 @@ export interface McpServerCreateRequest {
   api_key?: string;
   supports_elicitation?: boolean;
   runtime_endpoint_url?: string;
+  /** Resource tags from a tag profile. Must include loom:group — the API
+   *  rejects a create without it, since authorization is keyed on that tag. */
+  tags?: Record<string, string>;
 }
 
 export interface McpServerUpdateRequest {
@@ -954,6 +932,8 @@ export interface A2aAgentCreateRequest {
   oauth2_scopes?: string;
   delegation_mode?: "m2m" | "obo";
   obo_grant_type?: "JWT_AUTHORIZATION_GRANT" | "TOKEN_EXCHANGE";
+  /** Resource tags from a tag profile. Must include loom:group. */
+  tags?: Record<string, string>;
 }
 
 export interface A2aAgentUpdateRequest {

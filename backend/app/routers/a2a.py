@@ -14,7 +14,14 @@ from sqlalchemy import or_
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.a2a import A2aAgent, A2aAgentSkill, A2aAgentAccess
-from app.routers.utils import check_resource_group_access
+from app.routers.utils import (
+    check_resource_group_access,
+    filter_visible_resources,
+    require_group_tag,
+)
+import os
+from app.services.mcp import resolve_oauth2_client_secret, secret_name_for as a2a_secret_name
+from app.services.secrets import delete_secret, store_secret
 from app.services.a2a import (
     _build_headers,
     _is_agentcore_url,
@@ -42,6 +49,7 @@ class A2aAgentCreateRequest(BaseModel):
     oauth2_scopes: str | None = Field(None, description="OAuth2 scopes (space-separated)")
     delegation_mode: str = Field(default="m2m", description="OAuth2 delegation mode: 'm2m' or 'obo'")
     obo_grant_type: str | None = Field(None, description="OBO grant type: 'JWT_AUTHORIZATION_GRANT' (Entra ID) or 'TOKEN_EXCHANGE' (Okta)")
+    tags: dict[str, str] | None = Field(None, description="Resource tags from a tag profile; must include loom:group")
 
     @model_validator(mode="after")
     def validate_oauth2_fields(self):
@@ -64,6 +72,7 @@ class A2aAgentUpdateRequest(BaseModel):
     oauth2_scopes: str | None = None
     delegation_mode: str | None = None
     obo_grant_type: str | None = None
+    tags: dict[str, str] | None = None
 
 
 class A2aAgentResponse(BaseModel):
@@ -222,15 +231,25 @@ def create_a2a_agent(
         auth_type=request.auth_type,
         oauth2_well_known_url=request.oauth2_well_known_url,
         oauth2_client_id=request.oauth2_client_id,
-        oauth2_client_secret=request.oauth2_client_secret,
+        # oauth2_client_secret goes to Secrets Manager after flush, keyed on id.
         oauth2_scopes=request.oauth2_scopes,
         delegation_mode=request.delegation_mode or "m2m",
         obo_grant_type=request.obo_grant_type,
         agentcore_session_id=str(uuid.uuid4()) if _is_agentcore_url(request.base_url) else None,
         last_fetched_at=datetime.utcnow(),
     )
+    # loom:group is what authorization is keyed on, so require it at creation.
+    agent.set_tags(require_group_tag(request.tags, "A2A agent"))
     db.add(agent)
     db.flush()
+
+    if request.oauth2_client_secret:
+        region = os.getenv("AWS_REGION", "us-east-1")
+        store_secret(
+            a2a_secret_name(agent), request.oauth2_client_secret, region,
+            description=f"OAuth2 client secret for A2A agent {agent.name}",
+        )
+        agent.has_oauth2_secret = "true"
 
     _sync_skills(agent.id, card, db)
 
@@ -249,6 +268,7 @@ def list_a2a_agents(
     if "t-user" in user.groups and "t-admin" not in user.groups:
         query = query.filter(or_(A2aAgent.registry_status == "APPROVED", A2aAgent.registry_status.is_(None)))
     agents = query.order_by(A2aAgent.created_at.desc()).all()
+    agents = filter_visible_resources(agents, user, resource_label="a2a agent")
     return [A2aAgentResponse(**a.to_dict()) for a in agents]
 
 
@@ -272,8 +292,39 @@ def update_a2a_agent(
     agent = _get_agent_or_404(agent_id, db, user)
 
     update_data = request.model_dump(exclude_unset=True)
+    previous_base_url = agent.base_url
+    new_oauth2_secret = update_data.pop("oauth2_client_secret", None)
+    # The column is resource_tags and holds JSON, so tags goes through
+    # set_tags rather than setattr; loom:group stays required.
+    if "tags" in update_data:
+        agent.set_tags(require_group_tag(update_data.pop("tags"), "A2A agent"))
     for field, value in update_data.items():
         setattr(agent, field, value)
+
+    # Same reasoning as the MCP endpoint change: a2a:write is enough to
+    # repoint an agent, and the stored OAuth2 client secret would otherwise be
+    # exchanged against whatever host base_url now names. Clearing it forces
+    # deliberate re-entry. Supplying a new secret in the same request wins.
+    region = os.getenv("AWS_REGION", "us-east-1")
+    if new_oauth2_secret:
+        store_secret(
+            a2a_secret_name(agent), new_oauth2_secret, region,
+            description=f"OAuth2 client secret for A2A agent {agent.name}",
+        )
+        agent.has_oauth2_secret = "true"
+        agent.oauth2_client_secret = None
+    elif agent.base_url != previous_base_url and agent.has_oauth2_secret == "true":
+        try:
+            delete_secret(a2a_secret_name(agent), region)
+        except Exception as e:
+            logger.warning("Failed to delete the OAuth2 client secret for A2A agent %s: %s", agent.id, e)
+        agent.oauth2_client_secret = None
+        agent.has_oauth2_secret = "false"
+        logger.warning(
+            "Cleared the OAuth2 client secret for A2A agent %s: base_url changed "
+            "from %s to %s. Re-enter the secret for the new endpoint.",
+            agent.id, previous_base_url, agent.base_url,
+        )
 
     # Assign AgentCore session ID if base_url changed to an AgentCore endpoint
     if "base_url" in update_data:
@@ -303,6 +354,10 @@ def delete_a2a_agent(
             logger.info("Deleted registry record %s for A2A agent %s", agent.registry_record_id, agent.id)
         except Exception as reg_err:
             logger.warning("Failed to delete registry record for A2A agent %s: %s", agent.id, reg_err)
+    try:
+        delete_secret(a2a_secret_name(agent), os.getenv("AWS_REGION", "us-east-1"))
+    except Exception:
+        pass  # absent for agents with no OAuth2 secret
     result = A2aAgentResponse(**agent.to_dict())
     db.delete(agent)
     db.commit()
@@ -460,7 +515,7 @@ def export_a2a_agent(
     if agent.auth_type == "oauth2":
         data["oauth2_well_known_url"] = agent.oauth2_well_known_url
         data["oauth2_client_id"] = agent.oauth2_client_id
-        data["oauth2_client_secret"] = agent.oauth2_client_secret or None
+        data["oauth2_client_secret"] = resolve_oauth2_client_secret(agent)
         data["oauth2_scopes"] = agent.oauth2_scopes
         data["delegation_mode"] = agent.delegation_mode
     return data

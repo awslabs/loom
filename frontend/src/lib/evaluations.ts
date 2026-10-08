@@ -108,5 +108,8 @@ export function agentLogGroupName(runtimeId: string, qualifier = "DEFAULT"): str
  * group" / 404. */
 export function cloudWatchLogGroupUrl(region: string, logGroupName: string): string {
   const fragmentEncoded = logGroupName.split("/").map(encodeURIComponent).join("$252F");
-  return `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}#logsV2:log-groups/log-group/${fragmentEncoded}`;
+  // region is the leading host label, so encode it too — otherwise a crafted
+  // value moves the link off console.aws.amazon.com.
+  const safeRegion = encodeURIComponent(region);
+  return `https://${safeRegion}.console.aws.amazon.com/cloudwatch/home?region=${safeRegion}#logsV2:log-groups/log-group/${fragmentEncoded}`;
 }

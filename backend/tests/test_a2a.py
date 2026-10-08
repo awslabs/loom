@@ -83,10 +83,14 @@ class TestA2aRouter(unittest.TestCase):
     def _create_agent(self, mock_fetch, **overrides) -> dict:
         mock_fetch.return_value = SAMPLE_AGENT_CARD
         payload = {
+            "tags": {"loom:group": "demo"},
             "base_url": "https://recipe-agent.example.com",
         }
         payload.update(overrides)
-        response = self.client.post("/api/a2a/agents", json=payload)
+        # An OAuth2 client secret now goes to Secrets Manager rather than a
+        # database column, and the suite is offline by design.
+        with patch("app.routers.a2a.store_secret", return_value="arn:aws:secretsmanager:::secret:stub"):
+            response = self.client.post("/api/a2a/agents", json=payload)
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()
 
@@ -127,6 +131,7 @@ class TestA2aRouter(unittest.TestCase):
 
     def test_create_agent_oauth2_missing_well_known(self):
         response = self.client.post("/api/a2a/agents", json={
+            "tags": {"loom:group": "demo"},
             "base_url": "https://example.com",
             "auth_type": "oauth2",
             "oauth2_client_id": "cid",
@@ -137,6 +142,7 @@ class TestA2aRouter(unittest.TestCase):
     def test_create_agent_fetch_fails(self, mock_fetch):
         mock_fetch.side_effect = ValueError("Failed to fetch Agent Card")
         response = self.client.post("/api/a2a/agents", json={
+            "tags": {"loom:group": "demo"},
             "base_url": "https://bad-agent.example.com",
         })
         self.assertEqual(response.status_code, 400)

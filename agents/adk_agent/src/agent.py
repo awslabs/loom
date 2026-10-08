@@ -154,10 +154,22 @@ async def build_agent(
     # require_confirmation callable at construction time instead, but
     # patching uniformly after the fact keeps one code path for all tool
     # kinds and matches how MCP-sourced tools must be handled anyway.
+    #
+    # Attached unconditionally, and the matcher is returned so the handler can
+    # refresh its policies per invocation. This used to be gated on
+    # `if approval_matcher.policies:` with the matcher seeded only from
+    # LOOM_APPROVAL_POLICIES at cold start — an env var deploy never sets. So
+    # the predicate was never attached, the handler had no matcher to update,
+    # and a require_approval policy an operator enabled in the UI silently did
+    # not pause ADK tools, while the same policy did gate Strands agents. The
+    # predicate is a no-op when the matcher holds no policies, so attaching it
+    # always costs nothing and leaves the gate able to turn on later.
     approval_matcher = ApprovalPolicyMatcher()
-    if approval_matcher.policies:
-        apply_confirmation_to_tools(tools, approval_matcher)
-        logger.info("Enabled approval predicates for %d tool(s) with %d static policy(ies)", len(tools), len(approval_matcher.policies))
+    apply_confirmation_to_tools(tools, approval_matcher)
+    logger.info(
+        "Attached approval predicates to %d tool(s) (%d static policy(ies) at build)",
+        len(tools), len(approval_matcher.policies),
+    )
 
     plugins: list[BasePlugin] = [TelemetryPlugin()]
     logger.info("Enabled telemetry plugin")
@@ -176,4 +188,4 @@ async def build_agent(
         tools=tools,
     )
     logger.info("Agent initialized with %d tool(s) and %d plugin(s)", len(tools), len(plugins))
-    return agent, plugins, ci_tools
+    return agent, plugins, ci_tools, approval_matcher

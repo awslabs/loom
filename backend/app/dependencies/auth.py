@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Any
 
-from fastapi import Depends, HTTPException, Request, Security
+from fastapi import Depends, HTTPException, Request, Security, WebSocket
 from fastapi.security import OAuth2AuthorizationCodeBearer, SecurityScopes
 
 from app.services.jwt_validator import validate_cognito_token, validate_token
@@ -28,7 +28,7 @@ def _bypass_auth_enabled() -> bool:
     return os.getenv(LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV, "").strip().lower() in ("1", "true", "yes")
 
 
-def _is_loopback_request(request: Request) -> bool:
+def _is_loopback_request(request: "Request | WebSocket") -> bool:
     client = request.client
     return bool(client) and client.host in _LOOPBACK_HOSTS
 
@@ -44,11 +44,11 @@ _FORWARDING_HEADERS = (
 )
 
 
-def _has_forwarding_headers(request: Request) -> bool:
+def _has_forwarding_headers(request: "Request | WebSocket") -> bool:
     return any(header in request.headers for header in _FORWARDING_HEADERS)
 
 
-def _bypass_allowed_for_request(request: Request) -> bool:
+def _bypass_allowed_for_request(request: "Request | WebSocket") -> bool:
     """Whether the local-dev bypass may even be considered for this request.
 
     ``request.client`` is only as trustworthy as the proxy configuration in
@@ -149,6 +149,7 @@ GROUP_SCOPES: dict[str, list[str]] = {
     # Admin groups (t-admin users - single group only)
     "g-admins-super": [
         "catalog:read", "catalog:write", "agent:read", "agent:write",
+        "session:read",
         "memory:read", "memory:write", "security:read", "security:write",
         "tagging:read", "tagging:write",
         "costs:read", "costs:write",
@@ -157,7 +158,8 @@ GROUP_SCOPES: dict[str, list[str]] = {
         "invoke", "admin:read", "admin:write",
     ],
     "g-admins-demo": [
-        "catalog:read", "agent:read", "agent:write", "memory:read", "memory:write",
+        "catalog:read", "agent:read", "agent:write", "session:read",
+        "memory:read", "memory:write",
         "security:read", "tagging:read", "costs:read", "costs:write",
         "mcp:read", "mcp:write", "a2a:read", "a2a:write",
         "registry:read", "registry:write",
@@ -180,9 +182,16 @@ GROUP_SCOPES: dict[str, list[str]] = {
     ],
 
     # User groups (t-user users - can have multiple)
-    "g-users-demo": ["agent:read", "memory:read", "mcp:read", "invoke"],
-    "g-users-test": ["agent:read", "memory:read", "mcp:read", "invoke"],
-    "g-users-strategics": ["agent:read", "memory:read", "mcp:read", "invoke"],
+    # session:read is held alongside agent:read by everyone who has it today,
+    # so splitting the scope is not a privilege change. The point of the split
+    # is that conversation content (prompts, reasoning, responses, tool inputs)
+    # is far more sensitive than "this agent exists", and now has to be granted
+    # deliberately: the domain admins below (security/memory/mcp/a2a/registry)
+    # hold neither, and a future read-only or audit role can be given
+    # agent:read without handing over every chat transcript.
+    "g-users-demo": ["agent:read", "session:read", "memory:read", "mcp:read", "invoke"],
+    "g-users-test": ["agent:read", "session:read", "memory:read", "mcp:read", "invoke"],
+    "g-users-strategics": ["agent:read", "session:read", "memory:read", "mcp:read", "invoke"],
 }
 
 ALL_SCOPES: set[str] = {s for scopes in GROUP_SCOPES.values() for s in scopes}
@@ -198,6 +207,7 @@ oauth2_scheme = OAuth2AuthorizationCodeBearer(
         "catalog:write": "Write catalog",
         "agent:read": "Read agents",
         "agent:write": "Write agents",
+        "session:read": "Read agent conversations (prompts, reasoning, responses)",
         "memory:read": "Read memory",
         "memory:write": "Write memory",
         "security:read": "Read security",
@@ -318,20 +328,36 @@ def invalidate_idp_cache() -> None:
 # ---------------------------------------------------------------------------
 
 def get_current_user(request: Request) -> UserInfo:
-    """Extract and validate the Bearer token, returning a UserInfo with derived scopes.
+    """FastAPI dependency: validate the request's Bearer token into a UserInfo.
 
-    Checks for an active external IdP first. Falls back to Cognito.
-    In bypass mode (LOOM_COGNITO_USER_POOL_ID not set and no active IdP) returns a
-    user with all scopes, but ONLY when LOOM_ALLOW_UNAUTHENTICATED_LOCAL_DEV is set
-    AND the request arrives from loopback. Fails closed (401) otherwise, since an
-    IdP-less deployment reachable over the network would otherwise be an open
-    admin panel.
+    Only pulls the token out of the header; everything else lives in
+    authenticate_bearer_token so the WebSocket path resolves identity through
+    exactly the same code.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+    return authenticate_bearer_token(token, request)
+
+
+def authenticate_bearer_token(token: str, connection: "Request | WebSocket") -> UserInfo:
+    """Resolve a bearer token to a UserInfo, or raise HTTPException(401).
+
+    Shared by the HTTP dependency above and the invoke WebSocket handler. It is
+    deliberately one implementation: the WebSocket endpoint previously had no
+    authentication at all (CWE-306), and a second copy of this logic is how
+    that kind of gap survives a fix to the first copy.
+
+    ``connection`` only needs ``.headers`` and ``.client``, for the local-dev
+    bypass checks — both Request and WebSocket provide them.
+
+    Checks for an active external IdP first, then falls back to Cognito. In
+    bypass mode (no LOOM_COGNITO_USER_POOL_ID and no active IdP) returns a user
+    with all scopes, but ONLY with the explicit opt-in and a loopback client;
+    fails closed with 401 otherwise, since an IdP-less deployment reachable
+    over the network would otherwise be an open admin panel.
     """
     user_pool_id = os.getenv("LOOM_COGNITO_USER_POOL_ID", "")
     region = os.getenv("LOOM_COGNITO_REGION", os.getenv("AWS_REGION", "us-east-1"))
-
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
 
     # Check for active external IdP
     active_idp = _get_active_idp_cached()
@@ -339,7 +365,7 @@ def get_current_user(request: Request) -> UserInfo:
     # Bypass mode — no Cognito and no external IdP configured. Requires explicit
     # opt-in and a loopback client; otherwise fail closed with 401.
     if not user_pool_id and not active_idp:
-        if _bypass_allowed_for_request(request):
+        if _bypass_allowed_for_request(connection):
             logger.warning("No identity provider configured; bypassing auth for loopback request")
             return UserInfo(
                 sub="local",
@@ -415,12 +441,28 @@ def _build_user_from_external_claims(claims: dict[str, Any], idp: dict) -> UserI
     if isinstance(external_groups, str):
         external_groups = [external_groups]
 
-    # Map external groups to Loom groups
+    # Map external groups to Loom groups. An empty or missing mapping table
+    # means "nothing is authorised yet", never "trust whatever the IdP says":
+    # falling back to the raw claim here handed an external token direct
+    # control over Loom group names, so a caller who could stand up an IdP
+    # (security:write alone) could mint a JWT claiming g-admins-super and
+    # authenticate as full super-admin. _assert_group_mappings_within_caller_scopes
+    # guards the mapping *table*, but an empty table bypassed it entirely by
+    # never putting the group name in the table in the first place.
+    #
+    # _map_external_groups already resolves an empty table to no groups, so the
+    # user still authenticates and simply holds no scopes — every guarded route
+    # returns 403. An IdP configured without mappings is now a visible
+    # misconfiguration instead of a silent grant of everything.
     group_mappings = idp.get("group_mappings", {})
-    if group_mappings:
-        loom_groups = _map_external_groups(external_groups, group_mappings)
-    else:
-        loom_groups = external_groups
+    loom_groups = _map_external_groups(external_groups, group_mappings)
+    if external_groups and not loom_groups:
+        logger.warning(
+            "External IdP %s returned groups %s, none of which are mapped to a Loom "
+            "group; user has no scopes. Configure the provider's group_mappings.",
+            idp.get("id"),
+            external_groups,
+        )
 
     return UserInfo(
         sub=sub,

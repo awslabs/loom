@@ -48,16 +48,40 @@ class SSRFBlockedError(ValueError):
     """Raised when a URL is blocked by outbound SSRF protections."""
 
 
+# "This network" — 0.0.0.0/8. Only 0.0.0.0 itself is `is_unspecified`, so the
+# rest of the block used to pass the always-disallowed check while Linux
+# treats connect() to any 0.0.0.0/8 address as local. That made
+# http://0.0.0.1:<port>/ a working alias for a loopback listener.
+_THIS_NETWORK_V4 = ipaddress.ip_network("0.0.0.0/8")
+
+# The IPv6 instance metadata address. It is a unique-local address, so it is
+# only `is_private` — which the permissive guard level deliberately allows, for
+# VPC-internal MCP servers. It has to be named explicitly, the same way
+# 169.254.169.254 is covered by is_link_local.
+_IMDS_V6 = ipaddress.ip_address("fd00:ec2::254")
+
+
 def _is_always_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if ip must never be reachable, regardless of guard level.
 
-    Covers the cloud metadata address (a link-local address), loopback,
-    other link-local addresses, multicast, reserved, and unspecified — none
-    of which are legitimate targets for either OAuth infrastructure or a
-    user-configured MCP server / A2A agent.
+    Covers both cloud metadata addresses (IPv4 link-local and the IPv6
+    unique-local one), loopback, other link-local addresses, multicast,
+    reserved, unspecified, and the whole of 0.0.0.0/8 — none of which are
+    legitimate targets for either OAuth infrastructure or a user-configured
+    MCP server / A2A agent.
+
+    Deliberately not `is_private`: RFC 1918 and ULA addresses are legitimate
+    targets at the permissive guard level, since the backend runs in private
+    subnets specifically to reach VPC-internal MCP servers and A2A agents.
+    That is why each locally-routable range that is *not* a valid target has
+    to be named here rather than caught by a blanket private check.
     """
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv4Address) and ip in _THIS_NETWORK_V4:
+        return True
+    if ip == _IMDS_V6:
+        return True
     return (
         ip.is_loopback
         or ip.is_link_local

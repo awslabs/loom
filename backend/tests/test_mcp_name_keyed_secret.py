@@ -1,0 +1,484 @@
+"""An MCP server's admin API key must not be reachable by naming collision.
+
+The reported chain (v1.7.4): `POST /api/mcp/servers` never tagged the row,
+`check_resource_group_access` allowed any untagged row, `GET /api/mcp/servers`
+had no group filter, and the admin key lived at
+`loom/mcp/{name}/admin-api-key` — resolved by `name`, a mutable display string
+with no uniqueness constraint. So a caller with `mcp:write` could list another
+group's server, create a row, rename it onto the victim's display name, point
+`endpoint_url` at their own oracle, and `tools/invoke` to have the victim's
+admin key sent there as a Bearer header.
+
+v1.8.5 closed the untagged-create and fail-open legs, but *not this bug*: the
+attacker no longer needs an untagged row, because a row legitimately tagged
+with their own group passes the ownership check and the name collision does
+all the work. The group check gates the row; the vulnerability was in the
+secret's name.
+
+Two fixes, both pinned here. The admin key is keyed on the server id, which is
+server-assigned and immutable, so a rename cannot retarget it. And a name
+already held by another group is refused outright, which is what keeps the
+remaining name-keyed path (per-user keys, embedded in deployed agent config)
+safe.
+"""
+import unittest
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.main import app
+from app.db import Base, get_db
+from app.dependencies.auth import UserInfo, derive_scopes, get_current_user
+from app.models.mcp import McpServer
+from app.services.mcp import (
+    admin_api_key_secret_name,
+    legacy_admin_api_key_secret_name,
+    resolve_api_key,
+)
+
+VICTIM_KEY = "LOOM-MCP-NAME-KEY-WITNESS"
+VICTIM_NAME = "shared"
+
+
+class _FakeVault:
+    """Stands in for Secrets Manager, keyed by secret name."""
+
+    def __init__(self, initial: dict[str, str] | None = None) -> None:
+        self.store: dict[str, str] = dict(initial or {})
+
+    def get(self, name: str, region: str) -> str:
+        if name not in self.store:
+            raise KeyError(f"secret {name} not found")
+        return self.store[name]
+
+    def put(self, name: str, value: str, region: str, description: str = "") -> str:
+        self.store[name] = value
+        return f"arn:aws:secretsmanager:{region}:123456789012:secret:{name}"
+
+    def delete(self, name: str, region: str) -> None:
+        self.store.pop(name, None)
+
+
+class McpSecretTestCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.engine = create_engine(
+            "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+        )
+        Base.metadata.create_all(bind=cls.engine)
+        cls.Session = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    def setUp(self) -> None:
+        self.db = self.Session()
+
+        def override_get_db():
+            try:
+                yield self.db
+            finally:
+                pass
+
+        app.dependency_overrides[get_db] = override_get_db
+        self.client = TestClient(app)
+
+        self.vault = _FakeVault()
+        # Each binding is patched where it is actually looked up: services/mcp
+        # and routers/mcp bind at import time, while two routes import
+        # get_secret inside the function body and so resolve through
+        # services.secrets at call time.
+        for target in (
+            "app.services.mcp.get_secret",
+            "app.services.mcp.store_secret",
+            "app.services.mcp.delete_secret",
+            "app.routers.mcp.store_secret",
+            "app.routers.mcp.delete_secret",
+            "app.services.secrets.get_secret",
+        ):
+            impl = {
+                "get_secret": self.vault.get,
+                "store_secret": self.vault.put,
+                "delete_secret": self.vault.delete,
+            }[target.rsplit(".", 1)[1]]
+            p = patch(target, side_effect=impl)
+            p.start()
+            self.addCleanup(p.stop)
+
+        # The victim: an MCP server owned by the "mcp" group, holding an admin
+        # API key, stored the way a pre-migration deployment would have.
+        self.victim = McpServer(
+            name=VICTIM_NAME, description="victim", endpoint_url="https://victim.internal/mcp",
+            transport_type="streamable_http", auth_type="api_key",
+            api_key_header_name="Authorization", has_admin_api_key="true",
+        )
+        self.victim.set_tags({"loom:group": "mcp"})
+        self.db.add(self.victim)
+        self.db.commit()
+        self.db.refresh(self.victim)
+        self.vault.store[legacy_admin_api_key_secret_name(VICTIM_NAME)] = VICTIM_KEY
+
+    def tearDown(self) -> None:
+        self.db.rollback()
+        self.db.close()
+        Base.metadata.drop_all(bind=self.engine)
+        Base.metadata.create_all(bind=self.engine)
+        app.dependency_overrides.clear()
+
+    def _as(self, groups: list[str]) -> None:
+        user = UserInfo(sub="attacker-sub", username="attacker@example.com",
+                        groups=groups, scopes=derive_scopes(groups))
+        app.dependency_overrides[get_current_user] = lambda: user
+
+    def _create(self, name: str, group: str, endpoint: str = "http://127.0.0.1:18410/oracle"):
+        return self.client.post("/api/mcp/servers", json={
+            "name": name, "description": "attacker", "endpoint_url": endpoint,
+            "transport_type": "streamable_http", "auth_type": "api_key",
+            "api_key": "attacker-own-key",  # nosec B106
+            "api_key_header_name": "Authorization",
+            "tags": {"loom:group": group},
+        })
+
+
+class TestRenameOntoAnotherGroupsName(McpSecretTestCase):
+    def test_cannot_create_a_server_named_like_another_groups(self) -> None:
+        """Leg 4, at the source: the collision itself is refused."""
+        self._as(["t-admin", "g-admins-demo"])
+        resp = self._create(VICTIM_NAME, "demo")
+        self.assertEqual(resp.status_code, 409)
+
+    def test_cannot_rename_onto_another_groups_name(self) -> None:
+        """The reported chain: create legitimately, then rename onto the victim."""
+        self._as(["t-admin", "g-admins-demo"])
+        created = self._create("attacker-own", "demo")
+        self.assertEqual(created.status_code, 201)
+        resp = self.client.put(
+            f"/api/mcp/servers/{created.json()['id']}", json={"name": VICTIM_NAME},
+        )
+        self.assertEqual(resp.status_code, 409)
+
+    def test_admin_key_is_not_reachable_through_a_colliding_name(self) -> None:
+        """Defence in depth: even with a colliding row forced into the database
+        behind the API's back, the id-keyed lookup must not return the victim's
+        key, and the ambiguous legacy name must refuse rather than guess."""
+        attacker = McpServer(
+            name=VICTIM_NAME, description="attacker", endpoint_url="http://127.0.0.1:18410/oracle",
+            transport_type="streamable_http", auth_type="api_key",
+            api_key_header_name="Authorization", has_admin_api_key="true",
+        )
+        attacker.set_tags({"loom:group": "demo"})
+        self.db.add(attacker)
+        self.db.commit()
+        self.db.refresh(attacker)
+
+        resolved = resolve_api_key(attacker, db=self.db)
+        self.assertNotEqual(resolved, VICTIM_KEY)
+        self.assertIsNone(resolved)
+
+    def test_super_admin_also_cannot_make_a_name_ambiguous(self) -> None:
+        """A super-admin gains nothing by colliding, but would break the
+        victim's own lookup, so the rule holds for them too."""
+        self._as(["t-admin", "g-admins-super"])
+        self.assertEqual(self._create(VICTIM_NAME, "demo").status_code, 409)
+
+    # -- positive controls --
+
+    def test_same_group_may_reuse_a_name(self) -> None:
+        """Scoped to the security boundary, not global uniqueness."""
+        self._as(["t-admin", "g-admins-super"])
+        self.assertEqual(self._create(VICTIM_NAME, "mcp").status_code, 201)
+
+    def test_unrelated_name_still_creates(self) -> None:
+        self._as(["t-admin", "g-admins-demo"])
+        self.assertEqual(self._create("attacker-own", "demo").status_code, 201)
+
+    def test_rename_within_the_same_group_still_works(self) -> None:
+        self._as(["t-admin", "g-admins-demo"])
+        created = self._create("attacker-own", "demo")
+        resp = self.client.put(
+            f"/api/mcp/servers/{created.json()['id']}", json={"name": "attacker-renamed"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["name"], "attacker-renamed")
+
+
+class TestAdminKeyIsKeyedOnServerId(McpSecretTestCase):
+    def test_secret_name_format_contains_the_id_and_not_the_name(self) -> None:
+        """Pinned against a literal, deliberately. Asserting with
+        admin_api_key_secret_name() on both sides would pass even if the
+        function stopped keying on the id at all."""
+        self.assertEqual(admin_api_key_secret_name(42), "loom/mcp/42/admin-api-key")
+        self.assertNotEqual(
+            admin_api_key_secret_name(1), admin_api_key_secret_name(2),
+        )
+
+    def test_create_stores_the_key_under_the_server_id(self) -> None:
+        self._as(["t-admin", "g-admins-demo"])
+        created = self._create("attacker-own", "demo")
+        self.assertEqual(created.status_code, 201)
+        server_id = created.json()["id"]
+        self.assertIn(f"loom/mcp/{server_id}/admin-api-key", self.vault.store)
+        self.assertNotIn("loom/mcp/attacker-own/admin-api-key", self.vault.store)
+
+    def test_rename_does_not_move_the_key(self) -> None:
+        """The id-keyed name is stable across a rename, which is the property
+        that makes a rename useless as an attack."""
+        self._as(["t-admin", "g-admins-demo"])
+        created = self._create("attacker-own", "demo")
+        server_id = created.json()["id"]
+        path = f"loom/mcp/{server_id}/admin-api-key"
+        before = self.vault.store[path]
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}", json={"name": "attacker-renamed"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.vault.store[path], before)
+        self.assertNotIn("loom/mcp/attacker-renamed/admin-api-key", self.vault.store)
+
+    def test_legacy_key_is_read_and_migrated_when_the_name_is_unique(self) -> None:
+        """Existing deployments keep working, and self-heal onto the id path."""
+        legacy = legacy_admin_api_key_secret_name(VICTIM_NAME)
+        self.assertIn(legacy, self.vault.store)
+
+        resolved = resolve_api_key(self.victim, db=self.db)
+        self.assertEqual(resolved, VICTIM_KEY)
+        self.assertEqual(
+            self.vault.store[f"loom/mcp/{self.victim.id}/admin-api-key"], VICTIM_KEY,
+        )
+        self.assertNotIn(legacy, self.vault.store)
+
+    def test_legacy_fallback_is_off_without_a_session(self) -> None:
+        """No db means no way to prove the name is unambiguous, so no read."""
+        self.assertIsNone(resolve_api_key(self.victim))
+
+
+class TestListRoutesFilterByGroup(McpSecretTestCase):
+    def test_mcp_list_does_not_leak_another_groups_server(self) -> None:
+        """Leg 2. The listing is where the victim's display name came from."""
+        self._as(["t-admin", "g-admins-demo"])
+        resp = self.client.get("/api/mcp/servers")
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn(VICTIM_NAME, [s["name"] for s in resp.json()])
+
+    def test_connectors_list_does_not_leak_either(self) -> None:
+        self._as(["t-admin", "g-admins-demo"])
+        resp = self.client.get("/api/mcp/servers/connectors")
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn(VICTIM_NAME, [s["name"] for s in resp.json()])
+
+    def test_owning_group_still_sees_its_own_server(self) -> None:
+        self._as(["t-admin", "g-admins-mcp"])
+        names = [s["name"] for s in self.client.get("/api/mcp/servers").json()]
+        self.assertIn(VICTIM_NAME, names)
+
+    def test_super_admin_still_sees_everything(self) -> None:
+        self._as(["t-admin", "g-admins-super"])
+        names = [s["name"] for s in self.client.get("/api/mcp/servers").json()]
+        self.assertIn(VICTIM_NAME, names)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestCredentialsDoNotFollowAMovedEndpoint(McpSecretTestCase):
+    """A credential issued for one host must not follow the record to another.
+
+    The admin API key is keyed on `server.id`, so it survived a change of
+    `endpoint_url` — and `mcp:write` is enough to make that change. Any of
+    test-connection, tools/refresh or tools/invoke then resolves the key and
+    sends it as an `Authorization: Bearer` header to whatever host the URL now
+    names. The key may have been configured by a different admin, and on an
+    OBO invocation the same endpoint receives every invoking user's downstream
+    access token.
+
+    Repointing a server is a legitimate admin action; silently re-aiming its
+    stored credential at the new host is not. Moving the endpoint now clears
+    the key, so it has to be re-entered deliberately.
+    """
+
+    def _server_with_key(self, group: str = "demo"):
+        self._as(["t-admin", "g-admins-demo"])
+        created = self._create("own-server", group, endpoint="https://original.example.com/mcp")
+        self.assertEqual(201, created.status_code)
+        server_id = created.json()["id"]
+        self.assertIn(f"loom/mcp/{server_id}/admin-api-key", self.vault.store)
+        return server_id
+
+    def test_moving_the_endpoint_clears_the_admin_key(self) -> None:
+        server_id = self._server_with_key()
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertNotIn(f"loom/mcp/{server_id}/admin-api-key", self.vault.store)
+        self.assertFalse(resp.json()["has_admin_api_key"])
+
+    def test_resolve_returns_nothing_after_the_move(self) -> None:
+        """The end that matters: nothing is left to send to the new host."""
+        server_id = self._server_with_key()
+        self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        server = self.db.query(McpServer).filter(McpServer.id == server_id).first()
+        self.assertIsNone(resolve_api_key(server, db=self.db))
+
+    def test_moving_the_endpoint_clears_the_oauth_client_secret(self) -> None:
+        self._as(["t-admin", "g-admins-super"])
+        created = self.client.post("/api/mcp/servers", json={  # nosec B105 — placeholder secrets in the payload below
+            "name": "oauth-server", "description": "d",
+            "endpoint_url": "https://original.example.com/mcp",
+            "transport_type": "streamable_http", "auth_type": "oauth2",
+            "oauth2_well_known_url": "https://idp.example.com/.well-known/openid-configuration",
+            "oauth2_client_id": "cid",
+            "oauth2_client_secret": "M2M-SECRET",  # nosec B106
+            "tags": {"loom:group": "demo"},
+        })
+        self.assertEqual(201, created.status_code)
+        server_id = created.json()["id"]
+
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertFalse(resp.json()["has_oauth2_secret"])
+
+    # -- the move must stay usable in one call, and unrelated edits untouched --
+
+    def test_supplying_a_new_key_with_the_move_keeps_it(self) -> None:
+        """Moving a server and giving it the new host's key is one request."""
+        server_id = self._server_with_key()
+        resp = self.client.put(f"/api/mcp/servers/{server_id}", json={
+            "endpoint_url": "https://new-home.example.com/mcp",
+            "api_key": "key-for-the-new-host",  # nosec B106
+        })
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.json()["has_admin_api_key"])
+        self.assertEqual(
+            "key-for-the-new-host",
+            self.vault.store[f"loom/mcp/{server_id}/admin-api-key"],
+        )
+
+    def test_editing_something_else_keeps_the_key(self) -> None:
+        server_id = self._server_with_key()
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}", json={"description": "renamed only"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.json()["has_admin_api_key"])
+        self.assertIn(f"loom/mcp/{server_id}/admin-api-key", self.vault.store)
+
+    def test_rewriting_the_same_endpoint_keeps_the_key(self) -> None:
+        """An idempotent PUT from a UI form must not wipe the credential."""
+        server_id = self._server_with_key()
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://original.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.json()["has_admin_api_key"])
+
+
+class TestOauth2ClientSecretsLiveInSecretsManager(McpSecretTestCase):
+    """The OAuth2 client secret must not be a database column.
+
+    `McpServer.oauth2_client_secret` and `A2aAgent.oauth2_client_secret` were
+    the only secrets in Loom kept in the database rather than Secrets Manager.
+    That made a dump or RDS snapshot directly credential-bearing, left secret
+    reads with no CloudTrail trail, and made the `admin:write` export route a
+    plaintext database read. Every other secret in the system — authorizer and
+    identity-provider client secrets, the LiteLLM master key, MCP admin and
+    per-user API keys — already went to Secrets Manager with only a flag or an
+    ARN persisted.
+    """
+
+    def _create_oauth2_server(self, group: str = "demo", name: str = "oauth-srv"):
+        self._as(["t-admin", "g-admins-super"])
+        resp = self.client.post("/api/mcp/servers", json={  # nosec B105 — placeholder secrets in the payload below
+            "name": name, "description": "d",
+            "endpoint_url": "https://srv.example.com/mcp",
+            "transport_type": "streamable_http", "auth_type": "oauth2",
+            "oauth2_well_known_url": "https://idp.example.com/.well-known/openid-configuration",
+            "oauth2_client_id": "cid",
+            "oauth2_client_secret": "M2M-CLIENT-SECRET",  # nosec B105,B106
+            "tags": {"loom:group": group},
+        })
+        self.assertEqual(201, resp.status_code, resp.text)
+        return resp.json()["id"]
+
+    def test_create_puts_the_secret_in_secrets_manager_not_the_column(self) -> None:
+        server_id = self._create_oauth2_server()
+        self.assertEqual(
+            "M2M-CLIENT-SECRET",
+            self.vault.store[f"loom/mcp/{server_id}/oauth2-client-secret"],
+        )
+        row = self.db.query(McpServer).filter(McpServer.id == server_id).first()
+        self.assertIsNone(
+            row.oauth2_client_secret,
+            "the plaintext column must stay empty — that is the whole point",
+        )
+
+    def test_the_response_still_reports_that_a_secret_exists(self) -> None:
+        """has_oauth2_secret was derived from the column, so it needed a real
+        flag once the column stopped being written."""
+        server_id = self._create_oauth2_server()
+        resp = self.client.get(f"/api/mcp/servers/{server_id}")
+        self.assertTrue(resp.json()["has_oauth2_secret"])
+        self.assertNotIn("M2M-CLIENT-SECRET", resp.text)
+
+    def test_an_unmigrated_row_still_resolves_and_is_migrated(self) -> None:
+        """Existing deployments upgrade without re-entering anything, and the
+        plaintext copy stops existing the first time it is used."""
+        from app.services.mcp import resolve_oauth2_client_secret
+
+        legacy = McpServer(
+            name="legacy-srv", description="d",
+            endpoint_url="https://legacy.example.com/mcp",
+            transport_type="streamable_http", auth_type="oauth2",
+            oauth2_well_known_url="https://idp.example.com/.well-known/openid-configuration",
+            oauth2_client_id="cid",
+            oauth2_client_secret="OLD-PLAINTEXT-SECRET",  # nosec B106
+        )
+        legacy.set_tags({"loom:group": "demo"})
+        self.db.add(legacy)
+        self.db.commit()
+        self.db.refresh(legacy)
+
+        self.assertEqual("OLD-PLAINTEXT-SECRET", resolve_oauth2_client_secret(legacy))
+        self.assertEqual(
+            "OLD-PLAINTEXT-SECRET",
+            self.vault.store[f"loom/mcp/{legacy.id}/oauth2-client-secret"],
+            "resolving an un-migrated row should move it to Secrets Manager",
+        )
+
+    def test_secrets_manager_wins_over_a_stale_column(self) -> None:
+        """If both exist, the authoritative copy is the one in Secrets Manager."""
+        from app.services.mcp import resolve_oauth2_client_secret
+
+        server_id = self._create_oauth2_server()
+        row = self.db.query(McpServer).filter(McpServer.id == server_id).first()
+        row.oauth2_client_secret = "STALE-COLUMN-VALUE"  # nosec B105
+        self.db.commit()
+        self.assertEqual("M2M-CLIENT-SECRET", resolve_oauth2_client_secret(row))
+
+    def test_deleting_the_server_deletes_the_secret(self) -> None:
+        server_id = self._create_oauth2_server()
+        path = f"loom/mcp/{server_id}/oauth2-client-secret"
+        self.assertIn(path, self.vault.store)
+        self.assertEqual(200, self.client.delete(f"/api/mcp/servers/{server_id}").status_code)
+        self.assertNotIn(path, self.vault.store)
+
+    def test_moving_the_endpoint_clears_the_secrets_manager_copy(self) -> None:
+        """The earlier endpoint-move rule has to reach the new location too."""
+        server_id = self._create_oauth2_server()
+        path = f"loom/mcp/{server_id}/oauth2-client-secret"
+        resp = self.client.put(
+            f"/api/mcp/servers/{server_id}",
+            json={"endpoint_url": "https://attacker.example.com/mcp"},
+        )
+        self.assertEqual(200, resp.status_code)
+        self.assertNotIn(path, self.vault.store)
+        self.assertFalse(resp.json()["has_oauth2_secret"])

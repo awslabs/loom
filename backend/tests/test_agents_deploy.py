@@ -72,6 +72,7 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "register",
                 "arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/reg-test",
             },
@@ -86,12 +87,10 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_creates_deploying_record(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test POST /api/agents with source='deploy' creates agent with correct initial state."""
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-new",
@@ -102,7 +101,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "my_deploy_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -122,13 +123,11 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_defaults_to_strands_framework(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """agent_framework defaults to 'strands' when omitted, preserving
         existing behavior for callers that don't know about the new field."""
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-2"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-strands",
@@ -139,7 +138,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "default_framework_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -154,14 +155,12 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_with_adk_framework(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Selecting agent_framework='adk' persists it on the Agent row and
         is passed through to build_agent_artifact so the ADK source
         directory/artifact is built instead of Strands'."""
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-3"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/adk-agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-adk",
@@ -172,7 +171,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "adk_agent_test",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
                 "agent_framework": "adk",
@@ -188,12 +189,10 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_success_updates_status(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test that a successful deployment sets status to 'deployed'."""
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-ok",
@@ -204,7 +203,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "success_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -223,19 +224,19 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_failure_sets_failed_status(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test that deploy failure returns 502 and sets status to 'failed'."""
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.side_effect = Exception("AWS deployment error")
 
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "fail_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -253,12 +254,10 @@ class TestAgentsDeployRouter(unittest.TestCase):
     @patch("app.routers.agents.update_runtime")
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_redeploy_agent(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime, mock_update_runtime
+        self, mock_build_artifact, mock_create_runtime, mock_update_runtime
     ):
         """Test POST /api/agents/{id}/redeploy."""
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-redeploy",
@@ -274,7 +273,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "redeploy_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -310,10 +311,8 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
-    def test_get_config(self, mock_create_role, mock_build_artifact, mock_create_runtime):
+    def test_get_config(self, mock_build_artifact, mock_create_runtime):
         """Test GET /api/agents/{id}/config returns config entries."""
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/cfg-test",
@@ -324,7 +323,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "config_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -340,10 +341,8 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
-    def test_update_config(self, mock_create_role, mock_build_artifact, mock_create_runtime):
+    def test_update_config(self, mock_build_artifact, mock_create_runtime):
         """Test PUT /api/agents/{id}/config updates and adds config entries."""
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/test"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/cfg-up",
@@ -354,7 +353,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "update_config_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -372,16 +373,13 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertEqual(config_map["AGENT_SYSTEM_PROMPT"], "new prompt")
         self.assertEqual(config_map["NEW_KEY"], "added")
 
-    @patch("app.routers.agents.delete_execution_role")
     @patch("app.routers.agents.delete_runtime")
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_delete_deployed_agent_cleans_up(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime, mock_delete_rt, mock_delete_role
+        self, mock_build_artifact, mock_create_runtime, mock_delete_rt
     ):
         """Test that deleting a deployed agent calls AWS cleanup."""
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-del",
@@ -392,7 +390,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "delete_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -404,16 +404,13 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         mock_delete_rt.assert_not_called()
 
-    @patch("app.routers.agents.delete_execution_role")
     @patch("app.routers.agents.delete_runtime")
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_delete_deployed_agent_with_cleanup_aws(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime, mock_delete_rt, mock_delete_role
+        self, mock_build_artifact, mock_create_runtime, mock_delete_rt
     ):
         """Test that deleting a deployed agent with cleanup_aws=true calls AWS cleanup."""
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-pending-1"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-del2",
@@ -424,7 +421,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "delete_agent_cleanup",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -443,7 +442,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
         )
@@ -464,7 +465,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "my-agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -477,7 +480,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "1agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -500,12 +505,10 @@ class TestAgentsDeployRouter(unittest.TestCase):
     @patch("app.routers.agents.get_runtime")
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_status_endpoint_polls_runtime(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime, mock_get_runtime
+        self, mock_build_artifact, mock_create_runtime, mock_get_runtime
     ):
         """Test GET /api/agents/{id}/status polls AWS for runtime status."""
-        mock_create_role.return_value = "arn:aws:iam::123:role/r"
         mock_build_artifact.return_value = ("b", "k")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/rt-status",
@@ -520,7 +523,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "status_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },
@@ -540,13 +545,11 @@ class TestAgentsDeployRouter(unittest.TestCase):
     @patch("app.routers.agents.delete_runtime_endpoint")
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_status_returns_404_when_deleting_agent_runtime_gone(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime,
+        self, mock_build_artifact, mock_create_runtime,
         mock_delete_ep, mock_delete_rt, mock_get_runtime,
     ):
         """Test status endpoint returns 404 and purges agent when DELETING and runtime gone."""
-        mock_create_role.return_value = "arn:aws:iam::123:role/r"
         mock_build_artifact.return_value = ("b", "k")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/rt-del",
@@ -557,7 +560,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "delete_poll_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
             },
@@ -620,9 +625,8 @@ class TestAgentsDeployRouter(unittest.TestCase):
     # -------------------------------------------------------------------
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_with_mcp_servers(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test deploy with MCP server IDs resolves to config."""
         from app.models.mcp import McpServer
@@ -637,7 +641,6 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.session.commit()
         self.session.refresh(server)
 
-        mock_create_role.return_value = "arn:aws:iam::123:role/r"
         mock_build_artifact.return_value = ("b", "k")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/rt-mcp",
@@ -648,7 +651,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "mcp_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
                 "mcp_servers": [server.id],
@@ -671,9 +676,8 @@ class TestAgentsDeployRouter(unittest.TestCase):
     @patch("app.routers.agents.create_oauth2_credential_provider")
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_with_oauth2_mcp_server(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime, mock_create_cp
+        self, mock_build_artifact, mock_create_runtime, mock_create_cp
     ):
         """Test deploy with OAuth2 MCP server creates credential provider."""
         from app.models.mcp import McpServer
@@ -691,7 +695,6 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.session.commit()
         self.session.refresh(server)
 
-        mock_create_role.return_value = "arn:aws:iam::123:role/r"
         mock_build_artifact.return_value = ("b", "k")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/rt-oauth",
@@ -703,7 +706,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "oauth_mcp_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
                 "mcp_servers": [server.id],
@@ -721,16 +726,17 @@ class TestAgentsDeployRouter(unittest.TestCase):
             mcp_configs[0]["auth"]["well_known_endpoint"],
             "http://auth.example.com/.well-known/openid-configuration",
         )
+        # Provider names are keyed on the agent id, so no other group can
+        # derive a name that lands on this provider.
+        expected_cp = f"loom-oauth-mcp-agent-{response.json()['id']}-mcp-oauth-mcp"
         self.assertEqual(
-            mcp_configs[0]["auth"]["credential_provider_name"],
-            "loom-oauth_mcp_agent-mcp-oauth_mcp",
+            mcp_configs[0]["auth"]["credential_provider_name"], expected_cp,
         )
         self.assertEqual(mcp_configs[0]["auth"]["scopes"], "read write")
 
-        # Verify credential provider was created with agent-name-based naming
         mock_create_cp.assert_called_once()
         cp_kwargs = mock_create_cp.call_args[1]
-        self.assertEqual(cp_kwargs["name"], "loom-oauth_mcp_agent-mcp-oauth_mcp")
+        self.assertEqual(cp_kwargs["name"], expected_cp)
         self.assertEqual(cp_kwargs["client_id"], "my-client")
         self.assertEqual(cp_kwargs["client_secret"], "my-test-secret")
         # Empty tags passed when no tag policies configured (filtered in service layer)
@@ -741,7 +747,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "bad_mcp_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
                 "mcp_servers": [9999],
@@ -752,9 +760,8 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_with_mcp_server_auto_grants_access(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test that deploying agent with MCP server that has existing access rules auto-creates access."""
         # Create an MCP server
@@ -779,7 +786,6 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.session.commit()
 
         # Mock deployment services
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-autogrant-test"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-autogrant",
@@ -791,7 +797,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "autogrant_test_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
                 "mcp_servers": [mcp_server.id],
@@ -815,9 +823,8 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_with_mcp_server_no_existing_rules_no_autogrant(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test that deploying agent with MCP server that has NO access rules does not auto-grant."""
         # Create an MCP server WITHOUT any access rules
@@ -832,7 +839,6 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.session.refresh(mcp_server)
 
         # Mock deployment services
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-no-autogrant"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-no-autogrant",
@@ -844,7 +850,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "no_autogrant_test_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
                 "mcp_servers": [mcp_server.id],
@@ -866,9 +874,8 @@ class TestAgentsDeployRouter(unittest.TestCase):
 
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     def test_deploy_agent_with_a2a_agent_auto_grants_access(
-        self, mock_create_role, mock_build_artifact, mock_create_runtime
+        self, mock_build_artifact, mock_create_runtime
     ):
         """Test that deploying agent with A2A agent that has existing access rules auto-creates access."""
         # Create an A2A agent
@@ -894,7 +901,6 @@ class TestAgentsDeployRouter(unittest.TestCase):
         self.session.commit()
 
         # Mock deployment services
-        mock_create_role.return_value = "arn:aws:iam::123456789012:role/loom-agent-a2a-autogrant"
         mock_build_artifact.return_value = ("my-bucket", "artifacts/agent.zip")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rt-a2a-autogrant",
@@ -906,7 +912,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         response = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "a2a_autogrant_test_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6",
                 "a2a_agents": [a2a_agent.id],
@@ -931,10 +939,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
     @patch("app.routers.agents.get_runtime")
     @patch("app.routers.agents.create_runtime")
     @patch("app.routers.agents.build_agent_artifact")
-    @patch("app.routers.agents.create_execution_role")
     @patch("app.services.registry.get_registry_client")
     def test_status_endpoint_auto_registers_agent_in_registry(
-        self, mock_get_reg_client, mock_create_role, mock_build_artifact,
+        self, mock_get_reg_client, mock_build_artifact,
         mock_create_runtime, mock_get_runtime,
     ):
         """Auto-registration on the status poll must call RegistryClient.create_record
@@ -944,7 +951,6 @@ class TestAgentsDeployRouter(unittest.TestCase):
         silently swallowed by the router's broad except, which is what let this
         regress after the AWS Agent Registry GA namespace migration.
         """
-        mock_create_role.return_value = "arn:aws:iam::123:role/r"
         mock_build_artifact.return_value = ("b", "k")
         mock_create_runtime.return_value = {
             "agentRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/rt-reg",
@@ -966,7 +972,9 @@ class TestAgentsDeployRouter(unittest.TestCase):
         create_resp = self.client.post(
             "/api/agents",
             json={
+                "tags": {"loom:group": "demo"},
                 "source": "deploy",
+                "role_arn": "arn:aws:iam::123456789012:role/test-role",
                 "name": "registry_agent",
                 "model_id": "us.anthropic.claude-sonnet-4-6-v1",
             },

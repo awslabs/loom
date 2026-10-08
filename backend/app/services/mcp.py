@@ -12,7 +12,7 @@ from app.services.net_guard import (
     safe_get,
     safe_post,
 )
-from app.services.secrets import get_secret
+from app.services.secrets import delete_secret, get_secret, store_secret
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +20,156 @@ logger = logging.getLogger(__name__)
 MCP_REQUEST_TIMEOUT = 30
 
 
+def admin_api_key_secret_name(server_id: int) -> str:
+    """Secrets Manager name for a server's admin API key.
+
+    Keyed on the server id, which is server-assigned and immutable. It used to
+    be keyed on `server.name` — a mutable display string with no uniqueness
+    constraint — so renaming any row the caller owned onto another group's
+    display name pointed this lookup at that group's secret, and
+    `tools/invoke` then sent it to the caller's own `endpoint_url`.
+    """
+    return f"loom/mcp/{server_id}/admin-api-key"
+
+
+def oauth2_client_secret_name(server_id: int) -> str:
+    """Secrets Manager name for a server's OAuth2 client secret.
+
+    This used to be a plaintext `oauth2_client_secret` column — the only
+    secrets in the system that were not in Secrets Manager. That made a
+    database dump or RDS snapshot directly credential-bearing and left secret
+    reads with no CloudTrail trail. Keyed on the server id for the same reason
+    the admin key is: the id is server-assigned and immutable, so renaming or
+    repointing a row cannot retarget the lookup.
+    """
+    return f"loom/mcp/{server_id}/oauth2-client-secret"
+
+
+def legacy_admin_api_key_secret_name(name: str) -> str:
+    """The pre-migration, name-keyed location. Read-only, and only ever read
+    through `_resolve_legacy_admin_api_key`, which refuses an ambiguous name."""
+    return f"loom/mcp/{name}/admin-api-key"
+
+
+def _resource_label(resource: Any) -> str:
+    """"MCP server 42" / "A2A agent 7" — for logs, in place of a secret path.
+
+    The Secrets Manager name is a deterministic function of this id and the
+    secret kind, so it adds nothing to a log line while looking exactly like a
+    credential. Logging the resource keeps the diagnostic and drops the
+    appearance.
+    """
+    table = getattr(getattr(resource, "__table__", None), "name", "")
+    kind = "A2A agent" if table == "a2a_agents" or hasattr(resource, "base_url") else "MCP server"
+    return f"{kind} {getattr(resource, 'id', '?')}"
+
+
+def resolve_oauth2_client_secret(server: Any) -> str | None:
+    """The OAuth2 client secret for an MCP server or A2A agent.
+
+    Reads Secrets Manager first. Falls back to the row's legacy plaintext
+    column so deployments upgrade without re-entering every secret, and
+    migrates the value across on the way through, so the plaintext copy stops
+    existing the first time it is used. `scripts/migrate_oauth2_secrets.py`
+    does the same thing eagerly for every row.
+    """
+    legacy = getattr(server, "oauth2_client_secret", None)
+    if getattr(server, "id", None) is None:
+        # A detached or stub row — nothing to key a Secrets Manager name on,
+        # so there is only the in-memory value to return.
+        return legacy
+    region = os.getenv("AWS_REGION", "us-east-1")
+    name = secret_name_for(server)
+    try:
+        return get_secret(name, region)
+    except Exception:
+        pass
+    if not legacy:
+        return None
+    try:
+        store_secret(
+            name, legacy, region,
+            description=f"OAuth2 client secret for {_resource_label(server)}",
+        )
+        logger.info(
+            "Migrated the plaintext OAuth2 client secret for %s into Secrets Manager",
+            _resource_label(server),
+        )
+    except Exception as e:
+        logger.warning(
+            "Could not migrate the plaintext OAuth2 client secret for %s: %s",
+            _resource_label(server), e,
+        )
+    return legacy
+
+
+def secret_name_for(resource: Any) -> str:
+    """Dispatch on the row's table so one resolver serves MCP and A2A."""
+    table = getattr(getattr(resource, "__table__", None), "name", "")
+    if not table:
+        table = "a2a_agents" if hasattr(resource, "base_url") else "mcp_servers"
+    if table == "a2a_agents":
+        return f"loom/a2a/{resource.id}/oauth2-client-secret"
+    return oauth2_client_secret_name(resource.id)
+
+
+def user_api_key_secret_name(server_name: str, user_sub: str) -> str:
+    """Secrets Manager name for one user's personal API key for a server.
+
+    Still keyed on the server name, deliberately: this path is embedded in
+    `AGENT_CONFIG_JSON` at deploy time and read by the deployed agent itself,
+    so re-keying it would strip per-user keys from every already-deployed
+    agent until it was redeployed. It is safe to leave name-keyed because
+    cross-group name collisions are now refused at the API boundary (see
+    `_assert_name_available`), and because the trailing `user_sub` confines
+    each entry to the one caller who owns it.
+    """
+    return f"loom/mcp/{server_name}/api-key/{user_sub}"
+
+
+def _resolve_legacy_admin_api_key(server: Any, region: str, db: Any) -> str | None:
+    """Read a pre-migration name-keyed admin key, then migrate it.
+
+    Only safe while the name is unambiguous. A second row sharing the name is
+    exactly how the rename attack aimed this lookup at another group's secret,
+    so an ambiguous name refuses rather than guesses — denying a read is the
+    right failure here. New collisions are refused at the API boundary, so in
+    practice this guard only covers duplicates that predate that check.
+    """
+    from app.models.mcp import McpServer
+
+    same_name = db.query(McpServer).filter(McpServer.name == server.name).count()
+    if same_name > 1:
+        logger.warning(
+            "Refusing to read the legacy admin API key for MCP server %s: "
+            "%d servers share the name %r, so the name does not identify one secret",
+            server.id, same_name, server.name,
+        )
+        return None
+    try:
+        value = get_secret(legacy_admin_api_key_secret_name(server.name), region)
+    except Exception:
+        return None
+    try:
+        store_secret(
+            admin_api_key_secret_name(server.id), value, region,
+            description=f"Admin API key for MCP server {server.name}",
+        )
+        delete_secret(legacy_admin_api_key_secret_name(server.name), region)
+        logger.info(
+            "Migrated the admin API key for MCP server %s from its old "
+            "name-keyed location to the id-keyed one", server.id,
+        )
+    except Exception as e:
+        # The read succeeded, so serve it; migration retries on the next call.
+        logger.warning("Failed to migrate the admin API key for MCP server %s: %s", server.id, e)
+    return value
+
+
 def _get_oauth2_token(server: Any) -> str | None:
     """Exchange OAuth2 client credentials for an access token."""
-    if server.auth_type != "oauth2" or not server.oauth2_client_id or not server.oauth2_client_secret:
+    client_secret = resolve_oauth2_client_secret(server)
+    if server.auth_type != "oauth2" or not server.oauth2_client_id or not client_secret:
         return None
 
     token_url = None
@@ -53,7 +200,7 @@ def _get_oauth2_token(server: Any) -> str | None:
         data: dict[str, str] = {
             "grant_type": "client_credentials",
             "client_id": server.oauth2_client_id,
-            "client_secret": server.oauth2_client_secret,
+            "client_secret": client_secret,
         }
         if server.oauth2_scopes:
             data["scope"] = server.oauth2_scopes
@@ -73,22 +220,30 @@ def _get_oauth2_token(server: Any) -> str | None:
         return None
 
 
-def resolve_api_key(server: Any, user_sub: str | None = None) -> str | None:
-    """Resolve API key from Secrets Manager. Admin key for admin context, user key for user context."""
+def resolve_api_key(server: Any, user_sub: str | None = None, db: Any = None) -> str | None:
+    """Resolve API key from Secrets Manager. Admin key for admin context, user key for user context.
+
+    Pass `db` to allow the one-time read of a pre-migration, name-keyed admin
+    key. Without it the legacy location is not consulted at all, so a caller
+    that cannot prove the name is unambiguous gets nothing rather than
+    possibly another group's secret.
+    """
     if getattr(server, "auth_type", None) != "api_key":
         return None
     region = os.getenv("AWS_REGION", "us-east-1")
     name = getattr(server, "name", "")
     if user_sub:
         try:
-            return get_secret(f"loom/mcp/{name}/api-key/{user_sub}", region)
+            return get_secret(user_api_key_secret_name(name, user_sub), region)
         except Exception:
             return None
     if getattr(server, "has_admin_api_key", None) == "true":
         try:
-            return get_secret(f"loom/mcp/{name}/admin-api-key", region)
+            return get_secret(admin_api_key_secret_name(server.id), region)
         except Exception:
-            return None
+            pass
+        if db is not None:
+            return _resolve_legacy_admin_api_key(server, region, db)
     return None
 
 
@@ -99,7 +254,8 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
     requested_token_use=on_behalf_of. Okta/others use the standard RFC 8693
     token-exchange grant.
     """
-    if not server.oauth2_well_known_url or not server.oauth2_client_id or not server.oauth2_client_secret:
+    client_secret = resolve_oauth2_client_secret(server)
+    if not server.oauth2_well_known_url or not server.oauth2_client_id or not client_secret:
         return None
 
     token_url = None
@@ -150,7 +306,7 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
                 "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
                 "assertion": user_token,
                 "client_id": server.oauth2_client_id,
-                "client_secret": server.oauth2_client_secret,
+                "client_secret": client_secret,
                 "requested_token_use": "on_behalf_of",
             }
             if server.oauth2_scopes:
@@ -169,7 +325,7 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
 
             # Okta: actor identified by Basic Auth credentials
             basic_creds = _b64.b64encode(
-                f"{server.oauth2_client_id}:{server.oauth2_client_secret}".encode()
+                f"{server.oauth2_client_id}:{client_secret}".encode()
             ).decode()
             basic_headers = {
                 "Authorization": f"Basic {basic_creds}",
@@ -197,7 +353,17 @@ def _get_obo_token(server: Any, user_token: str) -> str | None:
                 payload = access_token.split(".")[1]
                 payload += "=" * (4 - len(payload) % 4)
                 claims = json.loads(base64.urlsafe_b64decode(payload))
-                logger.info("OBO token claims: %s", json.dumps({k: v for k, v in claims.items() if k not in ("nonce", "x5t", "xms_cc")}, indent=2))
+                # A named subset, not the whole claim set. Dumping everything
+                # put the invoking user's email/upn/oid/groups into the
+                # backend log at INFO on every OBO exchange — PII and
+                # authorization context on a hot path, for no diagnostic gain
+                # over these fields.
+                logger.info(
+                    "OBO token claims: iss=%s aud=%s cid=%s scp=%s exp=%s",
+                    claims.get("iss"), claims.get("aud"),
+                    claims.get("cid") or claims.get("client_id"),
+                    claims.get("scp"), claims.get("exp"),
+                )
             except Exception:
                 pass
         return access_token

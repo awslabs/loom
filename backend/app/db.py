@@ -67,6 +67,9 @@ def _migrate_add_columns(eng) -> None:
     for any columns that are defined in the ORM but absent from the DB.
     """
     insp = inspect(eng)
+
+    # Added model_id in migrations to update actual schema  to prevent errors/crashes  due to schema mismatch in case of old users
+    
     migrations: list[tuple[str, str, str]] = [
         ("invocations", "prompt_text", "TEXT"),
         ("invocations", "thinking_text", "TEXT"),
@@ -103,8 +106,10 @@ def _migrate_add_columns(eng) -> None:
         ("invocations", "ltm_cost", "REAL"),
         ("invocations", "cost_source", "VARCHAR"),
         ("invocations", "request_id", "VARCHAR"),
+        ("invocations", "model_id", "VARCHAR"), 
         ("invocation_sessions", "user_id", "VARCHAR"),
         ("invocation_sessions", "hidden_at", "DATETIME"),
+        ("invocation_sessions", "groups", "VARCHAR"),
         ("agents", "description", "TEXT"),
         ("mcp_servers", "registry_record_id", "VARCHAR"),
         ("mcp_servers", "registry_status", "VARCHAR"),
@@ -153,6 +158,8 @@ def _migrate_add_columns(eng) -> None:
         ("agents", "agent_framework", "VARCHAR"),
         ("mcp_servers", "tags", "TEXT"),
         ("a2a_agents", "resource_tags", "TEXT"),
+        ("usage_limits", "cached_usage", "FLOAT"),
+        ("usage_limits", "cached_usage_updated_at", "DATETIME"),
         ("evaluation_test_cases", "pass_threshold", "REAL DEFAULT 0.7"),
         ("evaluation_test_cases", "model_id", "VARCHAR"),
     ]

@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Key, Check, X, Shield } from "lucide-react";
+import { Key, Check, X, Shield, OctagonX } from "lucide-react";
 import type { SSETokenInfo } from "@/api/types";
 import { InvokePanel } from "@/components/InvokePanel";
 import { LatencySummary } from "@/components/LatencySummary";
@@ -19,6 +19,7 @@ import { LiveTrafficScores } from "@/components/LiveTrafficScores";
 import { EvaluationRail } from "@/components/EvaluationRail";
 import { getAgentEvaluations } from "@/api/evaluations";
 import type { EvaluationOverviewResponse } from "@/api/types";
+import { AgentKillSwitchCard } from "@/components/AgentKillSwitchCard";
 import { StatusPill } from "@/components/StatusPill";
 import { statusVariant } from "@/lib/status";
 import { useTimezone } from "@/contexts/TimezoneContext";
@@ -45,6 +46,8 @@ interface AgentDetailPageProps {
    * agent:write but hold no registry:read must not see skill names/ids
    * via the attach picker either. */
   canViewSkills?: boolean;
+  /** agent:write — Stop and Resume on the Kill switch card. */
+  canControlKillSwitch?: boolean;
   userGroups?: string[];
   initialTab?: "details" | "invoke";
 }
@@ -61,6 +64,7 @@ export function AgentDetailPage({
   registryReadOnly,
   registryEnabled = false,
   canViewSkills = false,
+  canControlKillSwitch = false,
   userGroups = [],
   initialTab = "details",
 }: AgentDetailPageProps) {
@@ -197,6 +201,7 @@ export function AgentDetailPage({
                 {agent.name ?? agent.runtime_id}
               </h1>
               <StatusPill label={agent.status ?? "UNKNOWN"} variant={statusVariant(agent.status)} />
+              {agent.stopped_at && <StatusPill label="STOPPED" variant="destructive" />}
               {typeLabel && (
                 <span className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[10px] tracking-wide text-muted-foreground">
                   {typeLabel}
@@ -271,6 +276,12 @@ export function AgentDetailPage({
         </div>
 
         <div className="flex flex-col gap-3.5">
+          <AgentKillSwitchCard
+            agentId={agent.id}
+            agentName={agent.name ?? agent.runtime_id ?? String(agent.id)}
+            canControl={canControlKillSwitch}
+            onChanged={onRefreshAgents}
+          />
           <Card className="gap-3.5 py-4">
             <CardContent className="flex flex-col gap-3.5">
               <div className="flex flex-col gap-1">
@@ -376,7 +387,18 @@ export function AgentDetailPage({
 
       {/* Invoke tab: console + run-config/sessions rail */}
       <TabsContent value="invoke" className="space-y-4">
-        {effectiveCanInvoke ? (
+        {agent.stopped_at ? (
+          <Card className="border-destructive/30">
+            <CardContent className="pt-6 pb-6 text-center text-sm text-muted-foreground">
+              <OctagonX className="h-8 w-8 mx-auto mb-2 text-destructive opacity-80" />
+              <p className="text-foreground">This agent is stopped.</p>
+              <p className="text-xs mt-1">
+                Stopped by {agent.stopped_by ?? "an operator"} · {formatTimestamp(agent.stopped_at, timezone)}: {agent.stop_reason}
+              </p>
+              <p className="text-xs mt-1">Resume it from the Kill switch card on the Details tab to invoke it again.</p>
+            </CardContent>
+          </Card>
+        ) : effectiveCanInvoke ? (
           <InvokePanel
             agentId={agent.id}
             agentName={agent.name ?? agent.runtime_id ?? String(agent.id)}

@@ -37,6 +37,7 @@ from app.routers.utils import (
 
 from app.services.agentcore import invoke_agent, invoke_agent_ws
 from app.services.harness import invoke_harness_stream
+from app.services.kill_switch import stopped_message
 from app.services.cloudwatch import (
     get_log_events, get_usage_log_events,
     parse_agent_start_time, parse_agentcore_request_id,
@@ -1432,6 +1433,13 @@ async def invoke_agent_endpoint(
     # place and cannot drift again.
     check_resource_group_access(agent, user, resource_label="agent")
 
+    # Kill switch: a stopped agent is refused here, before any session is
+    # created. The deny policy on its execution role is the real control;
+    # this check spares the caller a doomed round trip.
+    stopped = stopped_message(agent)
+    if stopped:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=stopped)
+
     # Validate runtime model_id if provided
     runtime_model_id: str | None = None
     if request_body.model_id:
@@ -1848,6 +1856,12 @@ async def invoke_agent_websocket(
                            agent_id, user.username)
             await websocket.send_json({"type": "error", "content": str(exc.detail)})
             await websocket.close(code=1008)
+            return
+
+        stopped = stopped_message(agent)
+        if stopped:
+            await websocket.send_json({"type": "error", "content": stopped})
+            await websocket.close()
             return
 
         region = agent.region or os.environ.get("AWS_REGION", "us-east-1")

@@ -83,6 +83,7 @@ frontend/
 │   │   ├── EvaluationRail.tsx # Evaluations tab shell: test cases section + live-traffic section
 │   │   ├── EvaluationTestCases.tsx # Test case authoring, run/rescore, per-evaluator scores with judge explanations, run history
 │   │   ├── LiveTrafficScores.tsx # Read-only AgentCore evaluation sources and their evaluated sessions
+│   │   ├── AgentKillSwitchCard.tsx # Kill switch card on the Details tab: state (incl. drift), Stop/Resume with a required reason, audit history
 │   │   └── ConfirmDialog.tsx  # Shared confirmation dialog (wraps ui/alert-dialog) for destructive actions
 │   ├── pages/
 │   │   ├── AgentListPage.tsx   # Agents persona: registration form + agent grid

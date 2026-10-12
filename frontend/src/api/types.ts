@@ -49,6 +49,10 @@ export interface AgentResponse {
   code_interpreter_status?: string | null;
   vpc_config_id: number | null;
   status_reason?: string | null;
+  /** Kill switch: set while the agent is stopped. */
+  stopped_at?: string | null;
+  stopped_by?: string | null;
+  stop_reason?: string | null;
 }
 
 export interface AgentHarnessDeployRequest {
@@ -1289,4 +1293,64 @@ export interface RunTestCaseResponse {
   batch_evaluation_id: string;
   status: string;
   agent_response: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Agent kill switch
+// ---------------------------------------------------------------------------
+
+/** running: not stopped · stopped: stopped and the runtime's resource policy
+ * holds Loom's deny · stop_not_enforced: Loom records a stop but the deny is
+ * gone · stopped_outside_loom: the deny is present but Loom recorded no stop ·
+ * unknown: the runtime's policy could not be read · unavailable: not an
+ * AgentCore Runtime agent. */
+export type KillSwitchState =
+  | "running"
+  | "stopped"
+  | "stop_not_enforced"
+  | "stopped_outside_loom"
+  | "unknown"
+  | "unavailable";
+
+export interface KillSwitchSessionResult {
+  session_id: string;
+  qualifier: string | null;
+  result: "stopped" | "not_running" | "failed";
+  request_id: string | null;
+  error: string | null;
+}
+
+export interface KillSwitchEvent {
+  id: number;
+  agent_id: number;
+  agent_name: string | null;
+  runtime_arn: string;
+  action: "stop" | "resume";
+  reason: string;
+  actor: string;
+  policy_change: "deny_added" | "already_denied" | "deny_removed" | "already_removed";
+  request_id: string | null;
+  sessions: KillSwitchSessionResult[];
+  created_at: string | null;
+}
+
+export interface KillSwitchStatus {
+  unavailable_reason: string | null;
+  runtime_arn: string | null;
+  state: KillSwitchState;
+  stopped: boolean;
+  stopped_at: string | null;
+  stopped_by: string | null;
+  stop_reason: string | null;
+  deny_present: boolean | null;
+  policy_error: string | null;
+  denied_actions: string[];
+  events: KillSwitchEvent[];
+}
+
+export interface KillSwitchActionResponse {
+  changed: boolean;
+  message: string;
+  status: KillSwitchStatus;
+  event: KillSwitchEvent | null;
 }

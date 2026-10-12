@@ -37,6 +37,7 @@ from app.routers.utils import get_agent_or_404
 from app.services import evaluations as evals
 from app.services.agentcore import invoke_agent
 from app.services.cognito import get_cognito_token
+from app.services.kill_switch import stopped_message
 from app.services.otel import fetch_otel_events
 from app.services.secrets import get_secret
 
@@ -586,6 +587,11 @@ def run_test_case(
     and the caller shouldn't have to hold a connection open for that."""
     agent = get_agent_or_404(agent_id, db, user)
     tc = _get_test_case_or_404(agent_id, test_case_id, db)
+    # Kill switch: a run invokes the agent for real, so a stopped agent is
+    # refused here, before a run is recorded, as on the invoke route.
+    stopped = stopped_message(agent)
+    if stopped:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=stopped)
     if not agent.arn or not agent.runtime_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agent has no runtime to invoke yet")
 

@@ -155,6 +155,12 @@ def _migrate_add_columns(eng) -> None:
         ("a2a_agents", "resource_tags", "TEXT"),
         ("evaluation_test_cases", "pass_threshold", "REAL DEFAULT 0.7"),
         ("evaluation_test_cases", "model_id", "VARCHAR"),
+        # 'on_demand' here labels rows from before modes existed, which were all
+        # scored on-demand; new test cases default to batch (DEFAULT_EVALUATION_MODE).
+        ("evaluation_test_cases", "evaluation_mode", "VARCHAR DEFAULT 'on_demand'"),
+        ("evaluation_runs", "evaluation_mode", "VARCHAR DEFAULT 'on_demand'"),
+        ("evaluation_runs", "batch_job_id", "VARCHAR"),
+        ("evaluation_runs", "batch_job_ids", "TEXT"),
     ]
 
     is_postgres = eng.dialect.name == "postgresql"

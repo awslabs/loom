@@ -10,8 +10,10 @@ Two kinds of source produce results:
 Both write one ``gen_ai.evaluation.result`` log record per evaluator per
 trace, either to a dedicated results log group or back into the log group the
 traces came from (``resultDestination = SOURCE_LOG_GROUP``). This module finds
-the sources that evaluate a given agent and parses their result records. It
-never creates or changes evaluation resources.
+the sources that evaluate a given agent and parses their result records.
+The only evaluation resources it creates are the batch jobs that score Loom's
+own test cases in batch mode (see "Creating evaluations" below); it never
+changes or deletes existing ones.
 
 Scoping rule: a source belongs to an agent when its CloudWatch data source
 reads only that agent's runtime log groups (**exclusive**), or when it names
@@ -30,6 +32,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, NamedTuple
+from uuid import uuid4
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -485,6 +488,10 @@ def parse_result_records(events: Iterable[dict]) -> list[dict]:
             "service_name": record.get("service.name") or resource.get("service.name"),
             "source_arn": attrs.get("aws.bedrock_agentcore.online_evaluation_config.arn")
             or attrs.get("aws.bedrock_agentcore.evaluation_job.arn") or record.get("evaluationJobId"),
+            # Set instead of a score when the session couldn't be evaluated,
+            # e.g. JobProcessorCustomerException / "No spans were found...".
+            "error_type": attrs.get("error.type"),
+            "error_message": attrs.get("error.message"),
         })
     return records
 
@@ -578,21 +585,27 @@ def extract_exchange(events: Iterable[dict]) -> dict[str, str | None]:
 
 
 # ---------------------------------------------------------------------------
-# Creating evaluations (test cases -> on-demand Evaluate calls)
+# Creating evaluations (test cases -> on-demand Evaluate or batch jobs)
 # ---------------------------------------------------------------------------
 #
 # Loom never scores anything itself. Running a test case invokes the agent
-# (producing a real session), downloads that session's OTEL spans from
-# CloudWatch once they're available, and hands them directly to AgentCore's
-# on-demand Evaluate API. This is deliberately not StartBatchEvaluation
-# (used elsewhere in this module for discover_sources/read_results, which
-# cover *existing* AgentCore-managed evaluation sources, not Loom's own test
-# cases): batch evaluation has AgentCore look the session up itself through
-# an internal path that, empirically, times out well before the data it
-# depends on is actually ready — see app/routers/evaluations.py for the
-# full writeup. On-demand evaluation sidesteps that entirely by taking the
-# span data directly, so the only waiting left is Loom's own, which it
-# controls and can simply wait longer on if needed.
+# (producing a real session), waits until that session's spans are queryable
+# in CloudWatch, and then has AgentCore score them in one of two modes:
+#
+# - on-demand: download the spans and pass them to Evaluate, once per
+#   evaluator (run_on_demand_evaluation).
+# - batch: start one StartBatchEvaluation job for the session and read its
+#   per-session results back (run_batch_evaluation).
+#
+# Both modes depend on the same readiness check. A new span can be read from
+# its log stream (GetLogEvents) within seconds, but a Logs Insights query
+# doesn't return it until about two minutes later, and batch evaluation's own
+# session lookup only finds it after that same delay. A batch job started
+# earlier looks once, a few seconds in, and fails with "No spans were found
+# for the session". AWS's batch getting-started guide says to wait 2-3
+# minutes, and the SDK's BatchEvaluationRunner waits 180s by default.
+# wait_for_session_spans polls Logs Insights instead of sleeping for a fixed
+# time, so it waits only as long as the delay actually is.
 
 # Category groupings for the evaluator picker UI. Matches the real
 # Builtin/ThirdParty evaluator IDs ListEvaluators returns in this account —
@@ -680,7 +693,7 @@ EVALUATABLE_SCOPES = frozenset({
 })
 
 
-def _has_evaluatable_span(spans: Iterable[dict[str, Any]]) -> bool:
+def has_evaluatable_span(spans: Iterable[dict[str, Any]]) -> bool:
     """Whether any span carries a scope AgentCore's evaluators can read."""
     return any((s.get("scope") or {}).get("name") in EVALUATABLE_SCOPES for s in spans)
 
@@ -771,17 +784,18 @@ def fetch_session_spans(log_group: str, session_id: str, region: str,
 
 
 def wait_for_session_spans(log_group: str, session_id: str, region: str,
-                           timeout_s: float = 45.0, interval_s: float = 5.0) -> list[dict[str, Any]]:
+                           timeout_s: float = 45.0, interval_s: float = 5.0,
+                           should_stop: Callable[[], bool] | None = None) -> list[dict[str, Any]]:
     """Poll fetch_session_spans with mild exponential backoff until the
     session's spans look like they've finished arriving, or the window
     elapses.
 
-    This is the direct, caller-controlled replacement for AgentCore batch
-    evaluation's internal span lookup — which turned out to give up (after a
-    consistent ~60-65s) sooner than AWS's own documented expectation for how
-    long CloudWatch log propagation can take ("a couple of minutes"). Waiting
-    longer here is safe rather than racing anything, because on-demand
-    evaluation only runs once *we* decide the data has arrived.
+    It polls Logs Insights, not the log stream, on purpose. A stream read
+    sees a new span within seconds, but Logs Insights (and batch
+    evaluation's session lookup, which becomes able to find the session at
+    the same moment) only sees it about two minutes later. So "Logs Insights
+    returns the agent spans" is the signal that both evaluation modes can go
+    ahead; see the "Creating evaluations" note above.
 
     "Available" means stable *and* evaluatable, not just non-empty. A
     session's spans land in CloudWatch incrementally, and not in the order
@@ -803,8 +817,12 @@ def wait_for_session_spans(log_group: str, session_id: str, region: str,
     previous_count = -1
     spans: list[dict[str, Any]] = []
     while True:
+        # A run stopped by its user shouldn't keep polling for up to the full
+        # timeout; the caller sees the stop and doesn't score what's returned.
+        if should_stop is not None and should_stop():
+            return spans
         spans = fetch_session_spans(log_group, session_id, region)
-        if spans and len(spans) == previous_count and _has_evaluatable_span(spans):
+        if spans and len(spans) == previous_count and has_evaluatable_span(spans):
             return spans
         previous_count = len(spans)
         remaining = deadline - time.time()
@@ -860,6 +878,12 @@ def run_on_demand_evaluation(evaluator_ids: list[str], session_spans: list[dict[
                 continue
             per_evaluator.setdefault(result.get("evaluatorId", evaluator_id), []).append(result)
 
+    return _scores_by_evaluator(per_evaluator), errors
+
+
+def _scores_by_evaluator(per_evaluator: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """One score row per evaluator, averaging evaluators that returned several
+    results (one per trace or tool call) — see run_on_demand_evaluation."""
     scores: list[dict[str, Any]] = []
     for eid, results in per_evaluator.items():
         values = [r.get("value") for r in results if isinstance(r.get("value"), (int, float))]
@@ -871,4 +895,287 @@ def run_on_demand_evaluation(evaluator_ids: list[str], session_spans: list[dict[
             "explanation": " ".join(explanations) if len(explanations) > 1 else (explanations[0] if explanations else None),
             "level": None,
         })
-    return scores, errors
+    return scores
+
+
+# Batch mode: one StartBatchEvaluation job per test case run.
+BATCH_MAX_EVALUATORS = 10  # StartBatchEvaluation's documented limit
+# Where batch jobs write per-session results by default. DeleteBatchEvaluation
+# removes the job but leaves its stream here, so Loom deletes that too.
+BATCH_RESULTS_LOG_GROUP = "/aws/bedrock-agentcore/evaluations/batch-evaluations/results/default"
+# Every batch job Loom starts is named with this prefix; cleanup never touches
+# a job without it, whatever ID it is handed.
+LOOM_BATCH_JOB_PREFIX = "loom_"
+_BATCH_TERMINAL_STATUSES = frozenset({"COMPLETED", "COMPLETED_WITH_ERRORS", "FAILED", "STOPPED"})
+# Per-session errors that mean the job's session lookup ran before it could
+# see the session. Seen for jobs started up to ~2 minutes after the agent was
+# invoked; a later job against the same session succeeds.
+_NOT_VISIBLE_YET_MARKERS = (
+    "No spans were found for the session",
+    "No evaluable agent spans found for the session",
+)
+
+
+def session_service_name(spans: Iterable[dict[str, Any]]) -> str | None:
+    """The OTEL ``service.name`` a session's agent spans were emitted under.
+
+    StartBatchEvaluation only considers sessions under the service names it is
+    given. For Loom agents that is the agent's ``OTEL_SERVICE_NAME`` at deploy
+    time, so it is read from the spans rather than derived from the agent.
+    """
+    for span in spans:
+        if (span.get("scope") or {}).get("name") not in EVALUATABLE_SCOPES:
+            continue
+        name = ((span.get("resource") or {}).get("attributes") or {}).get("service.name")
+        if name:
+            return name
+    return None
+
+
+class BatchSession(NamedTuple):
+    """One session to score in a batch job."""
+    session_id: str
+    # Sent as the session's testScenarioId / metadata. AWS accepts them, but
+    # neither GetBatchEvaluation nor the result records return them.
+    scenario_id: str | None = None
+    metadata: dict[str, str] | None = None
+
+
+class SessionOutcome(NamedTuple):
+    """How one session in a batch job was scored."""
+    scores: list[dict[str, Any]]
+    errors: list[str]
+    job_id: str | None  # the job whose result this is
+    job_ids: tuple[str, ...] = ()  # every job the session was part of, including a retried first one
+
+
+def _start_job(client: Any, name: str, evaluator_ids: list[str], service_name: str,
+               log_group: str, sessions: list[BatchSession]) -> str:
+    kwargs: dict[str, Any] = {
+        "batchEvaluationName": name,
+        "evaluators": [{"evaluatorId": e} for e in evaluator_ids],
+        "dataSourceConfig": {"cloudWatchLogs": {
+            "serviceNames": [service_name],
+            # The agent's own log group only, so discover_sources treats the
+            # job as this agent's alone and lists it in the overview.
+            "logGroupNames": [log_group],
+            "filterConfig": {"sessionIds": [s.session_id for s in sessions]},
+        }},
+        "clientToken": str(uuid4()),
+    }
+    session_metadata = [
+        {k: v for k, v in (("sessionId", s.session_id), ("testScenarioId", s.scenario_id),
+                           ("metadata", s.metadata)) if v}
+        for s in sessions if s.scenario_id or s.metadata
+    ]
+    if session_metadata:
+        kwargs["evaluationMetadata"] = {"sessionMetadata": session_metadata}
+    return client.start_batch_evaluation(**kwargs)["batchEvaluationId"]
+
+
+def _stop_job(client: Any, job_id: str) -> None:
+    """Ask AWS to stop a job; one that already finished or vanished is fine."""
+    try:
+        client.stop_batch_evaluation(batchEvaluationId=job_id)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in ("ConflictException", "ResourceNotFoundException"):
+            raise
+
+
+def _wait_for_job(client: Any, job_id: str, timeout_s: float, interval_s: float,
+                  should_stop: Callable[[], bool] | None = None) -> dict[str, Any]:
+    """Poll GetBatchEvaluation until the job ends or ``timeout_s`` passes.
+
+    If ``should_stop`` says so while the job is still running, the job is
+    stopped in AWS and the wait continues until it reports STOPPED.
+    """
+    deadline = time.time() + timeout_s
+    stop_requested = False
+    while True:
+        detail = client.get_batch_evaluation(batchEvaluationId=job_id)
+        if detail.get("status") in _BATCH_TERMINAL_STATUSES or time.time() >= deadline:
+            return detail
+        if not stop_requested and should_stop is not None and should_stop():
+            _stop_job(client, job_id)
+            stop_requested = True
+        time.sleep(interval_s)
+
+
+def _read_job_records(detail: dict[str, Any], region: str,
+                      attempts: int = 6, interval_s: float = 5.0) -> list[dict[str, Any]]:
+    """A finished job's per-session result records.
+
+    The results stream can trail the job's terminal status by a few seconds,
+    so an empty read is retried briefly before being taken as "no results".
+    """
+    location = batch_results_location(detail, SourceScope(True, None, frozenset()))
+    if location is None:
+        return []
+    for attempt in range(attempts):
+        records, _ = read_results(location, region)
+        if records or attempt == attempts - 1:
+            return records
+        time.sleep(interval_s)
+    return []
+
+
+def run_batch_evaluation(evaluator_ids: list[str], sessions: list[BatchSession], service_name: str,
+                         log_group: str, region: str, job_name: str, *,
+                         settle_s: float = 15.0, retry_delay_s: float = 60.0,
+                         job_timeout_s: float = 900.0, poll_interval_s: float = 10.0,
+                         on_job_started: Callable[[str, list[str]], None] | None = None,
+                         should_stop: Callable[[list[str]], bool] | None = None,
+                         ) -> dict[str, SessionOutcome]:
+    """Score several sessions of one agent with a single StartBatchEvaluation job.
+
+    Every session in the job is scored by the same evaluators, so callers
+    group sessions by evaluator set. Call this only once wait_for_session_spans
+    has returned each session's agent spans; ``settle_s`` adds a short margin
+    on top, since Logs Insights and the batch lookup began seeing a session
+    within about three seconds of each other in testing. Sessions the job
+    still reports as not visible yet go into one more job after
+    ``retry_delay_s``; the others keep their first result.
+
+    ``on_job_started(job_id, session_ids)`` is called as each job starts, so
+    the caller can record it while the job runs. ``should_stop(session_ids)``
+    is checked on each poll: when it's true for every session in a job, the
+    job is stopped in AWS (a job shared with a session still wanted keeps
+    running), and stopped sessions aren't retried.
+
+    Returns each session's scores (one row per evaluator, the same shape as
+    run_on_demand_evaluation), errors, and the job that scored it.
+    """
+    client = boto3.client("bedrock-agentcore", region_name=region)
+    outcomes: dict[str, SessionOutcome] = {}
+    jobs_by_session: dict[str, list[str]] = {s.session_id: [] for s in sessions}
+    pending = list(sessions)
+    time.sleep(settle_s)
+    for attempt in (1, 2):
+        ids = [s.session_id for s in pending]
+        job_id: str | None = None
+        if should_stop is not None and should_stop(ids):
+            for i in ids:
+                outcomes[i] = SessionOutcome([], ["Stopped before the batch evaluation started."], None,
+                                             tuple(jobs_by_session[i]))
+            break
+
+        def failed(message: str) -> dict[str, SessionOutcome]:
+            return {**outcomes, **{i: SessionOutcome([], [message], job_id, tuple(jobs_by_session[i]))
+                                   for i in ids}}
+
+        try:
+            job_id = _start_job(client, f"{job_name}_a{attempt}", evaluator_ids, service_name, log_group, pending)
+            for i in ids:
+                jobs_by_session[i].append(job_id)
+            if on_job_started is not None:
+                on_job_started(job_id, ids)
+            detail = _wait_for_job(client, job_id, job_timeout_s, poll_interval_s,
+                                   should_stop=(lambda: should_stop(ids)) if should_stop is not None else None)
+            status = detail.get("status")
+            if status not in _BATCH_TERMINAL_STATUSES:
+                return failed(f"Batch evaluation {job_id} was still {status} after {int(job_timeout_s)}s.")
+            records = _read_job_records(detail, region) if status != "STOPPED" else []
+        except (ClientError, BotoCoreError) as exc:
+            return failed(f"Reading batch evaluation {job_id} failed: {exc}" if job_id
+                          else f"StartBatchEvaluation failed: {exc}")
+
+        by_session: dict[str, tuple[dict[str, list[dict[str, Any]]], list[str]]] = {i: ({}, []) for i in ids}
+        for rec in records:
+            entry = by_session.get(rec.get("session_id") or "")
+            if entry is None:
+                continue
+            per_evaluator, errors = entry
+            if rec.get("error_message"):
+                errors.append(f"{rec.get('error_type') or 'Error'}: {rec['error_message']}")
+            elif rec.get("evaluator") and rec.get("value") is not None:
+                per_evaluator.setdefault(rec["evaluator"], []).append(rec)
+
+        retry: list[BatchSession] = []
+        for session in pending:
+            per_evaluator, errors = by_session[session.session_id]
+            errors = list(dict.fromkeys(errors))
+            if not per_evaluator and not errors:
+                errors = (list(detail.get("errorDetails") or []) if not records else []) or [
+                    f"Batch evaluation {job_id} ended {status} with no result for this session."]
+            not_visible = bool(errors) and all(any(m in e for m in _NOT_VISIBLE_YET_MARKERS) for e in errors)
+            stopped = should_stop is not None and should_stop([session.session_id])
+            if not per_evaluator and not_visible and attempt == 1 and not stopped:
+                retry.append(session)
+                continue
+            outcomes[session.session_id] = SessionOutcome(
+                _scores_by_evaluator(per_evaluator), errors, job_id, tuple(jobs_by_session[session.session_id]))
+        if not retry:
+            break
+        logger.info("Batch evaluation %s could not see %d session(s) yet; retrying in %ss",
+                    job_id, len(retry), retry_delay_s)
+        time.sleep(retry_delay_s)
+        pending = retry
+    return outcomes
+
+
+def delete_batch_jobs(job_ids: Iterable[str], region: str, *,
+                      stop_timeout_s: float = 300.0, poll_interval_s: float = 5.0) -> list[str]:
+    """Delete Loom's batch evaluation jobs and their results streams.
+
+    A job can only be deleted once it has finished, so a running one is
+    stopped first. DeleteBatchEvaluation removes the job but not its
+    ``run-<job id>`` stream in the shared results log group, so that is
+    deleted as well. IDs not starting with ``loom_`` are skipped: only jobs
+    Loom itself started are ever deleted. Jobs already gone count as done.
+    Returns one message per job that couldn't be fully cleaned up.
+    """
+    client = boto3.client("bedrock-agentcore", region_name=region)
+    logs = boto3.client("logs", region_name=region)
+    failures: list[str] = []
+    for job_id in dict.fromkeys(job_ids):
+        if not job_id or not job_id.startswith(LOOM_BATCH_JOB_PREFIX):
+            continue
+        try:
+            detail = client.get_batch_evaluation(batchEvaluationId=job_id)
+            if detail.get("status") in ("PENDING", "IN_PROGRESS"):
+                client.stop_batch_evaluation(batchEvaluationId=job_id)
+            if detail.get("status") not in _BATCH_TERMINAL_STATUSES:
+                detail = _wait_for_job(client, job_id, stop_timeout_s, poll_interval_s)
+            client.delete_batch_evaluation(batchEvaluationId=job_id)
+        except ClientError as exc:
+            if not _is_not_found(exc):
+                failures.append(f"{job_id}: {exc}")
+                continue
+            detail = {}
+        except BotoCoreError as exc:
+            failures.append(f"{job_id}: {exc}")
+            continue
+        output = _output_config(detail)
+        group = output.get("logGroupName") or BATCH_RESULTS_LOG_GROUP
+        stream = output.get("logStreamName") or f"run-{job_id}"
+        if group != BATCH_RESULTS_LOG_GROUP or stream != f"run-{job_id}":
+            continue  # results went somewhere Loom didn't put them; leave them alone
+        try:
+            logs.delete_log_stream(logGroupName=group, logStreamName=stream)
+        except ClientError as exc:
+            if not _is_not_found(exc):
+                failures.append(f"{job_id} results stream: {exc}")
+    for failure in failures:
+        logger.warning("Batch evaluation cleanup: %s", failure)
+    return failures
+
+
+def stop_batch_jobs(job_ids: Iterable[str], region: str) -> list[str]:
+    """Stop Loom's batch jobs that are still running, without waiting.
+
+    Used when a user stops a run. Like delete_batch_jobs, only IDs with
+    Loom's ``loom_`` prefix are touched; finished or vanished jobs are fine.
+    Returns one message per job that couldn't be stopped.
+    """
+    client = boto3.client("bedrock-agentcore", region_name=region)
+    failures: list[str] = []
+    for job_id in dict.fromkeys(job_ids):
+        if not job_id or not job_id.startswith(LOOM_BATCH_JOB_PREFIX):
+            continue
+        try:
+            _stop_job(client, job_id)
+        except (ClientError, BotoCoreError) as exc:
+            failures.append(f"{job_id}: {exc}")
+    for failure in failures:
+        logger.warning("Stopping batch evaluation: %s", failure)
+    return failures

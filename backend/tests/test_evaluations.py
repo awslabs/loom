@@ -26,6 +26,11 @@ SERVICE = "test_agent.DEFAULT"
 TARGET = evals.AgentTarget(frozenset({LOG_GROUP}), frozenset({SERVICE}))
 CFG_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:online-evaluation-config/cfg-1"
 RUN_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:batch-evaluate/run-1"
+ADMIN = UserInfo(sub="u", username="u", groups=["t-admin", "g-admins-super"],
+                 scopes=derive_scopes(["t-admin", "g-admins-super"]))
+# A scoped admin with agent:write, but outside the test agent's loom:group.
+OTHER_GROUP_ADMIN = UserInfo(sub="o", username="o", groups=["t-admin", "g-admins-demo"],
+                             scopes=derive_scopes(["t-admin", "g-admins-demo"]))
 
 
 def _not_found(op: str = "Get") -> ClientError:
@@ -342,8 +347,7 @@ def _span(name: str, scope: str = "strands.telemetry.tracer") -> dict:
 
 
 class TestWaitForSessionSpans(unittest.TestCase):
-    """Caller-controlled replacement for batch evaluation's internal (and
-    apparently too-short) span lookup — retries with mild backoff, and only
+    """The readiness check both evaluation modes wait on — retries with mild backoff, and only
     accepts a result once two consecutive polls see the same span count AND
     at least one span carries a scope AgentCore's evaluators can read (spans
     land incrementally and out of evaluator-relevant order, so a stable
@@ -373,7 +377,7 @@ class TestWaitForSessionSpans(unittest.TestCase):
         ready = early + [_span("invoke_agent Strands Agents")]
         mock_fetch.side_effect = [early, early, ready, ready]
         result = evals.wait_for_session_spans("/g", "s1", "us-east-1", timeout_s=5, interval_s=0.01)
-        self.assertTrue(evals._has_evaluatable_span(result))
+        self.assertTrue(evals.has_evaluatable_span(result))
         self.assertEqual(len(result), 2)
 
     @patch("app.services.evaluations.time.sleep")
@@ -465,6 +469,355 @@ class TestRunOnDemandEvaluation(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
+
+def _batch_detail(job_id: str, status: str = "COMPLETED", error_details=None) -> dict:
+    detail = {
+        "batchEvaluationId": job_id,
+        "batchEvaluationArn": f"arn:aws:bedrock-agentcore:us-east-1:123456789012:batch-evaluate/{job_id}",
+        "status": status,
+        "outputConfig": {"cloudWatchConfig": {
+            "logGroupName": "/aws/bedrock-agentcore/evaluations/batch-evaluations/results/default",
+            "logStreamName": f"run-{job_id}",
+        }},
+    }
+    if error_details:
+        detail["errorDetails"] = error_details
+    return detail
+
+
+def _score_record(evaluator: str, value: float, label: str = "Good", session: str = "s1") -> dict:
+    return {"session_id": session, "evaluator": evaluator, "value": value, "label": label,
+            "explanation": f"{evaluator} reasoning", "error_type": None, "error_message": None}
+
+
+def _error_record(message: str, error_type: str = "JobProcessorCustomerException", session: str = "s1") -> dict:
+    return {"session_id": session, "evaluator": None, "value": None, "label": None, "explanation": None,
+            "error_type": error_type, "error_message": message}
+
+
+NOT_FOUND_YET = ("No spans were found for the session. Verify sessionId and that spans exist in "
+                 "CloudWatch Logs within the configured time range. sessionId=s1")
+NO_AGENT_SPANS_YET = ("No evaluable agent spans found for the session. Verify the agent emits spans "
+                      "from a supported instrumentation scope.")
+
+
+class TestRunBatchEvaluation(unittest.TestCase):
+    """Batch mode: one StartBatchEvaluation job scores several sessions,
+    results are split back out per session, and only the sessions the job
+    couldn't see yet go into a second job."""
+
+    def _client(self, *details: dict) -> MagicMock:
+        client = MagicMock()
+        client.start_batch_evaluation.side_effect = [
+            {"batchEvaluationId": d["batchEvaluationId"]} for d in details
+        ]
+        client.get_batch_evaluation.side_effect = list(details)
+        return client
+
+    def _run(self, client: MagicMock, records_per_job: list, sessions=None, **kwargs):
+        sessions = sessions or [evals.BatchSession("s1")]
+        with patch("boto3.client", return_value=client), \
+             patch("app.services.evaluations.time.sleep") as sleep, \
+             patch("app.services.evaluations.read_results", side_effect=[(r, False) for r in records_per_job]):
+            outcomes = evals.run_batch_evaluation(
+                ["Builtin.Correctness", "Builtin.Helpfulness"], sessions, "test_agent", LOG_GROUP,
+                "us-east-1", "loom_a1_r2_abc123", **kwargs,
+            )
+        return outcomes, sleep
+
+    def test_one_job_scores_every_session_and_splits_results_per_session(self):
+        client = self._client(_batch_detail("job-1"))
+        outcomes, _ = self._run(client, [[
+            _score_record("Builtin.Helpfulness", 0.83, "Very Helpful", session="s1"),
+            _score_record("Builtin.Helpfulness", 0.5, session="s1"),  # second trace, same evaluator
+            _score_record("Builtin.Correctness", 1.0, "Perfectly Correct", session="s1"),
+            _score_record("Builtin.Helpfulness", 0.67, session="s2"),
+            _score_record("Builtin.Correctness", 0.0, "Incorrect", session="s2"),
+        ]], sessions=[evals.BatchSession("s1", "first case", {"loom_test_case_id": "7"}),
+                      evals.BatchSession("s2")])
+        self.assertEqual(client.start_batch_evaluation.call_count, 1)
+        kwargs = client.start_batch_evaluation.call_args.kwargs
+        self.assertEqual(kwargs["batchEvaluationName"], "loom_a1_r2_abc123_a1")
+        self.assertEqual(kwargs["evaluators"], [{"evaluatorId": "Builtin.Correctness"}, {"evaluatorId": "Builtin.Helpfulness"}])
+        self.assertEqual(kwargs["dataSourceConfig"], {"cloudWatchLogs": {
+            "serviceNames": ["test_agent"],
+            "logGroupNames": [LOG_GROUP],
+            "filterConfig": {"sessionIds": ["s1", "s2"]},
+        }})
+        # Only sessions with something to label get a metadata entry.
+        self.assertEqual(kwargs["evaluationMetadata"], {"sessionMetadata": [
+            {"sessionId": "s1", "testScenarioId": "first case", "metadata": {"loom_test_case_id": "7"}},
+        ]})
+        s1 = {sc["evaluator"]: sc for sc in outcomes["s1"].scores}
+        self.assertAlmostEqual(s1["Builtin.Helpfulness"]["value"], (0.83 + 0.5) / 2)
+        self.assertEqual(s1["Builtin.Correctness"]["label"], "Perfectly Correct")
+        s2 = {sc["evaluator"]: sc for sc in outcomes["s2"].scores}
+        self.assertEqual(s2["Builtin.Correctness"]["value"], 0.0)
+        self.assertEqual({o.job_id for o in outcomes.values()}, {"job-1"})
+        self.assertEqual([o.errors for o in outcomes.values()], [[], []])
+
+    def test_no_metadata_is_sent_when_no_session_has_any(self):
+        client = self._client(_batch_detail("job-1"))
+        self._run(client, [[_score_record("Builtin.Helpfulness", 0.83)]])
+        self.assertNotIn("evaluationMetadata", client.start_batch_evaluation.call_args.kwargs)
+
+    def test_only_sessions_not_visible_yet_go_into_a_second_job(self):
+        client = self._client(_batch_detail("job-1", "COMPLETED_WITH_ERRORS"), _batch_detail("job-2"))
+        outcomes, sleep = self._run(client, [
+            [_score_record("Builtin.Helpfulness", 0.83, session="s1"), _error_record(NOT_FOUND_YET, session="s2")],
+            [_score_record("Builtin.Helpfulness", 0.5, session="s2")],
+        ], sessions=[evals.BatchSession("s1"), evals.BatchSession("s2")], retry_delay_s=60.0)
+        self.assertEqual(client.start_batch_evaluation.call_count, 2)
+        second = client.start_batch_evaluation.call_args_list[1].kwargs
+        self.assertEqual(second["batchEvaluationName"], "loom_a1_r2_abc123_a2")
+        self.assertEqual(second["dataSourceConfig"]["cloudWatchLogs"]["filterConfig"], {"sessionIds": ["s2"]})
+        sleep.assert_any_call(60.0)
+        self.assertEqual((outcomes["s1"].job_id, outcomes["s2"].job_id), ("job-1", "job-2"))
+        # The retried session used both jobs; cleanup needs to know about the first one too.
+        self.assertEqual((outcomes["s1"].job_ids, outcomes["s2"].job_ids), (("job-1",), ("job-1", "job-2")))
+        self.assertEqual(outcomes["s2"].scores[0]["value"], 0.5)
+        self.assertEqual(outcomes["s2"].errors, [])
+
+    def test_still_not_visible_after_the_retry_reports_the_session_error(self):
+        client = self._client(_batch_detail("job-1", "FAILED"), _batch_detail("job-2", "FAILED"))
+        outcomes, _ = self._run(client, [[_error_record(NOT_FOUND_YET)], [_error_record(NO_AGENT_SPANS_YET)]])
+        self.assertEqual(client.start_batch_evaluation.call_count, 2)
+        self.assertEqual(outcomes["s1"].scores, [])
+        self.assertEqual(len(outcomes["s1"].errors), 1)
+        self.assertIn("No evaluable agent spans found", outcomes["s1"].errors[0])
+
+    def test_other_session_errors_are_not_retried(self):
+        client = self._client(_batch_detail("job-1", "FAILED"))
+        outcomes, _ = self._run(client, [[_error_record("Evaluator failed", "InternalError")]])
+        self.assertEqual(client.start_batch_evaluation.call_count, 1)
+        self.assertEqual(outcomes["s1"], evals.SessionOutcome([], ["InternalError: Evaluator failed"], "job-1", ("job-1",)))
+
+    def test_partial_results_keep_scores_and_errors_without_retrying(self):
+        client = self._client(_batch_detail("job-1", "COMPLETED_WITH_ERRORS"))
+        outcomes, _ = self._run(client, [[
+            _score_record("Builtin.Helpfulness", 0.83),
+            _error_record("Correctness failed", "EvaluatorError"),
+        ]])
+        self.assertEqual(client.start_batch_evaluation.call_count, 1)
+        self.assertEqual([sc["evaluator"] for sc in outcomes["s1"].scores], ["Builtin.Helpfulness"])
+        self.assertEqual(outcomes["s1"].errors, ["EvaluatorError: Correctness failed"])
+
+    def test_job_with_no_result_records_falls_back_to_its_error_details(self):
+        client = self._client(_batch_detail("job-1", "FAILED", ["Something went wrong."]))
+        outcomes, _ = self._run(client, [[]] * 6)
+        self.assertEqual(outcomes["s1"].errors, ["Something went wrong."])
+
+    def test_session_missing_from_a_job_with_other_results_gets_its_own_error(self):
+        client = self._client(_batch_detail("job-1"))
+        outcomes, _ = self._run(client, [[_score_record("Builtin.Helpfulness", 0.83, session="s1")]],
+                                sessions=[evals.BatchSession("s1"), evals.BatchSession("s2")])
+        self.assertEqual(outcomes["s2"].scores, [])
+        self.assertIn("no result for this session", outcomes["s2"].errors[0])
+
+    def test_job_that_never_finishes_fails_every_session_in_it(self):
+        client = MagicMock()
+        client.start_batch_evaluation.return_value = {"batchEvaluationId": "job-1"}
+        client.get_batch_evaluation.return_value = _batch_detail("job-1", "IN_PROGRESS")
+        with patch("boto3.client", return_value=client), \
+             patch("app.services.evaluations.time.sleep"), \
+             patch("app.services.evaluations.time.time", side_effect=[0.0, 0.0, 1000.0]):
+            outcomes = evals.run_batch_evaluation(
+                ["Builtin.Helpfulness"], [evals.BatchSession("s1"), evals.BatchSession("s2")],
+                "test_agent", LOG_GROUP, "us-east-1", "loom_x", job_timeout_s=900.0,
+            )
+        for sid in ("s1", "s2"):
+            self.assertEqual((outcomes[sid].scores, outcomes[sid].job_id), ([], "job-1"))
+            self.assertIn("still IN_PROGRESS", outcomes[sid].errors[0])
+
+    def test_start_failure_is_an_error_not_an_exception(self):
+        client = MagicMock()
+        client.start_batch_evaluation.side_effect = ClientError(
+            {"Error": {"Code": "ValidationException", "Message": "bad"}}, "StartBatchEvaluation")
+        with patch("boto3.client", return_value=client), patch("app.services.evaluations.time.sleep"):
+            outcomes = evals.run_batch_evaluation(
+                ["Builtin.Helpfulness"], [evals.BatchSession("s1")], "test_agent", LOG_GROUP, "us-east-1", "loom_x")
+        self.assertIsNone(outcomes["s1"].job_id)
+        self.assertIn("StartBatchEvaluation failed", outcomes["s1"].errors[0])
+
+
+class TestDeleteBatchJobs(unittest.TestCase):
+    """Cascading a Loom deletion into AWS: the job, then its results stream."""
+
+    def _clients(self, statuses: dict[str, list[str]]):
+        client = MagicMock()
+        detail_calls: dict[str, int] = {}
+
+        def get(batchEvaluationId):
+            if batchEvaluationId not in statuses:
+                raise _not_found("GetBatchEvaluation")
+            seq = statuses[batchEvaluationId]
+            i = min(detail_calls.get(batchEvaluationId, 0), len(seq) - 1)
+            detail_calls[batchEvaluationId] = i + 1
+            return _batch_detail(batchEvaluationId, seq[i])
+
+        client.get_batch_evaluation.side_effect = get
+        logs = MagicMock()
+        return client, logs
+
+    def _delete(self, client, logs, job_ids):
+        with patch("boto3.client", side_effect=lambda service, **_: logs if service == "logs" else client), \
+             patch("app.services.evaluations.time.sleep"):
+            return evals.delete_batch_jobs(job_ids, "us-east-1")
+
+    def test_finished_job_is_deleted_with_its_results_stream(self):
+        client, logs = self._clients({"loom_a1_r2_x_a1-0123456789": ["COMPLETED"]})
+        failures = self._delete(client, logs, ["loom_a1_r2_x_a1-0123456789"])
+        self.assertEqual(failures, [])
+        client.stop_batch_evaluation.assert_not_called()
+        client.delete_batch_evaluation.assert_called_once_with(batchEvaluationId="loom_a1_r2_x_a1-0123456789")
+        logs.delete_log_stream.assert_called_once_with(
+            logGroupName=evals.BATCH_RESULTS_LOG_GROUP, logStreamName="run-loom_a1_r2_x_a1-0123456789")
+
+    def test_running_job_is_stopped_then_deleted(self):
+        # AWS refuses to delete a job that is still IN_PROGRESS.
+        client, logs = self._clients({"loom_job-1": ["IN_PROGRESS", "STOPPING", "STOPPED"]})
+        failures = self._delete(client, logs, ["loom_job-1"])
+        self.assertEqual(failures, [])
+        client.stop_batch_evaluation.assert_called_once_with(batchEvaluationId="loom_job-1")
+        client.delete_batch_evaluation.assert_called_once_with(batchEvaluationId="loom_job-1")
+
+    def test_job_already_gone_is_not_a_failure(self):
+        client, logs = self._clients({})
+        self.assertEqual(self._delete(client, logs, ["loom_gone-1"]), [])
+        client.delete_batch_evaluation.assert_not_called()
+        logs.delete_log_stream.assert_called_once()  # its stream may still be there
+
+    def test_only_loom_jobs_are_ever_touched(self):
+        client, logs = self._clients({"someone_elses-1": ["COMPLETED"]})
+        self.assertEqual(self._delete(client, logs, ["someone_elses-1", "", None]), [])
+        client.get_batch_evaluation.assert_not_called()
+        client.delete_batch_evaluation.assert_not_called()
+        logs.delete_log_stream.assert_not_called()
+
+    def test_refused_delete_is_reported_and_the_rest_still_go(self):
+        client, logs = self._clients({"loom_a-1": ["COMPLETED"], "loom_b-1": ["COMPLETED"]})
+        client.delete_batch_evaluation.side_effect = [
+            ClientError({"Error": {"Code": "ConflictException", "Message": "busy"}}, "DeleteBatchEvaluation"),
+            {"status": "DELETING"},
+        ]
+        failures = self._delete(client, logs, ["loom_a-1", "loom_b-1"])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("loom_a-1", failures[0])
+        logs.delete_log_stream.assert_called_once_with(
+            logGroupName=evals.BATCH_RESULTS_LOG_GROUP, logStreamName="run-loom_b-1")
+
+    def test_results_written_somewhere_else_are_left_alone(self):
+        client, logs = self._clients({"loom_c-1": ["COMPLETED"]})
+        detail = _batch_detail("loom_c-1")
+        detail["outputConfig"]["cloudWatchConfig"]["logGroupName"] = "/custom/results"
+        client.get_batch_evaluation.side_effect = None
+        client.get_batch_evaluation.return_value = detail
+        self.assertEqual(self._delete(client, logs, ["loom_c-1"]), [])
+        client.delete_batch_evaluation.assert_called_once()
+        logs.delete_log_stream.assert_not_called()
+
+
+class TestStoppingRuns(unittest.TestCase):
+    """A user can stop a run; the waits notice on their next poll."""
+
+    def test_span_wait_returns_without_polling_once_stopped(self):
+        with patch("app.services.evaluations.fetch_session_spans") as mock_fetch:
+            spans = evals.wait_for_session_spans("/g", "s1", "us-east-1", timeout_s=60, should_stop=lambda: True)
+        self.assertEqual(spans, [])
+        mock_fetch.assert_not_called()
+
+    def test_job_wait_stops_the_job_once_then_waits_for_it_to_settle(self):
+        client = MagicMock()
+        client.get_batch_evaluation.side_effect = [
+            _batch_detail("job-1", "IN_PROGRESS"), _batch_detail("job-1", "STOPPING"), _batch_detail("job-1", "STOPPED")]
+        with patch("app.services.evaluations.time.sleep"):
+            detail = evals._wait_for_job(client, "job-1", 900, 1, should_stop=lambda: True)
+        self.assertEqual(detail["status"], "STOPPED")
+        client.stop_batch_evaluation.assert_called_once_with(batchEvaluationId="job-1")
+
+    def test_nothing_is_started_when_every_session_is_already_stopped(self):
+        client = MagicMock()
+        with patch("boto3.client", return_value=client), patch("app.services.evaluations.time.sleep"):
+            outcomes = evals.run_batch_evaluation(
+                ["Builtin.Helpfulness"], [evals.BatchSession("s1")], "svc", LOG_GROUP, "us-east-1", "loom_x",
+                should_stop=lambda ids: True)
+        client.start_batch_evaluation.assert_not_called()
+        self.assertEqual(outcomes["s1"].scores, [])
+        self.assertIn("Stopped", outcomes["s1"].errors[0])
+
+    def test_started_jobs_are_reported_and_a_stopped_session_is_not_retried(self):
+        client = MagicMock()
+        client.start_batch_evaluation.return_value = {"batchEvaluationId": "job-1"}
+        client.get_batch_evaluation.return_value = _batch_detail("job-1", "FAILED")
+        started = []
+        with patch("boto3.client", return_value=client), patch("app.services.evaluations.time.sleep"), \
+             patch("app.services.evaluations.read_results", return_value=([_error_record(NOT_FOUND_YET)], False)):
+            evals.run_batch_evaluation(
+                ["Builtin.Helpfulness"], [evals.BatchSession("s1")], "svc", LOG_GROUP, "us-east-1", "loom_x",
+                on_job_started=lambda job_id, ids: started.append((job_id, ids)),
+                # Stopped after the job started: the not-visible-yet retry is skipped.
+                should_stop=lambda ids: bool(started))
+        self.assertEqual(started, [("job-1", ["s1"])])
+        self.assertEqual(client.start_batch_evaluation.call_count, 1)
+
+    def test_only_sessions_still_wanted_go_into_the_retry(self):
+        client = MagicMock()
+        client.start_batch_evaluation.side_effect = [{"batchEvaluationId": "job-1"}, {"batchEvaluationId": "job-2"}]
+        client.get_batch_evaluation.side_effect = [_batch_detail("job-1", "FAILED"), _batch_detail("job-2")]
+        started = []
+        with patch("boto3.client", return_value=client), patch("app.services.evaluations.time.sleep"), \
+             patch("app.services.evaluations.read_results", side_effect=[
+                 ([_error_record(NOT_FOUND_YET, session="s1"), _error_record(NOT_FOUND_YET, session="s2")], False),
+                 ([_score_record("Builtin.Helpfulness", 0.83, session="s1")], False)]):
+            evals.run_batch_evaluation(
+                ["Builtin.Helpfulness"], [evals.BatchSession("s1"), evals.BatchSession("s2")], "svc", LOG_GROUP,
+                "us-east-1", "loom_x", on_job_started=lambda job_id, ids: started.append(job_id),
+                # s2's run is stopped once the first job has started.
+                should_stop=lambda ids: bool(started) and ids == ["s2"])
+        second = client.start_batch_evaluation.call_args_list[1].kwargs
+        self.assertEqual(second["dataSourceConfig"]["cloudWatchLogs"]["filterConfig"], {"sessionIds": ["s1"]})
+
+    def test_stop_batch_jobs_only_touches_loom_jobs_and_ignores_finished_ones(self):
+        client = MagicMock()
+        client.stop_batch_evaluation.side_effect = [
+            ClientError({"Error": {"Code": "ConflictException", "Message": "already done"}}, "StopBatchEvaluation"),
+            {"status": "STOPPING"},
+        ]
+        with patch("boto3.client", return_value=client):
+            failures = evals.stop_batch_jobs(["loom_done-1", "someone_elses-1", "loom_running-1"], "us-east-1")
+        self.assertEqual(failures, [])
+        self.assertEqual([c.kwargs["batchEvaluationId"] for c in client.stop_batch_evaluation.call_args_list],
+                         ["loom_done-1", "loom_running-1"])
+
+
+class TestSessionServiceName(unittest.TestCase):
+
+    def test_reads_service_name_from_an_evaluatable_span(self):
+        spans = [
+            {"scope": {"name": "opentelemetry.instrumentation.starlette"},
+             "resource": {"attributes": {"service.name": "wrong"}}},
+            {"scope": {"name": "strands.telemetry.tracer"},
+             "resource": {"attributes": {"service.name": "demo_elicitation"}}},
+        ]
+        self.assertEqual(evals.session_service_name(spans), "demo_elicitation")
+
+    def test_none_without_an_evaluatable_span(self):
+        self.assertIsNone(evals.session_service_name([{"scope": {"name": "x"}, "resource": {}}]))
+
+
+class TestBatchErrorRecordParsing(unittest.TestCase):
+
+    def test_session_error_records_carry_their_error_type_and_message(self):
+        event = {"timestamp": 1, "message": json.dumps({
+            "name": "gen_ai.evaluation.result",
+            "attributes": {"session.id": "s1", "error.type": "JobProcessorCustomerException",
+                           "error.message": NOT_FOUND_YET, "error": 1},
+        })}
+        [record] = evals.parse_result_records([event])
+        self.assertEqual(record["error_type"], "JobProcessorCustomerException")
+        self.assertEqual(record["error_message"], NOT_FOUND_YET)
+        self.assertIsNone(record["value"])
+
 
 class TestDiscovery(unittest.TestCase):
 
@@ -756,7 +1109,7 @@ class TestEvaluationTestCases(unittest.TestCase):
         # tests check the final state via last-run, not the /run response
         # body (which is always PENDING, since it's built before the
         # background task starts).
-        self.wait_patcher = patch("app.routers.evaluations.evals.wait_for_session_spans", return_value=[{"name": "invoke_agent"}])
+        self.wait_patcher = patch("app.routers.evaluations.evals.wait_for_session_spans", return_value=[_span("invoke_agent")])
         self.wait_patcher.start()
         self.addCleanup(self.wait_patcher.stop)
 
@@ -788,10 +1141,13 @@ class TestEvaluationTestCases(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: user
 
     def _create_test_case(self, **overrides) -> dict:
+        # Most tests here exercise the on-demand pipeline; batch tests ask for
+        # batch explicitly. The default itself is covered by its own test.
         body = {
             "name": "Greets politely",
             "prompt": "Say hello",
             "evaluator_ids": ["Builtin.Helpfulness"],
+            "evaluation_mode": "on_demand",
         }
         body.update(overrides)
         resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases", json=body)
@@ -1027,7 +1383,8 @@ class TestEvaluationTestCases(unittest.TestCase):
         created = self._create_test_case()
         resp = self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/last-run")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"status": None, "scores": [], "errors": [], "session_id": None})
+        self.assertEqual(resp.json(), {"status": None, "scores": [], "errors": [], "session_id": None,
+                                       "evaluation_mode": None, "batch_job_id": None})
 
     @patch("app.routers.evaluations.invoke_agent")
     def test_last_run_returns_status_and_scores(self, mock_invoke):
@@ -1065,6 +1422,388 @@ class TestEvaluationTestCases(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
+    def test_create_defaults_evaluation_mode_to_batch(self):
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases", json={
+            "name": "n", "prompt": "p", "evaluator_ids": ["Builtin.Helpfulness"],
+        })
+        self.assertEqual(resp.status_code, 201, resp.text)
+        self.assertEqual(resp.json()["evaluation_mode"], "batch")
+
+    def test_create_and_update_evaluation_mode(self):
+        created = self._create_test_case(evaluation_mode="batch")
+        self.assertEqual(created["evaluation_mode"], "batch")
+        resp = self.client.put(
+            f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}",
+            json={"name": "n", "prompt": "p", "evaluator_ids": ["Builtin.Helpfulness"], "evaluation_mode": "on_demand"},
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["evaluation_mode"], "on_demand")
+
+    def test_unknown_evaluation_mode_is_422(self):
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases", json={
+            "name": "n", "prompt": "p", "evaluator_ids": ["Builtin.Helpfulness"], "evaluation_mode": "online",
+        })
+        self.assertEqual(resp.status_code, 422)
+
+    def test_batch_mode_allows_at_most_ten_evaluators(self):
+        eleven = [f"Builtin.E{i}" for i in range(11)]
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases", json={
+            "name": "n", "prompt": "p", "evaluator_ids": eleven, "evaluation_mode": "batch",
+        })
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("at most 10 evaluators", resp.text)
+        # On-demand calls Evaluate once per evaluator, so it has no such limit.
+        self._create_test_case(evaluator_ids=eleven)
+
+    def _batch_outcomes(self, evaluator_ids, sessions, *_args, **_kwargs):
+        """Stand-in for evals.run_batch_evaluation: every session scores 0.83
+        on every evaluator in the job, recorded so tests can see the grouping."""
+        self.batch_jobs.append((tuple(evaluator_ids), [s.session_id for s in sessions], sessions))
+        job_id = f"job-{len(self.batch_jobs)}"
+        return {s.session_id: evals.SessionOutcome(
+            [{"evaluator": e, "value": 0.83, "label": "Very Helpful", "explanation": "ok", "level": None}
+             for e in evaluator_ids], [], job_id) for s in sessions}
+
+    def _agent_spans(self, *_args, **_kwargs) -> list:
+        return [{"scope": {"name": "strands.telemetry.tracer"},
+                 "resource": {"attributes": {"service.name": "test_agent"}}}]
+
+    def _patch_batch_pipeline(self):
+        self.batch_jobs = []
+        # The in-memory test database is one shared connection; run Run all's
+        # and each batch group's work one item at a time so threads don't
+        # interleave on it.
+        for name in ("_RUN_ALL_WORKERS", "_BATCH_WORKERS"):
+            workers = patch(f"app.routers.evaluations.{name}", 1)
+            workers.start()
+            self.addCleanup(workers.stop)
+        self.wait_patcher.stop()
+        self.addCleanup(self.wait_patcher.start)
+        for target, kwargs in (
+            ("app.routers.evaluations.evals.wait_for_session_spans", {"side_effect": self._agent_spans}),
+            ("app.routers.evaluations.evals.run_batch_evaluation", {"side_effect": self._batch_outcomes}),
+            ("app.routers.evaluations.invoke_agent", {"side_effect": lambda **_: iter([{"type": "text", "content": "Hi"}])}),
+            ("app.routers.evaluations.boto3.client", {}),
+        ):
+            patcher = patch(target, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_run_in_batch_mode_scores_with_a_batch_job(self):
+        self._patch_batch_pipeline()
+        with patch("app.routers.evaluations.evals.run_on_demand_evaluation") as mock_on_demand:
+            created = self._create_test_case(evaluation_mode="batch")
+            self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/run")
+        mock_on_demand.assert_not_called()
+        last_run = self.client.get(
+            f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}/last-run").json()
+        self.assertEqual(last_run["status"], "COMPLETED")
+        self.assertEqual(last_run["evaluation_mode"], "batch")
+        self.assertEqual(last_run["batch_job_id"], "job-1")
+        [(evaluator_ids, session_ids, sessions)] = self.batch_jobs
+        self.assertEqual(evaluator_ids, ("Builtin.Helpfulness",))
+        self.assertEqual(session_ids, [last_run["session_id"]])
+        self.assertEqual(sessions[0].scenario_id, "Greets politely")  # labelled with the test case
+        self.assertEqual(sessions[0].metadata, {"loom_test_case_id": str(created["id"])})
+
+    def test_run_all_groups_batch_test_cases_by_evaluator_set(self):
+        self._patch_batch_pipeline()
+        base = f"/api/agents/{self.agent.id}/evaluations/test-cases"
+        same_a = self._create_test_case(name="a", evaluation_mode="batch",
+                                        evaluator_ids=["Builtin.Correctness", "Builtin.Helpfulness"])
+        same_b = self._create_test_case(name="b", evaluation_mode="batch",
+                                        evaluator_ids=["Builtin.Helpfulness", "Builtin.Correctness"])  # same set, other order
+        other = self._create_test_case(name="c", evaluation_mode="batch", evaluator_ids=["Builtin.ToolSelectionAccuracy"])
+        on_demand = self._create_test_case(name="d")
+        with patch("app.routers.evaluations.evals.run_on_demand_evaluation",
+                   return_value=([{"evaluator": "Builtin.Helpfulness", "value": 0.9, "label": None,
+                                   "explanation": None, "level": None}], [])) as mock_on_demand:
+            resp = self.client.post(f"{base}/run-all")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertEqual(body["batch_jobs"], 2)
+        self.assertEqual({r["test_case_id"]: r["evaluation_mode"] for r in body["runs"]}, {
+            same_a["id"]: "batch", same_b["id"]: "batch", other["id"]: "batch", on_demand["id"]: "on_demand"})
+
+        jobs = {evaluator_ids: session_ids for evaluator_ids, session_ids, _ in self.batch_jobs}
+        self.assertEqual(set(jobs), {("Builtin.Correctness", "Builtin.Helpfulness"), ("Builtin.ToolSelectionAccuracy",)})
+        self.assertEqual(len(jobs[("Builtin.Correctness", "Builtin.Helpfulness")]), 2)
+        self.assertEqual(len(jobs[("Builtin.ToolSelectionAccuracy",)]), 1)
+        mock_on_demand.assert_called_once()
+
+        runs = {tc["id"]: self.client.get(f"{base}/{tc['id']}/last-run").json()
+                for tc in (same_a, same_b, other, on_demand)}
+        self.assertTrue(all(r["status"] == "COMPLETED" for r in runs.values()))
+        self.assertEqual(runs[same_a["id"]]["batch_job_id"], runs[same_b["id"]]["batch_job_id"])
+        self.assertNotEqual(runs[same_a["id"]]["batch_job_id"], runs[other["id"]]["batch_job_id"])
+        self.assertIsNone(runs[on_demand["id"]]["batch_job_id"])
+        self.assertEqual(jobs[("Builtin.Correctness", "Builtin.Helpfulness")],
+                         [runs[same_a["id"]]["session_id"], runs[same_b["id"]]["session_id"]])
+
+    def test_run_all_scores_the_ready_sessions_without_the_ones_that_never_became_visible(self):
+        self._patch_batch_pipeline()
+        base = f"/api/agents/{self.agent.id}/evaluations/test-cases"
+        ready = self._create_test_case(name="ready", evaluation_mode="batch")
+        slow = self._create_test_case(name="slow", evaluation_mode="batch")
+        failing = self._create_test_case(name="failing", evaluation_mode="batch")
+        prompts = {"ready": "p-ready", "slow": "p-slow", "failing": "p-failing"}
+        for tc in (ready, slow, failing):
+            self.client.put(f"{base}/{tc['id']}", json={"name": tc["name"], "prompt": prompts[tc["name"]],
+                                                       "evaluator_ids": ["Builtin.Helpfulness"], "evaluation_mode": "batch"})
+        slow_session = {}
+
+        def invoke(**kwargs):
+            if kwargs["prompt"] == "p-failing":
+                raise RuntimeError("runtime unavailable")
+            if kwargs["prompt"] == "p-slow":
+                slow_session["id"] = kwargs["session_id"]
+            return iter([{"type": "text", "content": "Hi"}])
+
+        def spans(_log_group, session_id, *_args, **_kwargs):
+            if session_id == slow_session.get("id"):
+                return [{"scope": {"name": "opentelemetry.instrumentation.starlette"}}]
+            return self._agent_spans()
+
+        with patch("app.routers.evaluations.invoke_agent", side_effect=invoke), \
+             patch("app.routers.evaluations.evals.wait_for_session_spans", side_effect=spans):
+            self.client.post(f"{base}/run-all")
+
+        runs = {tc["name"]: self.client.get(f"{base}/{tc['id']}/last-run").json() for tc in (ready, slow, failing)}
+        self.assertEqual(runs["ready"]["status"], "COMPLETED")
+        self.assertEqual(runs["slow"]["status"], "ERROR")
+        self.assertIn("weren't queryable in CloudWatch", runs["slow"]["errors"][0])
+        self.assertEqual(runs["failing"]["status"], "ERROR")
+        self.assertIn("Failed to invoke agent", runs["failing"]["errors"][0])
+        [(_, session_ids, _)] = self.batch_jobs
+        self.assertEqual(session_ids, [runs["ready"]["session_id"]])
+
+    def test_run_all_needs_write_access_and_a_runtime(self):
+        self._as_read_only_user()
+        self.assertEqual(self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/run-all").status_code, 403)
+        self._as_admin()
+        self.agent.arn = ""  # no deployed runtime to invoke
+        self.session.commit()
+        self.assertEqual(self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/run-all").status_code, 400)
+
+    @patch("app.routers.evaluations.evals.run_on_demand_evaluation",
+           return_value=([{"evaluator": "Builtin.Helpfulness", "value": 0.9, "label": None,
+                           "explanation": None, "level": None}], []))
+    def test_each_run_keeps_the_mode_it_was_scored_with(self, _mock_on_demand):
+        self._patch_batch_pipeline()
+        created = self._create_test_case(evaluation_mode="batch")
+        base = f"/api/agents/{self.agent.id}/evaluations/test-cases/{created['id']}"
+        self.client.post(f"{base}/run")
+        self.client.put(base, json={"name": "n", "prompt": "p", "evaluator_ids": ["Builtin.Helpfulness"],
+                                    "evaluation_mode": "on_demand"})
+        self.client.post(f"{base}/rescore")
+        runs = self.client.get(f"{base}/runs").json()
+        self.assertEqual([r["evaluation_mode"] for r in runs], ["on_demand", "batch"])  # newest first
+
+    def _batch_run(self, tc_id: int, job_ids: list[str]) -> EvaluationRun:
+        run = EvaluationRun(test_case_id=tc_id, session_id=str(len(job_ids)) + "-s", status="COMPLETED",
+                            evaluation_mode="batch", batch_job_id=job_ids[-1])
+        run.set_batch_job_ids(job_ids)
+        self.session.add(run)
+        self.session.commit()
+        return run
+
+    @patch("app.routers.evaluations.evals.delete_batch_jobs")
+    def test_deleting_a_test_case_deletes_its_batch_jobs_but_not_shared_ones(self, mock_delete):
+        a = self._create_test_case(name="a", evaluation_mode="batch")
+        b = self._create_test_case(name="b", evaluation_mode="batch")
+        self._batch_run(a["id"], ["loom_a_retry_a1-1", "loom_a_retry_a2-1"])  # retried: two jobs
+        self._batch_run(a["id"], ["loom_shared_a1-1"])  # a Run all job a shares with b
+        self._batch_run(b["id"], ["loom_shared_a1-1"])
+        resp = self.client.delete(f"/api/agents/{self.agent.id}/evaluations/test-cases/{a['id']}")
+        self.assertEqual(resp.status_code, 204)
+        mock_delete.assert_called_once_with(["loom_a_retry_a1-1", "loom_a_retry_a2-1"], "us-east-1")
+
+        # Once the last test case using the shared job goes, so does the job.
+        mock_delete.reset_mock()
+        self.client.delete(f"/api/agents/{self.agent.id}/evaluations/test-cases/{b['id']}")
+        mock_delete.assert_called_once_with(["loom_shared_a1-1"], "us-east-1")
+
+    def test_deleting_the_agent_deletes_all_its_batch_jobs(self):
+        from app.routers.agents import _delete_agent_background
+        a = self._create_test_case(name="a", evaluation_mode="batch")
+        b = self._create_test_case(name="b", evaluation_mode="batch")
+        self._batch_run(a["id"], ["loom_a_a1-1", "loom_a_a2-1"])
+        self._batch_run(b["id"], ["loom_shared_a1-1"])
+        self._batch_run(a["id"], ["loom_shared_a1-1"])
+        with patch("app.routers.agents.SessionLocal", self.TestingSessionLocal), \
+             patch("app.routers.agents.get_runtime", side_effect=Exception("gone")), \
+             patch("app.services.evaluations.delete_batch_jobs") as mock_delete:
+            _delete_agent_background(self.agent.id, self.agent.runtime_id, "us-east-1")
+        mock_delete.assert_called_once_with(["loom_a_a1-1", "loom_a_a2-1", "loom_shared_a1-1"], "us-east-1")
+
+    @patch("app.routers.evaluations.evals.delete_batch_jobs")
+    def test_deleting_an_on_demand_test_case_touches_nothing_in_aws(self, mock_delete):
+        tc = self._create_test_case()
+        self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc['id']}/run")
+        self.client.delete(f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc['id']}")
+        mock_delete.assert_not_called()
+
+    def test_a_test_case_deleted_mid_run_does_not_break_its_group_and_its_job_is_deleted(self):
+        self._patch_batch_pipeline()
+        base = f"/api/agents/{self.agent.id}/evaluations/test-cases"
+        keep = self._create_test_case(name="keep", evaluation_mode="batch")
+        shares = self._create_test_case(name="shares", evaluation_mode="batch")  # same evaluators as keep
+        alone = self._create_test_case(name="alone", evaluation_mode="batch",
+                                       evaluator_ids=["Builtin.ToolSelectionAccuracy"])
+        doomed = {shares["id"], alone["id"]}
+
+        def jobs_then_delete(evaluator_ids, sessions, *args, **kwargs):
+            outcomes = self._batch_outcomes(evaluator_ids, sessions, *args, **kwargs)
+            # Both test cases are deleted while their jobs run.
+            self.session.query(EvaluationTestCase).filter(EvaluationTestCase.id.in_(doomed)).delete(
+                synchronize_session=False)
+            self.session.commit()
+            return {sid: o._replace(job_ids=(o.job_id,)) for sid, o in outcomes.items()}
+
+        with patch("app.routers.evaluations.evals.run_batch_evaluation", side_effect=jobs_then_delete), \
+             patch("app.routers.evaluations.evals.delete_batch_jobs") as mock_delete:
+            self.client.post(f"{base}/run-all")
+
+        kept = self.client.get(f"{base}/{keep['id']}/last-run").json()
+        self.assertEqual(kept["status"], "COMPLETED")
+        # The job "keep" shares stays; the one only "alone" used is deleted.
+        alone_job = next(f"job-{i + 1}" for i, (ev, _, _) in enumerate(self.batch_jobs)
+                         if ev == ("Builtin.ToolSelectionAccuracy",))
+        mock_delete.assert_called_once_with([alone_job], "us-east-1")
+        self.assertNotEqual(kept["batch_job_id"], alone_job)
+
+    def _running_run(self, tc_id: int, mode: str = "batch", job_ids=None) -> EvaluationRun:
+        run = EvaluationRun(test_case_id=tc_id, session_id=f"s-{tc_id}-{len(job_ids or [])}",
+                            status="EVALUATING", evaluation_mode=mode)
+        if job_ids:
+            run.batch_job_id = job_ids[-1]
+            run.set_batch_job_ids(job_ids)
+        self.session.add(run)
+        self.session.commit()
+        return run
+
+    @patch("app.routers.evaluations.evals.stop_batch_jobs")
+    def test_stopping_a_run_marks_it_stopped_and_stops_its_own_job(self, mock_stop):
+        tc = self._create_test_case(evaluation_mode="batch")
+        run = self._running_run(tc["id"], job_ids=["loom_only_mine-1"])
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc['id']}/runs/{run.id}/stop")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["status"], "STOPPED")
+        self.assertEqual(resp.json()["errors"], ["Stopped by u."])
+        mock_stop.assert_called_once_with(["loom_only_mine-1"], "us-east-1")
+
+    @patch("app.routers.evaluations.evals.stop_batch_jobs")
+    def test_a_job_other_runs_still_need_keeps_running(self, mock_stop):
+        a = self._create_test_case(name="a", evaluation_mode="batch")
+        b = self._create_test_case(name="b", evaluation_mode="batch")
+        run_a = self._running_run(a["id"], job_ids=["loom_shared-1"])
+        self._running_run(b["id"], job_ids=["loom_shared-1"])
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{a['id']}/runs/{run_a.id}/stop")
+        self.assertEqual(resp.status_code, 200)
+        mock_stop.assert_not_called()
+
+    def test_a_finished_run_cannot_be_stopped(self):
+        tc = self._create_test_case()
+        self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc['id']}/run")
+        run_id = self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases").json()[0]["last_batch_evaluation_id"]
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc['id']}/runs/{run_id}/stop")
+        self.assertEqual(resp.status_code, 409)
+
+    def test_stopping_needs_write_access_and_a_real_run(self):
+        tc = self._create_test_case()
+        run = self._running_run(tc["id"], mode="on_demand")
+        base = f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc['id']}/runs"
+        self.assertEqual(self.client.post(f"{base}/999999/stop").status_code, 404)
+        self._as_read_only_user()
+        self.assertEqual(self.client.post(f"{base}/{run.id}/stop").status_code, 403)
+
+    def test_an_on_demand_run_stopped_while_waiting_is_never_scored(self):
+        tc = self._create_test_case()
+        stops = {}
+
+        def spans_then_stop(_lg, session_id, *_a, should_stop=None, **_k):
+            # The user stops the run while its spans are being waited on.
+            run = self.session.query(EvaluationRun).filter_by(session_id=session_id).first()
+            stops["checked_before"] = should_stop()
+            run.status = "STOPPED"
+            run.set_errors(["Stopped by u."])
+            self.session.commit()
+            stops["checked_after"] = should_stop()
+            return [_span("invoke_agent")]
+
+        self.wait_patcher.stop()
+        with patch("app.routers.evaluations.evals.wait_for_session_spans", side_effect=spans_then_stop), \
+             patch("app.routers.evaluations.evals.run_on_demand_evaluation") as mock_evaluate, \
+             patch("app.routers.evaluations.invoke_agent", return_value=iter([{"type": "text", "content": "Hi"}])):
+            self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc['id']}/run")
+        self.wait_patcher.start()
+        self.assertEqual(stops, {"checked_before": False, "checked_after": True})
+        mock_evaluate.assert_not_called()
+        last = self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc['id']}/last-run").json()
+        self.assertEqual((last["status"], last["errors"]), ("STOPPED", ["Stopped by u."]))
+
+    def test_an_on_demand_run_stopped_while_being_scored_keeps_its_stop(self):
+        tc = self._create_test_case()
+
+        def evaluate_then_stop(_evaluator_ids, spans, _region):
+            run = self.session.query(EvaluationRun).filter_by(status="EVALUATING").first()
+            run.status = "STOPPED"
+            run.set_errors(["Stopped by u."])
+            self.session.commit()
+            return [{"evaluator": "Builtin.Helpfulness", "value": 0.9, "label": None, "explanation": None,
+                     "level": None}], []
+
+        with patch("app.routers.evaluations.evals.run_on_demand_evaluation", side_effect=evaluate_then_stop), \
+             patch("app.routers.evaluations.invoke_agent", return_value=iter([{"type": "text", "content": "Hi"}])):
+            self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc['id']}/run")
+        last = self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc['id']}/last-run").json()
+        self.assertEqual((last["status"], last["scores"]), ("STOPPED", []))
+
+    def test_a_batch_run_stopped_while_waiting_leaves_its_group_and_the_rest_are_scored(self):
+        self._patch_batch_pipeline()
+        base = f"/api/agents/{self.agent.id}/evaluations/test-cases"
+        keep = self._create_test_case(name="keep", evaluation_mode="batch")
+        stop = self._create_test_case(name="stop", evaluation_mode="batch")
+        stop_prompt = "please stop me"
+        self.client.put(f"{base}/{stop['id']}", json={"name": "stop", "prompt": stop_prompt,
+                                                      "evaluator_ids": ["Builtin.Helpfulness"], "evaluation_mode": "batch"})
+        stop_session = {}
+
+        def invoke(**kwargs):
+            if kwargs["prompt"] == stop_prompt:
+                stop_session["id"] = kwargs["session_id"]
+            return iter([{"type": "text", "content": "Hi"}])
+
+        def spans(_lg, session_id, *_a, **_k):
+            if session_id == stop_session.get("id"):
+                run = self.session.query(EvaluationRun).filter_by(session_id=session_id).first()
+                run.status = "STOPPED"
+                self.session.commit()
+            return self._agent_spans()
+
+        with patch("app.routers.evaluations.invoke_agent", side_effect=invoke), \
+             patch("app.routers.evaluations.evals.wait_for_session_spans", side_effect=spans):
+            self.client.post(f"{base}/run-all")
+        runs = {tc["name"]: self.client.get(f"{base}/{tc['id']}/last-run").json() for tc in (keep, stop)}
+        self.assertEqual(runs["keep"]["status"], "COMPLETED")
+        self.assertEqual(runs["stop"]["status"], "STOPPED")
+        [(_, session_ids, _)] = self.batch_jobs
+        self.assertEqual(session_ids, [runs["keep"]["session_id"]])
+
+    def test_a_job_started_for_a_stopped_run_is_still_recorded_for_cleanup(self):
+        from app.routers.evaluations import _record_started_job, _runs_stopped
+        tc = self._create_test_case(evaluation_mode="batch")
+        run = self._running_run(tc["id"])
+        with patch("app.routers.evaluations.SessionLocal", self.TestingSessionLocal):
+            self.assertFalse(_runs_stopped([run.id]))
+            _record_started_job("loom_new_a1-1", [run.id])
+            self.session.query(EvaluationRun).filter_by(id=run.id).update({"status": "STOPPED"})
+            self.session.commit()
+            self.assertTrue(_runs_stopped([run.id]))
+        self.session.expire_all()
+        refreshed = self.session.query(EvaluationRun).filter_by(id=run.id).first()
+        self.assertEqual(refreshed.get_batch_job_ids(), ["loom_new_a1-1"])
+
 class TestExecuteRun(unittest.TestCase):
     """_execute_run is the BackgroundTask /run and /rescore hand everything
     off to — it opens its own DB session (SessionLocal), so these patch that
@@ -1086,12 +1825,13 @@ class TestExecuteRun(unittest.TestCase):
         self.session.add(self.agent)
         self.session.commit()
         self.session.refresh(self.agent)
-        self.tc = EvaluationTestCase(agent_id=self.agent.id, name="t", prompt="p")
+        self.tc = EvaluationTestCase(agent_id=self.agent.id, name="t", prompt="p", evaluation_mode="on_demand")
         self.tc.set_evaluator_ids(["Builtin.Helpfulness"])
         self.session.add(self.tc)
         self.session.commit()
         self.session.refresh(self.tc)
-        self.run = EvaluationRun(test_case_id=self.tc.id, session_id="s1", status="PENDING")
+        self.run = EvaluationRun(test_case_id=self.tc.id, session_id="s1", status="PENDING",
+                                 evaluation_mode="on_demand")
         self.session.add(self.run)
         self.session.commit()
         self.session.refresh(self.run)
@@ -1109,11 +1849,11 @@ class TestExecuteRun(unittest.TestCase):
     @patch("app.routers.evaluations.evals.run_on_demand_evaluation")
     @patch("app.routers.evaluations.evals.wait_for_session_spans")
     def test_moves_through_phases_and_completes(self, mock_wait, mock_evaluate):
-        mock_wait.return_value = [{"name": "invoke_agent"}]
+        mock_wait.return_value = [_span("invoke_agent")]
         mock_evaluate.return_value = ([{"evaluator": "Builtin.Helpfulness", "value": 0.9, "label": None, "explanation": None, "level": None}], [])
         from app.routers.evaluations import _execute_run
         # prompt=None skips invocation, as a rescore would.
-        _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", None, None, None, None)
+        _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", None, None, None, ADMIN)
         mock_wait.assert_called_once()
         self.session.expire_all()
         updated = self.session.query(EvaluationRun).filter_by(id=self.run.id).first()
@@ -1124,26 +1864,110 @@ class TestExecuteRun(unittest.TestCase):
     def test_no_spans_ends_as_error(self, mock_wait):
         mock_wait.return_value = []
         from app.routers.evaluations import _execute_run
-        _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", None, None, None, None)
+        _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", None, None, None, ADMIN)
         self.session.expire_all()
         updated = self.session.query(EvaluationRun).filter_by(id=self.run.id).first()
         self.assertEqual(updated.status, "ERROR")
         self.assertTrue(updated.get_errors())
 
+    @patch("app.routers.evaluations.evals.run_batch_evaluation")
+    @patch("app.routers.evaluations.evals.run_on_demand_evaluation")
+    @patch("app.routers.evaluations.evals.wait_for_session_spans")
+    def test_only_infrastructure_spans_after_the_wait_is_an_error_without_scoring(
+            self, mock_wait, mock_on_demand, mock_batch):
+        # The wait timed out with spans present but none an evaluator can read
+        # (Logs Insights hadn't caught up on the agent spans yet).
+        mock_wait.return_value = [_span("POST /invocations", scope="opentelemetry.instrumentation.starlette")]
+        from app.routers.evaluations import _execute_run
+        for mode in ("on_demand", "batch"):
+            run = EvaluationRun(test_case_id=self.tc.id, session_id="s1", status="PENDING", evaluation_mode=mode)
+            self.session.add(run)
+            self.session.commit()
+            _execute_run(run.id, self.tc.id, self.agent.id, "s1", None, None, None, ADMIN)
+            self.session.expire_all()
+            updated = self.session.query(EvaluationRun).filter_by(id=run.id).first()
+            self.assertEqual(updated.status, "ERROR", mode)
+            self.assertIn("weren't queryable in CloudWatch", updated.get_errors()[0])
+        mock_on_demand.assert_not_called()
+        mock_batch.assert_not_called()
+
     @patch("app.routers.evaluations.invoke_agent")
     def test_invoke_failure_ends_as_error_without_waiting_for_spans(self, mock_invoke):
         mock_invoke.side_effect = Exception("runtime unreachable")
         from app.routers.evaluations import _execute_run
-        _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", "say hi", None, None, "u")
+        _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", "say hi", None, None, ADMIN)
         self.session.expire_all()
         updated = self.session.query(EvaluationRun).filter_by(id=self.run.id).first()
         self.assertEqual(updated.status, "ERROR")
         self.assertIn("runtime unreachable", updated.get_errors()[0])
 
+    @patch("app.routers.evaluations.evals.run_on_demand_evaluation")
+    @patch("app.routers.evaluations.evals.wait_for_session_spans")
+    def test_caller_outside_the_agents_group_is_refused_when_the_run_starts(self, mock_wait, mock_evaluate):
+        # The route checks the caller, but the run starts later; it checks again.
+        from app.routers.evaluations import _execute_run
+        self.agent.tags = json.dumps({"loom:group": "strategics"})  # not the caller's group
+        self.session.commit()
+        _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", None, None, None, OTHER_GROUP_ADMIN)
+        self.session.expire_all()
+        updated = self.session.query(EvaluationRun).filter_by(id=self.run.id).first()
+        self.assertEqual(updated.status, "ERROR")
+        self.assertIn("Not scored", updated.get_errors()[0])
+        mock_wait.assert_not_called()
+        mock_evaluate.assert_not_called()
+
+    @patch("app.routers.evaluations.evals.run_batch_evaluation")
+    @patch("app.routers.evaluations.evals.wait_for_session_spans")
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_batch_runs_refuse_a_caller_outside_the_agents_group(self, mock_invoke, mock_wait, mock_batch):
+        from app.routers.evaluations import _execute_batch_runs
+        self.agent.tags = json.dumps({"loom:group": "strategics"})  # not the caller's group
+        self.run.evaluation_mode = "batch"
+        self.session.commit()
+        _execute_batch_runs([(self.run.id, "say hi")], self.agent.id, None, OTHER_GROUP_ADMIN)
+        self.session.expire_all()
+        updated = self.session.query(EvaluationRun).filter_by(id=self.run.id).first()
+        self.assertEqual(updated.status, "ERROR")
+        self.assertIn("Not scored", updated.get_errors()[0])
+        mock_invoke.assert_not_called()
+        mock_wait.assert_not_called()
+        mock_batch.assert_not_called()
+
     def test_missing_run_returns_quietly(self):
         from app.routers.evaluations import _execute_run
-        _execute_run(999999, self.tc.id, self.agent.id, "s1", None, None, None, None)  # must not raise
+        _execute_run(999999, self.tc.id, self.agent.id, "s1", None, None, None, ADMIN)  # must not raise
 
+
+class TestExecuteRunAll(unittest.TestCase):
+    """Run all queues one background task, and FastAPI runs a request's
+    background tasks one after another — so the on-demand runs and the batch
+    group have to run concurrently inside it, or a suite takes the sum of
+    every run's wait instead of the longest one."""
+
+    @patch("app.routers.evaluations.boto3.client")
+    def test_on_demand_runs_and_the_batch_group_run_at_the_same_time(self, _client):
+        import threading
+        from app.routers import evaluations as router
+        # Three parties: two on-demand runs and one batch group. Each blocks
+        # until all three are running; run one at a time, they would time out.
+        barrier = threading.Barrier(3, timeout=5)
+        ran: list[str] = []
+
+        def on_demand(run_id, *_args):
+            barrier.wait()
+            ran.append(f"run-{run_id}")
+
+        def batch_group(items, *_args):
+            barrier.wait()
+            ran.append(f"batch-{len(items)}")
+
+        with patch.object(router, "_execute_run", side_effect=on_demand), \
+             patch.object(router, "_execute_batch_runs", side_effect=batch_group):
+            router._execute_run_all(
+                [(1, 1, 1, "s1", "p", None, None, None), (2, 2, 1, "s2", "p", None, None, None)],
+                [(3, "p"), (4, "p")], 1, "us-east-1", None, None,
+            )
+        self.assertEqual(sorted(ran), ["batch-2", "run-1", "run-2"])
 
 class TestFinishEvaluationRun(unittest.TestCase):
     """Status logic: COMPLETED needs at least one real score; a per-evaluator

@@ -17,19 +17,24 @@ never point it at an arbitrary log group.
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from uuid import uuid4
-from typing import List, Literal, Optional
+from typing import Callable, List, Literal, NamedTuple, Optional
 
+import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.db import get_db, SessionLocal
 from app.dependencies.auth import UserInfo, require_scopes
 from app.models.agent import Agent
-from app.models.evaluation import EvaluationTestCase, EvaluationRun, DEFAULT_PASS_THRESHOLD
+from app.models.evaluation import (
+    DEFAULT_EVALUATION_MODE, DEFAULT_PASS_THRESHOLD, EVALUATION_MODE_BATCH,
+    EvaluationRun, EvaluationTestCase,
+)
 from app.models.invocation import Invocation
 from app.models.session import InvocationSession
 from app.routers.agents import derive_log_group
@@ -147,6 +152,13 @@ class TestCaseRequest(BaseModel):
     evaluator_ids: List[str] = Field(..., min_length=1)
     pass_threshold: float = Field(DEFAULT_PASS_THRESHOLD, ge=0.0, le=1.0)
     model_id: Optional[str] = None
+    evaluation_mode: Literal["on_demand", "batch"] = DEFAULT_EVALUATION_MODE
+
+    @model_validator(mode="after")
+    def _batch_evaluator_limit(self) -> "TestCaseRequest":
+        if self.evaluation_mode == EVALUATION_MODE_BATCH and len(self.evaluator_ids) > evals.BATCH_MAX_EVALUATORS:
+            raise ValueError(f"Batch mode supports at most {evals.BATCH_MAX_EVALUATORS} evaluators per test case")
+        return self
 
 
 class TestCaseResponse(BaseModel):
@@ -159,6 +171,7 @@ class TestCaseResponse(BaseModel):
     evaluator_ids: List[str]
     pass_threshold: float
     model_id: Optional[str]
+    evaluation_mode: str
     last_batch_evaluation_id: Optional[str]
     last_run_at: Optional[str]
     created_at: Optional[str]
@@ -170,6 +183,20 @@ class RunTestCaseResponse(BaseModel):
     batch_evaluation_id: str
     status: str
     agent_response: Optional[str]
+
+
+class RunAllEntry(BaseModel):
+    """One test case started by run-all."""
+    test_case_id: int
+    batch_evaluation_id: str
+    evaluation_mode: str
+
+
+class RunAllResponse(BaseModel):
+    """What run-all started: one run per test case, and how many batch jobs
+    the batch-mode runs were grouped into (one per distinct evaluator set)."""
+    runs: List[RunAllEntry]
+    batch_jobs: int
 
 
 class TestCaseScoreDetail(BaseModel):
@@ -187,6 +214,8 @@ class TestCaseRunDetailResponse(BaseModel):
     scores: List[TestCaseScoreDetail]
     errors: List[str] = []
     session_id: Optional[str] = None
+    evaluation_mode: Optional[str] = None
+    batch_job_id: Optional[str] = None
 
 
 class TestCaseRunSummary(BaseModel):
@@ -196,6 +225,8 @@ class TestCaseRunSummary(BaseModel):
     created_at: Optional[str]
     updated_at: Optional[str]
     errors: List[str] = []
+    evaluation_mode: Optional[str] = None
+    batch_job_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -316,12 +347,12 @@ def get_evaluated_exchange(
 # ---------------------------------------------------------------------------
 #
 # A test case is just a saved prompt + evaluator selection. Running one
-# invokes the agent (producing a real session), then scores that session via
-# AgentCore's on-demand Evaluate API — see the module docstring on
-# app/services/evaluations.py's "Creating evaluations" section for why that
-# API rather than batch evaluation. Unlike batch evaluation, on-demand
-# evaluation has no AWS-side resource Loom can re-query later, so each run's
-# outcome is persisted in Loom's own EvaluationRun table.
+# invokes the agent (producing a real session), waits until that session's
+# spans are queryable, then scores it in the test case's evaluation mode:
+# on-demand Evaluate calls, or one StartBatchEvaluation job — see the
+# "Creating evaluations" section in app/services/evaluations.py. Either way
+# each run's outcome is persisted in Loom's own EvaluationRun table, so run
+# history reads the same for both modes.
 
 
 def _test_case_to_response(tc: EvaluationTestCase) -> TestCaseResponse:
@@ -380,6 +411,7 @@ def create_test_case(
         expected_response=request.expected_response.strip() if request.expected_response else None,
         pass_threshold=request.pass_threshold,
         model_id=request.model_id or None,
+        evaluation_mode=request.evaluation_mode,
     )
     tc.set_evaluator_ids(request.evaluator_ids)
     db.add(tc)
@@ -404,6 +436,7 @@ def update_test_case(
     tc.expected_response = request.expected_response.strip() if request.expected_response else None
     tc.pass_threshold = request.pass_threshold
     tc.model_id = request.model_id or None
+    tc.evaluation_mode = request.evaluation_mode
     tc.set_evaluator_ids(request.evaluator_ids)
     db.commit()
     db.refresh(tc)
@@ -414,19 +447,27 @@ def update_test_case(
 def delete_test_case(
     agent_id: int,
     test_case_id: int,
+    background_tasks: BackgroundTasks,
     user: UserInfo = Depends(require_scopes("agent:write")),
     db: Session = Depends(get_db),
 ) -> None:
-    """Delete a saved test case and its run history.
+    """Delete a saved test case, its run history, and its batch jobs in AWS.
 
-    Nothing to clean up on AWS's side — on-demand evaluation (unlike batch
-    evaluation) never creates a persisted AWS resource; EvaluationRun rows
-    cascade-delete with the test case.
+    EvaluationRun rows cascade-delete with the test case. The batch jobs its
+    runs used are deleted in AWS too (in the background: a running job has
+    to be stopped first), except a job shared with another test case's run
+    from the same Run all, which stays until that run goes as well.
+    On-demand runs never created anything in AWS.
     """
-    get_agent_or_404(agent_id, db, user)
+    agent = get_agent_or_404(agent_id, db, user)
     tc = _get_test_case_or_404(agent_id, test_case_id, db)
+    run_ids = {r.id for r in tc.runs}
+    jobs = _unreferenced_batch_jobs(db, agent_id, {j for r in tc.runs for j in r.get_batch_job_ids()},
+                                    excluding_run_ids=run_ids)
     db.delete(tc)
     db.commit()
+    if jobs:
+        background_tasks.add_task(evals.delete_batch_jobs, jobs, agent.region)
 
 
 def _resolve_access_token(agent: Agent, request: Request) -> str | None:
@@ -467,23 +508,326 @@ def _resolve_access_token(agent: Agent, request: Request) -> str | None:
     return None
 
 
-# How long to wait for the session's spans before giving up as ERROR.
-# Generous on purpose: unlike batch evaluation's internal (and too-short)
-# budget, nothing times this out from the other end — waiting longer here is
-# just waiting longer, not racing anything.
-_SPAN_WAIT_S = 180.0
+# How long to wait for the session's agent spans to become queryable before
+# giving up as ERROR. The delay before Logs Insights returns a new session's
+# spans varies: under a minute to over four minutes in the same afternoon.
+# Matches the 300s AWS's own span collector (CloudWatchAgentSpanCollector)
+# waits by default.
+_SPAN_WAIT_S = 300.0
 
 
 def _finish_evaluation_run(db: Session, run: "EvaluationRun", tc: EvaluationTestCase,
-                           spans: list, region: str) -> None:
-    """Score a run's spans and record the outcome. COMPLETED needs at least
-    one evaluator to have actually produced a score. Per-evaluator failures
-    are kept on the run even when some other evaluator succeeded — they used
-    to be discarded here (only logged server-side), which made a run look
-    like a single clean PASS/FAIL even when most of its evaluators silently
-    failed. The frontend treats a non-empty error list alongside scores as a
-    partial result, not a hard ERROR."""
+                           spans: list, region: str, stopped: Callable[[], bool] = lambda: False) -> None:
+    """Score a run's spans with on-demand Evaluate calls and record the
+    outcome, unless the run was stopped while the Evaluate calls ran."""
     scores, errors = evals.run_on_demand_evaluation(tc.get_evaluator_ids(), spans, region)
+    if stopped():
+        return
+    db.refresh(run)
+    _record_outcome(db, run, scores, errors)
+
+
+# Parallelism for a group of batch-mode runs: invoking the agent and waiting
+# for each session's spans happen concurrently, then each evaluator-set
+# group's batch job runs concurrently. Database writes stay on the calling
+# thread; worker threads only make AWS calls.
+_BATCH_WORKERS = 8
+# How many of Run all's runs (each on-demand run, plus the batch group) go at
+# once. They share one background task, and FastAPI runs a request's
+# background tasks one after another, so this is what keeps them parallel.
+_RUN_ALL_WORKERS = 8
+
+
+def _warm_boto3_clients(region: str) -> None:
+    """Create one client per service before starting worker threads.
+
+    The worker threads each create their own boto3 clients from the default
+    session, which isn't safe to initialise concurrently. Doing it once here
+    resolves credentials and loads the service models before any thread starts.
+    """
+    for service in ("bedrock-agentcore", "logs"):
+        boto3.client(service, region_name=region)
+
+
+def _evaluator_set(tc: EvaluationTestCase) -> tuple[str, ...]:
+    """Grouping key for batch jobs: a job applies one evaluator list to every
+    session in it, so only runs with the same evaluators (in any order) share one."""
+    return tuple(sorted(set(tc.get_evaluator_ids())))
+
+
+def _invoke_text(arn: str, region: str, session_id: str, prompt: str, model_id: str | None,
+                 access_token: str | None) -> tuple[str | None, str | None]:
+    """Invoke the agent. Returns (response text, error)."""
+    try:
+        chunks = list(invoke_agent(
+            arn=arn, qualifier="DEFAULT", session_id=session_id, prompt=prompt, region=region,
+            runtime_model_id=model_id, access_token=access_token,
+        ))
+    except Exception as exc:
+        return None, str(exc)
+    return "".join(c.get("content", "") for c in chunks if c.get("type") == "text") or None, None
+
+
+def _record_invocation(db: Session, agent_id: int, session_id: str, prompt: str,
+                       response: str | None, username: str | None) -> None:
+    """Record a test-case invocation as a real session/invocation.
+
+    Test-case runs invoke the agent through the service layer directly rather
+    than the main /invoke endpoint, so without this they're invisible to
+    Loom's own session tracking. That breaks "Open session" / "View in
+    session trace" from the evaluations tab: the session genuinely exists in
+    AgentCore (and is what gets scored), but GET /sessions/{id} 404s because
+    Loom never persisted it.
+    """
+    db.add(InvocationSession(
+        agent_id=agent_id, session_id=session_id, qualifier="DEFAULT",
+        status="complete", created_at=datetime.utcnow(), user_id=username,
+    ))
+    db.add(Invocation(
+        session_id=session_id, invocation_id=str(uuid4()), status="complete",
+        prompt_text=prompt, response_text=response, created_at=datetime.utcnow(),
+    ))
+    db.commit()
+
+
+def _fail_run(db: Session, run: "EvaluationRun", message: str) -> None:
+    run.status = "ERROR"
+    run.set_errors([message])
+    run.updated_at = datetime.utcnow()
+    db.commit()
+
+
+def _spans_not_ready_message(spans: list) -> str:
+    """Why a run can't be scored when its wait ended without an agent span.
+
+    Without one there is nothing either mode can score: Evaluate rejects the
+    set ("no spans with supported scope") and a batch job fails ("No
+    evaluable agent spans found"). Say what actually happened instead.
+    """
+    if not spans:
+        return "No trace spans were found for this session after several minutes."
+    return ("The agent's spans weren't queryable in CloudWatch after several minutes "
+            "(only infrastructure spans had arrived). Score again in a few minutes.")
+
+
+# A run moves through these until it ends as COMPLETED, ERROR, or STOPPED.
+_RUN_IN_PROGRESS = frozenset({"PENDING", "INVOKING", "WAITING_FOR_LOGS", "EVALUATING"})
+_RUN_STOPPED = "STOPPED"
+
+
+def _runs_stopped(run_ids: list[int]) -> bool:
+    """Whether every one of these runs was stopped by its user, or deleted.
+
+    Read through a fresh session on each call: the background work calls
+    this from worker threads while it polls, and the stop itself comes from
+    another request (possibly in another backend process), so the database
+    is the only place both sides can see.
+    """
+    if not run_ids:
+        return True
+    db = SessionLocal()
+    try:
+        rows = db.query(EvaluationRun.id, EvaluationRun.status).filter(EvaluationRun.id.in_(run_ids)).all()
+    finally:
+        db.close()
+    return all(status_ == _RUN_STOPPED for _, status_ in rows)
+
+
+def _record_started_job(job_id: str, run_ids: list[int]) -> None:
+    """Save a batch job's ID on its runs as soon as it starts, so a stop or a
+    deletion can find it while it's still running. Own session: this runs
+    on a worker thread."""
+    db = SessionLocal()
+    try:
+        for run in db.query(EvaluationRun).filter(EvaluationRun.id.in_(run_ids)).all():
+            run.batch_job_id = job_id
+            run.set_batch_job_ids(run.get_batch_job_ids() + [job_id])
+        db.commit()
+    finally:
+        db.close()
+
+
+def _unreferenced_batch_jobs(db: Session, agent_id: int, job_ids: set[str],
+                             excluding_run_ids: set[int] = frozenset()) -> list[str]:
+    """The jobs in ``job_ids`` that no other run of this agent still points at.
+
+    A Run all job can score several test cases, so deleting one of them must
+    not delete a job another test case's run still shows results from. Jobs
+    are only ever shared within one agent.
+    """
+    if not job_ids:
+        return []
+    still_used: set[str] = set()
+    others = db.query(EvaluationRun).join(EvaluationTestCase).filter(
+        EvaluationTestCase.agent_id == agent_id,
+        EvaluationRun.batch_job_id.isnot(None) | EvaluationRun.batch_job_ids.isnot(None),
+    )
+    for run in others.all():
+        if run.id not in excluding_run_ids:
+            still_used.update(run.get_batch_job_ids())
+    return sorted(job_ids - still_used)
+
+
+class _BatchItem(NamedTuple):
+    """What a batch-mode run needs, as plain values captured up front.
+
+    A test case (or its agent) can be deleted while its batch group is still
+    running, and touching a deleted row's ORM object raises. So the group
+    works from these values, and only loads the rows that still exist when it
+    needs to write (see _existing_runs).
+    """
+    run_id: int
+    session_id: str
+    test_case_id: int
+    test_case_name: str
+    evaluator_set: tuple[str, ...]
+    model_id: str | None
+    prompt: str | None
+
+
+def _existing_runs(db: Session, items: list[_BatchItem]) -> dict[int, "EvaluationRun"]:
+    """The runs among ``items`` still to be worked on, by id: rows that
+    still exist and haven't been stopped by their user."""
+    if not items:
+        return {}
+    rows = db.query(EvaluationRun).populate_existing().filter(
+        EvaluationRun.id.in_([i.run_id for i in items])).all()
+    return {r.id: r for r in rows if r.status != _RUN_STOPPED}
+
+
+def _execute_batch_runs(items: list[tuple[int, str | None]], agent_id: int,
+                        access_token: str | None, user: UserInfo) -> None:
+    """Run a set of batch-mode test-case runs, sharing batch jobs.
+
+    ``items`` is (run id, prompt) pairs; a None prompt means rescore the
+    run's existing session without invoking the agent. All the runs are
+    invoked, then waited on, in parallel. Each run whose spans became
+    queryable is scored in one job per evaluator set; a run whose spans
+    didn't arrive in time ends as ERROR on its own without holding up the
+    rest, and "Score again" scores it later.
+
+    The caller's access to the agent is checked again here, not just in the
+    route that queued this: the work can start minutes later, after the
+    agent's group has changed.
+    """
+    db = SessionLocal()
+    try:
+        runs = {r.id: r for r in db.query(EvaluationRun).filter(EvaluationRun.id.in_([i for i, _ in items])).all()}
+        if not runs:
+            return
+        try:
+            agent = get_agent_or_404(agent_id, db, user)
+        except HTTPException as exc:
+            for run in runs.values():
+                _fail_run(db, run, f"Not scored: {exc.detail}")
+            return
+        tcs = {tc.id: tc for tc in db.query(EvaluationTestCase).filter(
+            EvaluationTestCase.id.in_({r.test_case_id for r in runs.values()})).all()}
+        work = [
+            _BatchItem(run_id, runs[run_id].session_id, runs[run_id].test_case_id,
+                       tcs[runs[run_id].test_case_id].name, _evaluator_set(tcs[runs[run_id].test_case_id]),
+                       tcs[runs[run_id].test_case_id].model_id, prompt)
+            for run_id, prompt in items if run_id in runs and runs[run_id].test_case_id in tcs
+        ]
+        arn, region, agent_name = agent.arn, agent.region, agent.name
+        log_group = derive_log_group(agent.runtime_id, "DEFAULT")
+        _warm_boto3_clients(region)
+
+        with ThreadPoolExecutor(max_workers=_BATCH_WORKERS) as pool:
+            rows = _existing_runs(db, work)
+            work = [i for i in work if i.run_id in rows]
+            for item in work:
+                if item.prompt is not None:
+                    rows[item.run_id].status = "INVOKING"
+            db.commit()
+            invoked = {i.run_id: pool.submit(_invoke_text, arn, region, i.session_id, i.prompt, i.model_id,
+                                             access_token)
+                       for i in work if i.prompt is not None}
+            rows = _existing_runs(db, work)
+            live = []
+            for item in work:
+                if item.prompt is not None:
+                    response, error = invoked[item.run_id].result()
+                    if item.run_id not in rows:
+                        continue
+                    if error is not None:
+                        _fail_run(db, rows[item.run_id], f"Failed to invoke agent: {error}")
+                        continue
+                    _record_invocation(db, agent_id, item.session_id, item.prompt, response, user.username)
+                if item.run_id in rows:
+                    live.append(item)
+
+            rows = _existing_runs(db, live)
+            live = [i for i in live if i.run_id in rows]
+            for item in live:
+                rows[item.run_id].status = "WAITING_FOR_LOGS"
+            db.commit()
+            waits = {i.run_id: pool.submit(evals.wait_for_session_spans, log_group, i.session_id, region,
+                                           timeout_s=_SPAN_WAIT_S,
+                                           should_stop=lambda run_id=i.run_id: _runs_stopped([run_id]))
+                     for i in live}
+            spans_by_run = {i.run_id: waits[i.run_id].result() for i in live}
+            rows = _existing_runs(db, live)
+            groups: dict[tuple[str, ...], list[_BatchItem]] = {}
+            for item in live:
+                if item.run_id not in rows:
+                    continue
+                if not evals.has_evaluatable_span(spans_by_run[item.run_id]):
+                    _fail_run(db, rows[item.run_id], _spans_not_ready_message(spans_by_run[item.run_id]))
+                    continue
+                rows[item.run_id].status = "EVALUATING"
+                groups.setdefault(item.evaluator_set, []).append(item)
+            db.commit()
+
+            run_of_session = {i.session_id: i.run_id for i in work}
+
+            def runs_for(session_ids: list[str]) -> list[int]:
+                return [run_of_session[sid] for sid in session_ids if sid in run_of_session]
+
+            jobs = {}
+            for evaluator_ids, members in groups.items():
+                service_name = next((name for m in members
+                                     if (name := evals.session_service_name(spans_by_run[m.run_id]))), agent_name)
+                sessions = [evals.BatchSession(m.session_id, m.test_case_name,
+                                               {"loom_test_case_id": str(m.test_case_id)}) for m in members]
+                jobs[evaluator_ids] = pool.submit(
+                    evals.run_batch_evaluation, list(evaluator_ids), sessions, service_name, log_group,
+                    region, f"loom_a{agent_id}_r{members[0].run_id}_{uuid4().hex[:6]}",
+                    on_job_started=lambda job_id, sids: _record_started_job(job_id, runs_for(sids)),
+                    should_stop=lambda sids: _runs_stopped(runs_for(sids)),
+                )
+            started_jobs: set[str] = set()
+            for evaluator_ids, members in groups.items():
+                outcomes = jobs[evaluator_ids].result()
+                rows = _existing_runs(db, members)
+                for item in members:
+                    outcome = outcomes.get(item.session_id) or evals.SessionOutcome(
+                        [], ["No result was recorded for this session."], None)
+                    started_jobs.update(outcome.job_ids)
+                    run = rows.get(item.run_id)
+                    if run is None:
+                        continue
+                    run.batch_job_id = outcome.job_id
+                    run.set_batch_job_ids(run.get_batch_job_ids() + list(outcome.job_ids))
+                    _record_outcome(db, run, outcome.scores, outcome.errors)
+            # Jobs started for runs whose test case was deleted meanwhile: once
+            # no remaining run points at them, they go the same way the test
+            # case's earlier jobs went.
+            orphaned = _unreferenced_batch_jobs(db, agent_id, started_jobs)
+            if orphaned:
+                evals.delete_batch_jobs(orphaned, region)
+    finally:
+        db.close()
+
+
+def _record_outcome(db: Session, run: "EvaluationRun", scores: list, errors: list) -> None:
+    """Record a run's scores and errors. COMPLETED needs at least one
+    evaluator to have actually produced a score. Per-evaluator failures are
+    kept on the run even when some other evaluator succeeded — they used to
+    be discarded (only logged server-side), which made a run look like a
+    single clean PASS/FAIL even when most of its evaluators silently failed.
+    The frontend treats a non-empty error list alongside scores as a partial
+    result, not a hard ERROR."""
     run.set_results(scores)
     run.set_errors(errors)
     run.status = "COMPLETED" if scores else "ERROR"
@@ -497,7 +841,7 @@ def _finish_evaluation_run(db: Session, run: "EvaluationRun", tc: EvaluationTest
 
 def _execute_run(run_id: int, test_case_id: int, agent_id: int, session_id: str,
                  prompt: str | None, model_id: str | None, access_token: str | None,
-                 username: str | None) -> None:
+                 user: UserInfo) -> None:
     """Do the actual work of a test case run as a background task, moving
     the run through named phases (INVOKING, WAITING_FOR_LOGS, EVALUATING) as
     it goes — not just one opaque "running" state for however long the whole
@@ -508,67 +852,135 @@ def _execute_run(run_id: int, test_case_id: int, agent_id: int, session_id: str,
     in turn. Uses its own DB session since the request's is closed once this
     task is scheduled.
 
-    `prompt` is None for a rescore (same session, no re-invocation).
+    `prompt` is None for a rescore (same session, no re-invocation). The
+    caller's access to the agent is checked again here, since the route's
+    check happened before this was queued.
     """
     db = SessionLocal()
     try:
-        agent = db.query(Agent).filter(Agent.id == agent_id).first()
         tc = db.query(EvaluationTestCase).filter(EvaluationTestCase.id == test_case_id).first()
         run = db.query(EvaluationRun).filter(EvaluationRun.id == run_id).first()
-        if not agent or not tc or not run:
+        if not tc or not run:
+            return
+        try:
+            agent = get_agent_or_404(agent_id, db, user)
+        except HTTPException as exc:
+            _fail_run(db, run, f"Not scored: {exc.detail}")
+            return
+        if run.evaluation_mode == EVALUATION_MODE_BATCH:
+            db.close()
+            _execute_batch_runs([(run_id, prompt)], agent_id, access_token, user)
             return
 
+        def stopped() -> bool:
+            # Re-read: a stop (or deletion) comes from another request.
+            return _runs_stopped([run_id])
+
         if prompt is not None:
+            if stopped():
+                return
             run.status = "INVOKING"
             db.commit()
-            qualifier = "DEFAULT"
-            try:
-                chunks = list(invoke_agent(
-                    arn=agent.arn, qualifier=qualifier, session_id=session_id,
-                    prompt=prompt, region=agent.region, runtime_model_id=model_id,
-                    access_token=access_token,
-                ))
-            except Exception as exc:
-                run.status = "ERROR"
-                run.set_errors([f"Failed to invoke agent: {exc}"])
-                run.updated_at = datetime.utcnow()
-                db.commit()
+            response, error = _invoke_text(agent.arn, agent.region, session_id, prompt, model_id, access_token)
+            if stopped():
                 return
-            agent_response = "".join(c.get("content", "") for c in chunks if c.get("type") == "text") or None
+            db.refresh(run)
+            if error is not None:
+                _fail_run(db, run, f"Failed to invoke agent: {error}")
+                return
+            _record_invocation(db, agent.id, session_id, prompt, response, user.username)
 
-            # Record this as a real session/invocation — test-case runs
-            # invoke the agent through the service layer directly rather than
-            # the main /invoke endpoint, so without this they're invisible to
-            # Loom's own session tracking. That breaks "Open session" / "View
-            # in session trace" from the evaluations tab: the session
-            # genuinely exists in AgentCore (and is what gets scored), but
-            # GET /sessions/{id} 404s because Loom never persisted it.
-            db.add(InvocationSession(
-                agent_id=agent.id, session_id=session_id, qualifier=qualifier,
-                status="complete", created_at=datetime.utcnow(), user_id=username,
-            ))
-            db.add(Invocation(
-                session_id=session_id, invocation_id=str(uuid4()), status="complete",
-                prompt_text=prompt, response_text=agent_response, created_at=datetime.utcnow(),
-            ))
-            db.commit()
-
+        if stopped():
+            return
+        db.refresh(run)
         run.status = "WAITING_FOR_LOGS"
         db.commit()
         log_group = derive_log_group(agent.runtime_id, "DEFAULT")
-        spans = evals.wait_for_session_spans(log_group, session_id, agent.region, timeout_s=_SPAN_WAIT_S)
-        if not spans:
-            run.status = "ERROR"
-            run.set_errors(["No trace spans were found for this session after several minutes."])
-            run.updated_at = datetime.utcnow()
-            db.commit()
+        spans = evals.wait_for_session_spans(log_group, session_id, agent.region, timeout_s=_SPAN_WAIT_S,
+                                             should_stop=stopped)
+        if stopped():
+            return
+        db.refresh(run)
+        if not evals.has_evaluatable_span(spans):
+            _fail_run(db, run, _spans_not_ready_message(spans))
             return
 
         run.status = "EVALUATING"
         db.commit()
-        _finish_evaluation_run(db, run, tc, spans, agent.region)
+        _finish_evaluation_run(db, run, tc, spans, agent.region, stopped)
     finally:
         db.close()
+
+
+def _execute_run_all(on_demand: list[tuple], batch_items: list[tuple[int, str | None]], agent_id: int,
+                     region: str, access_token: str | None, user: UserInfo) -> None:
+    """Run all of Run all's work concurrently: each on-demand run on its own,
+    and every batch-mode run together through _execute_batch_runs."""
+    _warm_boto3_clients(region)
+    with ThreadPoolExecutor(max_workers=_RUN_ALL_WORKERS) as pool:
+        futures = [pool.submit(_execute_run, *args) for args in on_demand]
+        if batch_items:
+            futures.append(pool.submit(_execute_batch_runs, batch_items, agent_id, access_token, user))
+        for future in futures:
+            try:
+                future.result()
+            except Exception:
+                logger.exception("Run all: a test case run failed unexpectedly for agent %s", agent_id)
+
+
+def _start_run(db: Session, tc: EvaluationTestCase, session_id: str) -> "EvaluationRun":
+    """Create a PENDING run for a test case and make it the test case's latest."""
+    run = EvaluationRun(test_case_id=tc.id, session_id=session_id, status="PENDING",
+                        evaluation_mode=tc.evaluation_mode or DEFAULT_EVALUATION_MODE)
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    tc.last_batch_evaluation_id = str(run.id)
+    tc.last_run_at = datetime.utcnow()
+    db.commit()
+    return run
+
+
+@router.post("/{agent_id}/evaluations/test-cases/run-all", response_model=RunAllResponse)
+def run_all_test_cases(
+    agent_id: int,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: UserInfo = Depends(require_scopes("agent:write")),
+    db: Session = Depends(get_db),
+) -> RunAllResponse:
+    """Run every test case for this agent in the background.
+
+    On-demand test cases run individually, as with /run. Batch-mode test
+    cases are grouped by evaluator set, and each group is scored by a single
+    batch job, so a suite run shows up as one job per evaluator set in the
+    AgentCore console instead of one job per test case.
+    """
+    agent = get_agent_or_404(agent_id, db, user)
+    if not agent.arn or not agent.runtime_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agent has no runtime to invoke yet")
+    access_token = _resolve_access_token(agent, request)
+
+    test_cases = db.query(EvaluationTestCase).filter(EvaluationTestCase.agent_id == agent_id).order_by(
+        EvaluationTestCase.created_at.asc()).all()
+    entries: list[RunAllEntry] = []
+    on_demand: list[tuple] = []
+    batch_items: list[tuple[int, str | None]] = []
+    batch_sets: set[tuple[str, ...]] = set()
+    for tc in test_cases:
+        run = _start_run(db, tc, str(uuid4()))
+        entries.append(RunAllEntry(test_case_id=tc.id, batch_evaluation_id=str(run.id),
+                                   evaluation_mode=run.evaluation_mode))
+        if run.evaluation_mode == EVALUATION_MODE_BATCH:
+            batch_items.append((run.id, tc.prompt))
+            batch_sets.add(_evaluator_set(tc))
+        else:
+            on_demand.append((run.id, tc.id, agent_id, run.session_id, tc.prompt, tc.model_id,
+                              access_token, user))
+    if on_demand or batch_items:
+        background_tasks.add_task(_execute_run_all, on_demand, batch_items, agent_id, agent.region,
+                                  access_token, user)
+    return RunAllResponse(runs=entries, batch_jobs=len(batch_sets))
 
 
 @router.post("/{agent_id}/evaluations/test-cases/{test_case_id}/run", response_model=RunTestCaseResponse)
@@ -580,8 +992,8 @@ def run_test_case(
     user: UserInfo = Depends(require_scopes("agent:write")),
     db: Session = Depends(get_db),
 ) -> RunTestCaseResponse:
-    """Kick off a test case run (invoke the agent, then score that session
-    via on-demand evaluation) in the background and return immediately — the
+    """Kick off a test case run (invoke the agent, then score that session in
+    the test case's evaluation mode) in the background and return immediately — the
     whole sequence can take anywhere from several seconds to a few minutes,
     and the caller shouldn't have to hold a connection open for that."""
     agent = get_agent_or_404(agent_id, db, user)
@@ -594,17 +1006,11 @@ def run_test_case(
     access_token = _resolve_access_token(agent, request)
 
     session_id = str(uuid4())
-    run = EvaluationRun(test_case_id=tc.id, session_id=session_id, status="PENDING")
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    tc.last_batch_evaluation_id = str(run.id)
-    tc.last_run_at = datetime.utcnow()
-    db.commit()
+    run = _start_run(db, tc, session_id)
 
     background_tasks.add_task(
         _execute_run, run.id, test_case_id, agent_id, session_id,
-        tc.prompt, tc.model_id, access_token, user.username,
+        tc.prompt, tc.model_id, access_token, user,
     )
 
     return RunTestCaseResponse(batch_evaluation_id=str(run.id), status=run.status, agent_response=None)
@@ -628,6 +1034,8 @@ def get_test_case_last_run(
         scores=[TestCaseScoreDetail(**s) for s in run.get_results()],
         errors=run.get_errors(),
         session_id=run.session_id,
+        evaluation_mode=run.evaluation_mode,
+        batch_job_id=run.batch_job_id,
     )
 
 
@@ -653,17 +1061,11 @@ def rescore_test_case(
     if not agent.runtime_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agent has no runtime")
 
-    run = EvaluationRun(test_case_id=tc.id, session_id=last_run.session_id, status="PENDING")
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    tc.last_batch_evaluation_id = str(run.id)
-    tc.last_run_at = datetime.utcnow()
-    db.commit()
+    run = _start_run(db, tc, last_run.session_id)
 
     background_tasks.add_task(
         _execute_run, run.id, test_case_id, agent_id, last_run.session_id,
-        None, tc.model_id, None, None,
+        None, tc.model_id, None, user,
     )
 
     return RunTestCaseResponse(batch_evaluation_id=str(run.id), status=run.status, agent_response=None)
@@ -687,9 +1089,68 @@ def list_test_case_runs(
             created_at=(r.created_at.isoformat() + "Z") if r.created_at else None,
             updated_at=(r.updated_at.isoformat() + "Z") if r.updated_at else None,
             errors=r.get_errors(),
+            evaluation_mode=r.evaluation_mode,
+            batch_job_id=r.batch_job_id,
         )
         for r in runs
     ]
+
+
+@router.post("/{agent_id}/evaluations/test-cases/{test_case_id}/runs/{batch_evaluation_id}/stop",
+             response_model=TestCaseRunDetailResponse)
+def stop_test_case_run(
+    agent_id: int,
+    test_case_id: int,
+    batch_evaluation_id: str,
+    background_tasks: BackgroundTasks,
+    user: UserInfo = Depends(require_scopes("agent:write")),
+    db: Session = Depends(get_db),
+) -> TestCaseRunDetailResponse:
+    """Stop a test case run that's still in progress.
+
+    The run is marked STOPPED straight away. Its background work checks for
+    that at each phase and while polling, so nothing more is invoked, waited
+    on, or scored for it. A batch job only this run was using is stopped in
+    AWS (and still cleaned up when the test case is deleted); a job shared
+    with other runs from the same Run all keeps going for them, and this
+    run just ignores its results. An agent invocation already streaming
+    can't be interrupted; its response is kept as a normal session but not
+    scored.
+    """
+    agent = get_agent_or_404(agent_id, db, user)
+    tc = _get_test_case_or_404(agent_id, test_case_id, db)
+    try:
+        run_id = int(batch_evaluation_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    run = db.query(EvaluationRun).filter(EvaluationRun.id == run_id, EvaluationRun.test_case_id == tc.id).first()
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if run.status not in _RUN_IN_PROGRESS:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"This run has already finished ({run.status}).")
+
+    run.status = _RUN_STOPPED
+    run.set_errors([f"Stopped by {user.username}."])
+    run.updated_at = datetime.utcnow()
+    db.commit()
+
+    still_wanted: set[str] = set()
+    others = db.query(EvaluationRun).join(EvaluationTestCase).filter(
+        EvaluationTestCase.agent_id == agent_id, EvaluationRun.id != run.id,
+        EvaluationRun.status.in_(_RUN_IN_PROGRESS))
+    for other in others.all():
+        still_wanted.update(other.get_batch_job_ids())
+    jobs = [j for j in run.get_batch_job_ids() if j not in still_wanted]
+    if jobs:
+        background_tasks.add_task(evals.stop_batch_jobs, jobs, agent.region)
+    return TestCaseRunDetailResponse(
+        status=run.status,
+        scores=[TestCaseScoreDetail(**sc) for sc in run.get_results()],
+        errors=run.get_errors(),
+        session_id=run.session_id,
+        evaluation_mode=run.evaluation_mode,
+        batch_job_id=run.batch_job_id,
+    )
 
 
 @router.get("/{agent_id}/evaluations/test-cases/{test_case_id}/runs/{batch_evaluation_id}",
@@ -716,4 +1177,6 @@ def get_test_case_run(
         scores=[TestCaseScoreDetail(**s) for s in run.get_results()],
         errors=run.get_errors(),
         session_id=run.session_id,
+        evaluation_mode=run.evaluation_mode,
+        batch_job_id=run.batch_job_id,
     )

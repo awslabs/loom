@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronRight, Copy, ExternalLink, Loader2, Pencil, Play, Plus, Search, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, Copy, ExternalLink, Loader2, Pencil, Play, Plus, Search, Square, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,7 +12,7 @@ import { StatusPill } from "@/components/StatusPill";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatRelativeDateTime } from "@/lib/format";
-import { evaluatorShortName, scoreVariant, formatScore, averageScore, classifyResult, hasPartialErrors, cloudWatchLogGroupUrl, agentLogGroupName, runPhaseLabel, type ResultStatus } from "@/lib/evaluations";
+import { evaluatorShortName, scoreVariant, formatScore, averageScore, classifyResult, hasPartialErrors, cloudWatchLogGroupUrl, agentLogGroupName, runPhaseLabel, RUNNING_STATUSES, type ResultStatus } from "@/lib/evaluations";
 import { fetchModels } from "@/api/agents";
 import {
   listEvaluators,
@@ -21,14 +21,16 @@ import {
   updateTestCase,
   deleteTestCase,
   runTestCase,
+  runAllTestCases,
   rescoreTestCase,
+  stopTestCaseRun,
   getTestCaseLastRun,
   listTestCaseRuns,
   getTestCaseRun,
 } from "@/api/evaluations";
-import type { EvaluatorInfo, EvaluationTestCase, EvaluationTestCaseRequest, TestCaseScoreDetail, ModelOption, SessionResponse, TestCaseRunSummary as ApiTestCaseRunSummary } from "@/api/types";
+import type { EvaluatorInfo, EvaluationMode, EvaluationTestCase, EvaluationTestCaseRequest, TestCaseScoreDetail, ModelOption, SessionResponse, TestCaseRunSummary as ApiTestCaseRunSummary } from "@/api/types";
 
-/** Author and run on-demand evaluations for one agent, and review the latest
+/** Author and run evaluations (on-demand or batch) for one agent, and review the latest
  * result per test case.
  *
  * Loom saves only the test case itself (prompt, optional expected response,
@@ -75,6 +77,9 @@ interface RunState {
   error: string | null;
   errors?: string[];
   sessionId?: string | null;
+  evaluationMode?: EvaluationMode | null;
+  /** AgentCore batchEvaluationId, when the run was scored in batch mode. */
+  batchJobId?: string | null;
   /** The run this state is for, so a new run (or rescore) that changes
    * last_batch_evaluation_id is detected and refetched instead of showing
    * a stale cached result forever. */
@@ -95,7 +100,12 @@ interface FormState {
   evaluatorIds: string[];
   passThreshold: string;
   modelId: string;
+  evaluationMode: EvaluationMode;
 }
+
+const EVALUATION_MODE_LABELS: Record<EvaluationMode, string> = { on_demand: "On-demand", batch: "Batch" };
+/** StartBatchEvaluation's per-job evaluator limit; on-demand has none. */
+const BATCH_MAX_EVALUATORS = 10;
 
 /** "36s" / "1m 12s" between two ISO timestamps, or null if either is missing. */
 function formatDuration(startIso: string | null | undefined, endIso: string | null | undefined): string | null {
@@ -113,7 +123,7 @@ function formatStartedAgo(startIso: string | null | undefined): string {
   return `Started ${minutes}m ago`;
 }
 
-const EMPTY_FORM: FormState = { id: null, name: "", prompt: "", expectedResponse: "", evaluatorIds: [], passThreshold: "0.70", modelId: "" };
+const EMPTY_FORM: FormState = { id: null, name: "", prompt: "", expectedResponse: "", evaluatorIds: [], passThreshold: "0.70", modelId: "", evaluationMode: "batch" };
 const PRESETS: Record<string, string[]> = {
   Quality: ["Builtin.Correctness", "Builtin.Faithfulness", "Builtin.Helpfulness", "Builtin.ResponseRelevance"],
   Safety: ["Builtin.Refusal", "Builtin.Harmfulness", "Builtin.Stereotyping"],
@@ -365,7 +375,22 @@ function TestCaseForm({
                 </SelectContent>
               </Select>
             </div>
+            <div className="flex flex-col gap-1 w-36">
+              <label className="text-xs text-muted-foreground">Evaluation</label>
+              <Select value={form.evaluationMode} onValueChange={(v) => onChange({ ...form, evaluationMode: v as EvaluationMode })}>
+                <SelectTrigger className="w-full text-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="batch">{EVALUATION_MODE_LABELS.batch}</SelectItem>
+                  <SelectItem value="on_demand">{EVALUATION_MODE_LABELS.on_demand}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
+          {form.evaluationMode === "batch" && (
+            <span className={`text-[11px] ${form.evaluatorIds.length > BATCH_MAX_EVALUATORS ? "text-destructive" : "text-muted-foreground"}`}>
+              Each run starts one AgentCore batch evaluation job, which stays visible in the AWS console. Up to {BATCH_MAX_EVALUATORS} evaluators.
+            </span>
+          )}
         </div>
         <EvaluatorPicker
           evaluators={evaluators}
@@ -572,17 +597,20 @@ function EarlierRunsList({
       {earlier.map((run) => {
         const isOpen = expandedRunId === run.batch_evaluation_id;
         const runDetail = historyRunStates[run.batch_evaluation_id];
-        const isRunning = run.status === "PENDING" || run.status === "IN_PROGRESS" || run.status === "RUNNING";
-        const isError = !isRunning && (run.status === "FAILED" || run.errors.length > 0);
+        const isRunning = run.status !== null && (RUNNING_STATUSES.has(run.status) || run.status === "IN_PROGRESS");
+        const isStopped = run.status === "STOPPED";
+        const isError = !isRunning && !isStopped && (run.status === "FAILED" || run.errors.length > 0);
         // Status pills everywhere use the same short, fixed vocabulary
         // (PASS/FAIL/ERROR/RUNNING) — showing the raw backend status
         // ("IN_PROGRESS", "COMPLETED") here both breaks that consistency and
         // overflows this row's narrow fixed-width pill column.
-        const label = isRunning ? "RUNNING" : isError ? "ERROR" : run.status === "COMPLETED" ? "PASS" : "UNKNOWN";
+        const label = isRunning ? "RUNNING" : isStopped ? "STOPPED" : isError ? "ERROR" : run.status === "COMPLETED" ? "PASS" : "UNKNOWN";
         const variant = isRunning ? "info" : isError ? "warning" : run.status === "COMPLETED" ? "success" : "neutral";
-        const summary = isError
-          ? `Couldn't score${run.errors[0] ? `: ${run.errors[0]}` : ""}`
-          : null;
+        const summary = isStopped
+          ? (run.errors[0] ?? "Stopped")
+          : isError
+            ? `Couldn't score${run.errors[0] ? `: ${run.errors[0]}` : ""}`
+            : null;
         const score = runDetail && !runDetail.loading ? averageScore(runDetail.scores) : null;
         return (
           <div key={run.batch_evaluation_id} className="rounded-md border">
@@ -665,6 +693,19 @@ function ErrorPanel({
           </button>
         </div>
       )}
+      {runState.batchJobId && (
+        <div className="flex items-center gap-2 rounded-md border bg-background px-2.5 py-1.5">
+          <span className="font-mono text-[9.5px] uppercase tracking-wide text-muted-foreground">Batch job</span>
+          <span className="min-w-0 truncate font-mono text-xs">{runState.batchJobId}</span>
+          <button
+            type="button"
+            className="ml-auto shrink-0 rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent"
+            onClick={() => { void navigator.clipboard.writeText(runState.batchJobId!); toast.success("Batch job ID copied"); }}
+          >
+            <Copy className="h-3 w-3" />
+          </button>
+        </div>
+      )}
       <div className="flex items-center gap-2">
         <Button size="sm" disabled={rescoring} onClick={onRescore} className="h-7 gap-1.5 text-xs">
           {rescoring ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
@@ -703,8 +744,10 @@ function TestCaseRow({
   onDelete,
   onRun,
   onRescore,
+  onStop,
   running,
   rescoring,
+  stopping,
   deleting,
   runState,
   history,
@@ -721,8 +764,10 @@ function TestCaseRow({
   onDelete: () => void;
   onRun: () => void;
   onRescore: () => void;
+  onStop: () => void;
   running: boolean;
   rescoring: boolean;
+  stopping: boolean;
   deleting: boolean;
   runState: RunState | undefined;
   history: RunHistoryState | undefined;
@@ -739,6 +784,7 @@ function TestCaseRow({
     : resultStatus === "fail" ? "FAIL"
     : resultStatus === "error" ? "ERROR"
     : resultStatus === "running" ? "RUNNING"
+    : resultStatus === "stopped" ? "STOPPED"
     : "NOT RUN";
   const resultVariant = resultStatus === "pass" ? "success"
     : resultStatus === "fail" ? "destructive"
@@ -754,7 +800,13 @@ function TestCaseRow({
       {runState?.sessionId && onOpenSession && (
         <button type="button" className="text-primary hover:underline" onClick={() => onOpenSession(runState.sessionId!)}>Open session</button>
       )}
-      <button type="button" className="text-primary hover:underline disabled:opacity-50" onClick={onRun} disabled={running}>Run now</button>
+      {resultStatus === "running" ? (
+        <button type="button" className="inline-flex items-center gap-1 text-destructive hover:underline disabled:opacity-50" onClick={onStop} disabled={stopping}>
+          {stopping ? <Loader2 className="h-3 w-3 animate-spin" /> : <Square className="h-3 w-3" />} Stop run
+        </button>
+      ) : (
+        <button type="button" className="text-primary hover:underline disabled:opacity-50" onClick={onRun} disabled={running}>Run now</button>
+      )}
       <button type="button" className="inline-flex items-center gap-1 text-primary hover:underline" onClick={onEdit}>
         <Pencil className="h-3 w-3" /> Edit test
       </button>
@@ -800,8 +852,15 @@ function TestCaseRow({
               {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
               Run
             </Button>
+          ) : resultStatus === "running" ? (
+            <div className="inline-flex items-center gap-1.5">
+              <StatusPill label={resultLabel} variant={resultVariant} pulse />
+              <Button size="sm" variant="ghost" disabled={stopping} onClick={onStop} title="Stop this run" aria-label={`Stop the run of ${tc.name}`} className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive">
+                {stopping ? <Loader2 className="h-3 w-3 animate-spin" /> : <Square className="h-3 w-3" />}
+              </Button>
+            </div>
           ) : (
-            <StatusPill label={resultLabel} variant={resultVariant} pulse={resultStatus === "running"} />
+            <StatusPill label={resultLabel} variant={resultVariant} pulse={false} />
           )}
         </TableCell>
       </TableRow>
@@ -819,7 +878,7 @@ function TestCaseRow({
                         ? runPhaseLabel(runState?.status ?? null)
                         : formatRelativeDateTime(tc.last_run_at, timezone)}
                       {latestHistoryEntry && formatDuration(latestHistoryEntry.created_at, latestHistoryEntry.updated_at) && ` · ${formatDuration(latestHistoryEntry.created_at, latestHistoryEntry.updated_at)}`}
-                      {resultStatus !== "running" && " · manual"}
+                      {resultStatus !== "running" && ` · manual · ${EVALUATION_MODE_LABELS[runState?.evaluationMode ?? tc.evaluation_mode ?? "on_demand"]}`}
                     </span>
                   </>
                 ) : (
@@ -833,6 +892,10 @@ function TestCaseRow({
                 <p className="whitespace-normal p-3.5 text-xs text-destructive">{runState.error}</p>
               ) : runState === undefined || runState.loading ? (
                 <Skeleton className="m-3.5 h-16" />
+              ) : resultStatus === "stopped" ? (
+                <p className="whitespace-normal p-3.5 text-xs text-muted-foreground">
+                  {runState.errors?.[0] ?? "This run was stopped."} Nothing was scored. Run it again to get results.
+                </p>
               ) : resultStatus === "error" ? (
                 <div className="p-3.5">
                   <ErrorPanel
@@ -984,6 +1047,7 @@ export function EvaluationTestCases({ agentId, agentName, region, runtimeId, ses
   const [saving, setSaving] = useState(false);
   const [runningId, setRunningId] = useState<number | null>(null);
   const [rescoringId, setRescoringId] = useState<number | null>(null);
+  const [stoppingId, setStoppingId] = useState<number | null>(null);
   const [runningAll, setRunningAll] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<EvaluationTestCase | null>(null);
@@ -1032,7 +1096,7 @@ export function EvaluationTestCases({ agentId, agentName, region, runtimeId, ses
     });
     try {
       const detail = await getTestCaseLastRun(agentId, tc.id);
-      setRunStates((prev) => ({ ...prev, [tc.id]: { status: detail.status, scores: detail.scores, loading: false, error: null, errors: detail.errors, sessionId: detail.session_id, batchEvaluationId } }));
+      setRunStates((prev) => ({ ...prev, [tc.id]: { status: detail.status, scores: detail.scores, loading: false, error: null, errors: detail.errors, sessionId: detail.session_id, evaluationMode: detail.evaluation_mode, batchJobId: detail.batch_job_id, batchEvaluationId } }));
     } catch (e) {
       setRunStates((prev) => ({ ...prev, [tc.id]: { status: null, scores: [], loading: false, error: e instanceof Error ? e.message : "Failed to load results", batchEvaluationId } }));
     }
@@ -1056,7 +1120,7 @@ export function EvaluationTestCases({ agentId, agentName, region, runtimeId, ses
     setHistoryRunStates((prev) => ({ ...prev, [batchEvaluationId]: { status: null, scores: [], loading: true, error: null } }));
     try {
       const detail = await getTestCaseRun(agentId, tc.id, batchEvaluationId);
-      setHistoryRunStates((prev) => ({ ...prev, [batchEvaluationId]: { status: detail.status, scores: detail.scores, loading: false, error: null, errors: detail.errors, sessionId: detail.session_id } }));
+      setHistoryRunStates((prev) => ({ ...prev, [batchEvaluationId]: { status: detail.status, scores: detail.scores, loading: false, error: null, errors: detail.errors, sessionId: detail.session_id, evaluationMode: detail.evaluation_mode, batchJobId: detail.batch_job_id } }));
     } catch (e) {
       setHistoryRunStates((prev) => ({ ...prev, [batchEvaluationId]: { status: null, scores: [], loading: false, error: e instanceof Error ? e.message : "Failed to load run" } }));
     }
@@ -1123,6 +1187,7 @@ export function EvaluationTestCases({ agentId, agentName, region, runtimeId, ses
       evaluator_ids: form.evaluatorIds,
       pass_threshold: Number(form.passThreshold) || 0.7,
       model_id: form.modelId || null,
+      evaluation_mode: form.evaluationMode,
     };
     try {
       const saved = form.id === null
@@ -1180,26 +1245,38 @@ export function EvaluationTestCases({ agentId, agentName, region, runtimeId, ses
     }
   };
 
+  const handleStop = async (tc: EvaluationTestCase) => {
+    if (!tc.last_batch_evaluation_id) return;
+    setStoppingId(tc.id);
+    try {
+      await stopTestCaseRun(agentId, tc.id, tc.last_batch_evaluation_id);
+      toast.success(`Stopped "${tc.name}"`);
+      await load(true);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to stop the run");
+    } finally {
+      setStoppingId(null);
+    }
+  };
+
   const handleRunAll = async () => {
     setRunningAll(true);
     try {
-      // Each call now just creates a PENDING run row and schedules a
-      // background task — the actual invoke+wait+evaluate work (what used
-      // to make this slow) happens after the response, not before it. So
-      // these can be fired concurrently and still return almost instantly;
-      // the old sequential-with-a-full-reload-per-iteration loop here (built
-      // around batch evaluation's internal timeout, which on-demand
-      // evaluation no longer has) was adding delay and causing the table to
-      // flash on every iteration for no benefit.
-      const results = await Promise.allSettled(
-        testCases.map((tc) => runTestCase(agentId, tc.id).catch(() => { throw new Error(tc.name); })),
-      );
-      for (const r of results) {
-        if (r.status === "rejected") toast.error(`Failed to run "${(r.reason as Error).message}"`);
+      // One request: the backend creates a PENDING run per test case and does
+      // the invoke+wait+evaluate work in the background. Batch-mode test
+      // cases are grouped there so each evaluator set shares one batch job,
+      // which per-test-case /run calls couldn't do.
+      try {
+        const started = await runAllTestCases(agentId);
+        const jobs = started.batch_jobs > 0
+          ? ` (${started.batch_jobs} batch job${started.batch_jobs === 1 ? "" : "s"})`
+          : "";
+        toast.success(`Started ${started.runs.length} test case${started.runs.length === 1 ? "" : "s"}${jobs}`);
+      } catch (e) {
+        toast.error(`Failed to run all test cases: ${e instanceof Error ? e.message : "unknown error"}`);
       }
       await load(true);
       onRunStarted?.();
-      toast.success("Started all test cases");
     } finally {
       setRunningAll(false);
     }
@@ -1214,6 +1291,7 @@ export function EvaluationTestCases({ agentId, agentName, region, runtimeId, ses
         evaluator_ids: tc.evaluator_ids,
         pass_threshold: tc.pass_threshold,
         model_id: tc.model_id,
+        evaluation_mode: tc.evaluation_mode,
       })),
     };
     return JSON.stringify(manifest, null, 2);
@@ -1251,6 +1329,7 @@ export function EvaluationTestCases({ agentId, agentName, region, runtimeId, ses
           evaluator_ids: entry.evaluator_ids as string[],
           pass_threshold: typeof entry.pass_threshold === "number" ? entry.pass_threshold : 0.7,
           model_id: typeof entry.model_id === "string" ? entry.model_id : null,
+          evaluation_mode: entry.evaluation_mode === "on_demand" ? "on_demand" : "batch",
         });
         imported++;
       } catch (e) {
@@ -1394,10 +1473,13 @@ export function EvaluationTestCases({ agentId, agentName, region, runtimeId, ses
                       evaluatorIds: tc.evaluator_ids,
                       passThreshold: String(tc.pass_threshold),
                       modelId: tc.model_id ?? "",
+                      evaluationMode: tc.evaluation_mode ?? "on_demand",
                     })}
                     onDelete={() => setDeleteTarget(tc)}
                     onRun={() => void handleRun(tc)}
                     onRescore={() => void handleRescore(tc)}
+                    onStop={() => void handleStop(tc)}
+                    stopping={stoppingId === tc.id}
                     running={runningId === tc.id}
                     rescoring={rescoringId === tc.id}
                     deleting={deletingId === tc.id}
@@ -1420,7 +1502,9 @@ export function EvaluationTestCases({ agentId, agentName, region, runtimeId, ses
         open={deleteTarget !== null}
         onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
         title="Delete test case"
-        description={deleteTarget ? `Delete test case "${deleteTarget.name}"? This cannot be undone.` : ""}
+        description={deleteTarget
+          ? `Delete test case "${deleteTarget.name}" and its run history? Its batch evaluation jobs are deleted in AWS too, unless another test case's run shares them. This cannot be undone.`
+          : ""}
         confirmLabel="Delete"
         onConfirm={() => {
           if (deleteTarget) void handleDelete(deleteTarget);

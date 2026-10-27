@@ -609,6 +609,75 @@ class TestLoomCannotWriteIam(unittest.TestCase):
         self.assertEqual([], offenders, f"PermissionRequest still referenced in {offenders}")
 
 
+# AgentCore resource policies (runtime, endpoint, gateway) are the same kind of
+# capability as an IAM policy write: one Allow for another account's principal
+# is a cross-account grant, and IAM can't limit a written policy to deny-only
+# because PutResourcePolicy's only condition key is aws:ResourceTag. The task
+# role's bedrock-agentcore:* would include these writes, so it carries an
+# explicit Deny, and no code under app/ calls them.
+RESOURCE_POLICY_WRITE_ACTIONS = ("put_resource_policy", "delete_resource_policy")
+ECS_TEMPLATE = APP_DIR.parent / "iac" / "ecs.yaml"
+
+
+def _load_cfn_template(path: pathlib.Path) -> dict:
+    """Parse a CloudFormation template, treating intrinsic tags (!Sub, !Ref, ...) as plain values."""
+    import yaml
+
+    class _Loader(yaml.SafeLoader):
+        pass
+
+    def _intrinsic(loader: yaml.SafeLoader, suffix: str, node: yaml.Node) -> object:
+        if isinstance(node, yaml.ScalarNode):
+            return loader.construct_scalar(node)
+        if isinstance(node, yaml.SequenceNode):
+            return loader.construct_sequence(node)
+        return loader.construct_mapping(node)
+
+    _Loader.add_multi_constructor("!", _intrinsic)
+    return yaml.load(path.read_text(), Loader=_Loader)
+
+
+class TestLoomCannotWriteResourcePolicies(unittest.TestCase):
+    def test_no_resource_policy_write_calls_anywhere_in_app(self) -> None:
+        offenders = []
+        for path in sorted(APP_DIR.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Call) and getattr(node.func, "attr", None) in RESOURCE_POLICY_WRITE_ACTIONS:
+                    offenders.append(f"{path.relative_to(APP_DIR).as_posix()}:{node.lineno} .{node.func.attr}()")
+        self.assertEqual(
+            [], offenders,
+            "Loom must not write AgentCore resource policies: a resource policy can "
+            "grant cross-account access, and the task role denies these actions:\n  "
+            + "\n  ".join(offenders),
+        )
+
+    def test_task_role_explicitly_denies_resource_policy_writes(self) -> None:
+        """An explicit Deny, not just an absent Allow: the role's bedrock-agentcore:*
+        would otherwise include both actions."""
+        resources = _load_cfn_template(ECS_TEMPLATE)["Resources"]
+        task_roles = [
+            r for r in resources.values()
+            if r.get("Type") == "AWS::IAM::Role"
+            and "ecs-tasks.amazonaws.com" in str(r["Properties"].get("AssumeRolePolicyDocument"))
+            and any("bedrock-agentcore:*" in str(p) for p in r["Properties"].get("Policies", []))
+        ]
+        self.assertTrue(task_roles, "no ECS task role granting bedrock-agentcore:* found in ecs.yaml")
+        for role in task_roles:
+            denied = set()
+            for policy in role["Properties"]["Policies"]:
+                for statement in policy["PolicyDocument"]["Statement"]:
+                    if statement.get("Effect") != "Deny" or statement.get("Condition"):
+                        continue
+                    if statement.get("Resource") != "*":
+                        continue
+                    actions = statement.get("Action")
+                    denied.update([actions] if isinstance(actions, str) else actions)
+            self.assertLessEqual(
+                {"bedrock-agentcore:PutResourcePolicy", "bedrock-agentcore:DeleteResourcePolicy"}, denied,
+                "The ECS task role must explicitly deny AgentCore resource-policy writes on all resources",
+            )
+
+
 # ---------------------------------------------------------------------------
 # 5. Server-supplied URLs reach the browser only through the guard
 # ---------------------------------------------------------------------------

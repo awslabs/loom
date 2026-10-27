@@ -288,6 +288,19 @@ Resources:
                 Action:
                   - bedrock-agentcore:*
                 Resource: !Sub "arn:aws:bedrock-agentcore:*:${AWS::AccountId}:*"
+              # The wildcard above includes resource-policy writes on runtimes,
+              # endpoints and gateways. Loom never needs them, and a resource
+              # policy can grant access as well as deny it — an Allow for
+              # another account's principal is a cross-account backdoor that
+              # outlives Loom's credentials and never shows up in IAM. IAM
+              # can't restrict what a written policy contains (the actions'
+              # only condition key is aws:ResourceTag), so Loom gets no write
+              # at all, matching its no-IAM-write model. Reads stay allowed.
+              - Effect: Deny
+                Action:
+                  - bedrock-agentcore:PutResourcePolicy
+                  - bedrock-agentcore:DeleteResourcePolicy
+                Resource: "*"
         - PolicyName: AgentRegistryPolicy
           PolicyDocument:
             Version: "2012-10-17"

@@ -27,11 +27,12 @@ export function averageScore(scores: { value: number | null }[]): number | null 
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
-/** The four meanings a test case's latest run can carry. PASS/FAIL mean the
- * run finished and scored; ERROR means it never got far enough to be scored
- * (no trace spans, timeout, evaluator failure) — a pipeline problem, not a
- * verdict on the agent. NOT_RUN means it has never been run. */
-export type ResultStatus = "pass" | "fail" | "error" | "not_run" | "running";
+/** What a test case's latest run can mean. PASS/FAIL mean the run finished
+ * and scored; ERROR means it never got far enough to be scored (no trace
+ * spans, timeout, evaluator failure) — a pipeline problem, not a verdict on
+ * the agent. STOPPED means a user stopped it before it finished. NOT_RUN
+ * means it has never been run. */
+export type ResultStatus = "pass" | "fail" | "error" | "stopped" | "not_run" | "running";
 
 export interface RunLike {
   status: string | null;
@@ -39,7 +40,7 @@ export interface RunLike {
   scores: { value: number | null }[];
 }
 
-const RUNNING_STATUSES = new Set([
+export const RUNNING_STATUSES = new Set([
   "PENDING",
   "IN_PROGRESS",
   "RUNNING",
@@ -76,6 +77,7 @@ export function classifyResult(hasRun: boolean, run: RunLike | undefined, passTh
   if (!hasRun) return "not_run";
   if (!run) return "running";
   if (run.status !== null && RUNNING_STATUSES.has(run.status)) return "running";
+  if (run.status === "STOPPED") return "stopped";
   if (run.status === "FAILED") return "error";
   const overall = averageScore(run.scores);
   if (overall === null) return "error";

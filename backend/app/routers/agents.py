@@ -3657,10 +3657,21 @@ def _delete_agent_background(
         db.query(InvocationSession).filter(InvocationSession.agent_id == agent_id).delete()
         agent = db.query(Agent).filter(Agent.id == agent_id).first()
         if agent and agent.runtime_id == runtime_id:
+            # Batch evaluation jobs from the agent's test cases go with it.
+            from app.models.evaluation import EvaluationRun, EvaluationTestCase
+            from app.services.evaluations import delete_batch_jobs
+            batch_jobs = sorted({
+                job_id
+                for run in db.query(EvaluationRun).join(EvaluationTestCase).filter(
+                    EvaluationTestCase.agent_id == agent_id).all()
+                for job_id in run.get_batch_job_ids()
+            })
             db.delete(agent)
             db.flush()
             db.commit()
             logger.info("Purged agent %d and its sessions from database", agent_id)
+            if batch_jobs:
+                delete_batch_jobs(batch_jobs, region)
         elif agent:
             db.commit()
             logger.info("Agent %d has a different runtime_id (%s vs %s); skipping purge (likely recreated)", agent_id, agent.runtime_id, runtime_id)

@@ -20,11 +20,12 @@ interface EvaluationRailProps {
   runningAll?: boolean;
 }
 
-const LEGEND: { key: "pass" | "running" | "fail" | "error" | "not_run"; label: string; dot: string; bar: string }[] = [
+const LEGEND: { key: "pass" | "running" | "fail" | "error" | "stopped" | "not_run"; label: string; dot: string; bar: string }[] = [
   { key: "pass", label: "Passed", dot: "bg-success", bar: "bg-success" },
   { key: "running", label: "Running", dot: "bg-primary/45", bar: "bg-primary/45" },
   { key: "fail", label: "Failed", dot: "bg-destructive", bar: "bg-destructive" },
   { key: "error", label: "Couldn't score", dot: "bg-warning", bar: "bg-warning" },
+  { key: "stopped", label: "Stopped", dot: "bg-muted-foreground/40", bar: "bg-muted-foreground/40" },
   { key: "not_run", label: "Not run", dot: "border border-foreground/15 bg-muted box-border", bar: "bg-muted" },
 ];
 

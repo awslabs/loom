@@ -6,6 +6,7 @@ import type {
   EvaluatorInfo,
   EvaluationTestCase,
   EvaluationTestCaseRequest,
+  RunAllResponse,
   RunTestCaseResponse,
   TestCaseRunDetailResponse,
   TestCaseRunSummary,
@@ -73,9 +74,16 @@ export function deleteTestCase(agentId: number, testCaseId: number): Promise<voi
   });
 }
 
-/** Invoke the agent with the test case's prompt, then start a batch evaluation scoped to that run. */
+/** Invoke the agent with the test case's prompt, then score that session in the test case's evaluation mode. */
 export function runTestCase(agentId: number, testCaseId: number): Promise<RunTestCaseResponse> {
   return apiFetch<RunTestCaseResponse>(`/api/agents/${agentId}/evaluations/test-cases/${testCaseId}/run`, {
+    method: "POST",
+  });
+}
+
+/** Run every test case for this agent. Batch-mode test cases with the same evaluators share one batch job. */
+export function runAllTestCases(agentId: number): Promise<RunAllResponse> {
+  return apiFetch<RunAllResponse>(`/api/agents/${agentId}/evaluations/test-cases/run-all`, {
     method: "POST",
   });
 }
@@ -92,6 +100,14 @@ export function rescoreTestCase(agentId: number, testCaseId: number): Promise<Ru
   return apiFetch<RunTestCaseResponse>(`/api/agents/${agentId}/evaluations/test-cases/${testCaseId}/rescore`, {
     method: "POST",
   });
+}
+
+/** Stop a run that's still in progress. Its own batch job (if any) is stopped in AWS too. */
+export function stopTestCaseRun(agentId: number, testCaseId: number, runId: string): Promise<TestCaseRunDetailResponse> {
+  return apiFetch<TestCaseRunDetailResponse>(
+    `/api/agents/${agentId}/evaluations/test-cases/${testCaseId}/runs/${encodeURIComponent(runId)}/stop`,
+    { method: "POST" },
+  );
 }
 
 /** Every past run of this test case, newest first, including failed ones. */

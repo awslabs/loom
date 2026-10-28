@@ -1254,6 +1254,9 @@ export interface EvaluatorInfo {
   group: string;
 }
 
+/** How a test case's runs are scored: on-demand Evaluate calls, or one batch evaluation job. */
+export type EvaluationMode = "on_demand" | "batch";
+
 export interface EvaluationTestCaseRequest {
   name: string;
   prompt: string;
@@ -1261,6 +1264,7 @@ export interface EvaluationTestCaseRequest {
   evaluator_ids: string[];
   pass_threshold: number;
   model_id?: string | null;
+  evaluation_mode?: EvaluationMode;
 }
 
 export interface EvaluationTestCase {
@@ -1272,6 +1276,7 @@ export interface EvaluationTestCase {
   evaluator_ids: string[];
   pass_threshold: number;
   model_id: string | null;
+  evaluation_mode: EvaluationMode;
   last_batch_evaluation_id: string | null;
   last_run_at: string | null;
   created_at: string | null;
@@ -1291,6 +1296,10 @@ export interface TestCaseRunDetailResponse {
   scores: TestCaseScoreDetail[];
   errors: string[];
   session_id: string | null;
+  /** The mode this run was scored with (null for runs from before modes existed). */
+  evaluation_mode?: EvaluationMode | null;
+  /** AgentCore batchEvaluationId, for batch-mode runs. */
+  batch_job_id?: string | null;
 }
 
 export interface TestCaseRunSummary {
@@ -1299,6 +1308,20 @@ export interface TestCaseRunSummary {
   created_at: string | null;
   updated_at: string | null;
   errors: string[];
+  evaluation_mode?: EvaluationMode | null;
+  batch_job_id?: string | null;
+}
+
+export interface RunAllEntry {
+  test_case_id: number;
+  batch_evaluation_id: string;
+  evaluation_mode: EvaluationMode;
+}
+
+/** What "Run all" started: a run per test case, with batch-mode runs sharing one job per evaluator set. */
+export interface RunAllResponse {
+  runs: RunAllEntry[];
+  batch_jobs: number;
 }
 
 export interface RunTestCaseResponse {

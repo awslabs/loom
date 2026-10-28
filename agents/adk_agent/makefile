@@ -6,11 +6,17 @@ CONFIG_PATH := etc/config.json
 BUILD_DIR := build
 ARTIFACT := $(BUILD_DIR)/agent.zip
 
-.PHONY: install test run invoke build clean
+.PHONY: install lock test run invoke build clean
 
 install:
 	uv venv $(VENV_DIR)
 	uv pip install -r requirements.txt
+
+# requirements.txt is generated: edit requirements.in, then run this to
+# re-pin every dependency for the AgentCore Runtime build target
+# (linux/arm64, Python 3.13), the same target build_agent_artifact installs for.
+lock:
+	uv pip compile requirements.in -o requirements.txt --python-version 3.13 --python-platform aarch64-manylinux2014 --only-binary :all:
 
 test:
 	source $(VENV_DIR)/bin/activate && python -m pytest $(TEST_DIR)/ -v

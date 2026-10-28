@@ -288,6 +288,19 @@ Resources:
                 Action:
                   - bedrock-agentcore:*
                 Resource: !Sub "arn:aws:bedrock-agentcore:*:${AWS::AccountId}:*"
+              # The wildcard above includes resource-policy writes on runtimes,
+              # endpoints and gateways. Loom never needs them, and a resource
+              # policy can grant access as well as deny it — an Allow for
+              # another account's principal is a cross-account backdoor that
+              # outlives Loom's credentials and never shows up in IAM. IAM
+              # can't restrict what a written policy contains (the actions'
+              # only condition key is aws:ResourceTag), so Loom gets no write
+              # at all, matching its no-IAM-write model. Reads stay allowed.
+              - Effect: Deny
+                Action:
+                  - bedrock-agentcore:PutResourcePolicy
+                  - bedrock-agentcore:DeleteResourcePolicy
+                Resource: "*"
         - PolicyName: AgentRegistryPolicy
           PolicyDocument:
             Version: "2012-10-17"
@@ -389,6 +402,34 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
                   - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/vendedlogs/bedrock-agentcore/*"
+              # Logs Insights queries for a session's OTEL spans — used by
+              # app/services/evaluations.py to wait until a test-case run's
+              # spans are queryable before scoring them (both evaluation
+              # modes), and to collect them for on-demand Evaluate calls.
+              # Spans land in the runtime's own log group or the shared
+              # aws/spans group, depending on how the runtime exports them.
+              - Effect: Allow
+                Action:
+                  - logs:StartQuery
+                Resource:
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*"
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:aws/spans"
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:aws/spans:*"
+              # Deleting a Loom batch evaluation job leaves its run-<job id>
+              # stream in the shared results log group, so
+              # app/services/evaluations.delete_batch_jobs deletes it too.
+              # Scoped to streams of jobs Loom named (loom_ prefix).
+              - Effect: Allow
+                Action:
+                  - logs:DeleteLogStream
+                Resource:
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/evaluations/batch-evaluations/results/default:log-stream:run-loom_*"
+              # GetQueryResults takes only a query ID and has no resource-level
+              # scoping support.
+              - Effect: Allow
+                Action:
+                  - logs:GetQueryResults
+                Resource: "*"
               # CloudWatch Logs delivery pipeline — used by
               # app/services/observability.py to route AgentCore Runtime and
               # Code Interpreter vended logs into the log groups above.

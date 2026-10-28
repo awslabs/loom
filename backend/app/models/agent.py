@@ -62,6 +62,11 @@ class Agent(Base):
     vpc_security_group_ids = Column(Text, nullable=True)  # kept for migration; resolved via vpc_config_id at deploy time
     vpc_config_id = Column(Integer, ForeignKey("vpc_configs.id"), nullable=True)
     status_reason = Column(String, nullable=True)  # failureReason from AgentCore API on CREATE_FAILED/UPDATE_FAILED
+    # The system prompt as the user wrote it, before Loom appends generated
+    # parts (code interpreter instructions, attached skills). Export returns
+    # this so editing an agent doesn't feed generated text back in as the
+    # description. Loom's own record only; never sent to the runtime.
+    user_system_prompt = Column(Text, nullable=True)
 
     # Relationships
     sessions = relationship("InvocationSession", back_populates="agent", cascade="all, delete-orphan")

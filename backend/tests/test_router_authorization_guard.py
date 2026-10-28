@@ -221,7 +221,6 @@ ALLOWED_PK_BIND = {
     ("agents.py", "_update_harness_background"): "queued by redeploy_harness_agent after get_agent_or_404",
     ("agents.py", "_delete_agent_background"): "queued by delete_agent after get_agent_or_404",
     ("agents.py", "_register_agent_in_registry_background"): "queued post-deploy with the agent's own id",
-    ("evaluations.py", "_execute_run"): "queued by run_test_case/rescore_test_case after get_agent_or_404",
     # Not a caller-supplied lookup: queries by name and uses `id !=` only to
     # exclude the row being updated. It compares loom:group tags directly,
     # which is the check, but deliberately not through

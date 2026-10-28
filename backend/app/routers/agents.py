@@ -662,7 +662,7 @@ def _get_attached_skill_prompt_text(agent_id: int, db: Session) -> str:
 
     if not sections:
         return ""
-    return "## Attached Skills\n\n" + "\n\n---\n\n".join(sections)
+    return _SKILLS_HEADING + "\n\n" + "\n\n---\n\n".join(sections)
 
 
 def _validate_system_prompt_size(request: AgentCreateRequest) -> None:
@@ -677,7 +677,7 @@ def _validate_system_prompt_size(request: AgentCreateRequest) -> None:
     the artifact, not by blocking the deploy.
     """
     total = (
-        len((request.agent_description or "").encode("utf-8"))
+        len(_strip_generated_prompt_parts(request.agent_description or "").encode("utf-8"))
         + len((request.behavioral_guidelines or "").encode("utf-8"))
         + len((request.output_expectations or "").encode("utf-8"))
     )
@@ -692,26 +692,59 @@ def _validate_system_prompt_size(request: AgentCreateRequest) -> None:
         )
 
 
+_CODE_INTERPRETER_PROMPT = (
+    "You have a sandboxed code interpreter available. Run code via "
+    "the `shell` tool (e.g. write a script and run `python3 script.py`) "
+    "and read/write files via the `file_operations` tool."
+)
+_SKILLS_HEADING = "## Attached Skills"
+
+
+def _strip_generated_prompt_parts(text: str) -> str:
+    """Remove what _build_system_prompt appends from a prompt that came back in.
+
+    A built prompt reaches agent_description when it round-trips: an export
+    from before Loom kept the user's own prompt, or a manifest saved from one.
+    Rebuilding from it would append the code interpreter sentence and the
+    skills section again on every edit or redeploy (issue #98). The skills
+    section always comes last, so everything from its heading on is dropped,
+    then any paragraph that is exactly the code interpreter sentence. All
+    other text is kept byte for byte.
+    """
+    if text.startswith(_SKILLS_HEADING + "\n\n"):
+        return ""
+    cut = text.find("\n\n" + _SKILLS_HEADING + "\n\n")
+    if cut != -1:
+        text = text[:cut]
+    return "\n\n".join(p for p in text.split("\n\n") if p.strip() != _CODE_INTERPRETER_PROMPT)
+
+
+def _user_system_prompt(request: AgentCreateRequest) -> str:
+    """The prompt as the user wrote it, with no generated parts — what export
+    hands back, so a round trip through the form reproduces the same agent."""
+    parts = [
+        _strip_generated_prompt_parts(request.agent_description or ""),
+        request.behavioral_guidelines,
+        request.output_expectations,
+    ]
+    return "\n\n".join(p for p in parts if p)
+
+
 def _build_system_prompt(request: AgentCreateRequest, skill_prompt_text: str = "") -> str:
     """Combine agent_description, behavioral_guidelines, output_expectations,
     and any attached skills' content into a system prompt."""
-    parts = []
-    if request.agent_description:
-        parts.append(request.agent_description)
-    if request.behavioral_guidelines:
-        parts.append(request.behavioral_guidelines)
-    if request.output_expectations:
-        parts.append(request.output_expectations)
-    if getattr(request, "code_interpreter_enabled", False):
-        # AWS's native agentcore_code_interpreter harness tool exposes itself
-        # to the model as `shell` and `file_operations`, not a literal
-        # `code_interpreter` tool — the "name" we send to CreateHarness is
-        # only a bookkeeping label, not the model-facing tool name.
-        parts.append(
-            "You have a sandboxed code interpreter available. Run code via "
-            "the `shell` tool (e.g. write a script and run `python3 script.py`) "
-            "and read/write files via the `file_operations` tool."
-        )
+    user_prompt = _user_system_prompt(request)
+    parts = [user_prompt] if user_prompt else []
+    # AWS's native agentcore_code_interpreter harness tool exposes itself
+    # to the model as `shell` and `file_operations`, not a literal
+    # `code_interpreter` tool — the "name" we send to CreateHarness is
+    # only a bookkeeping label, not the model-facing tool name.
+    # Skip it when it is already there, e.g. when a stored system prompt is
+    # fed back in as agent_description on update or import.
+    if getattr(request, "code_interpreter_enabled", False) and not any(
+        _CODE_INTERPRETER_PROMPT in part for part in parts
+    ):
+        parts.append(_CODE_INTERPRETER_PROMPT)
     if skill_prompt_text:
         parts.append(skill_prompt_text)
     return "\n\n".join(parts) if parts else "You are a helpful assistant."
@@ -1270,6 +1303,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
         account_id=account_id,
         source="deploy",
         deployment_status="initializing",
+        user_system_prompt=_user_system_prompt(request),
         protocol=request.protocol,
         network_mode=request.network_mode,
         agent_framework=request.agent_framework,
@@ -2396,6 +2430,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
         account_id=account_id,
         source="harness",
         deployment_status="initializing",
+        user_system_prompt=_user_system_prompt(request),
         execution_role_arn=request.role_arn,
         protocol="HTTP",
         network_mode=request.network_mode,
@@ -3657,10 +3692,21 @@ def _delete_agent_background(
         db.query(InvocationSession).filter(InvocationSession.agent_id == agent_id).delete()
         agent = db.query(Agent).filter(Agent.id == agent_id).first()
         if agent and agent.runtime_id == runtime_id:
+            # Batch evaluation jobs from the agent's test cases go with it.
+            from app.models.evaluation import EvaluationRun, EvaluationTestCase
+            from app.services.evaluations import delete_batch_jobs
+            batch_jobs = sorted({
+                job_id
+                for run in db.query(EvaluationRun).join(EvaluationTestCase).filter(
+                    EvaluationTestCase.agent_id == agent_id).all()
+                for job_id in run.get_batch_job_ids()
+            })
             db.delete(agent)
             db.flush()
             db.commit()
             logger.info("Purged agent %d and its sessions from database", agent_id)
+            if batch_jobs:
+                delete_batch_jobs(batch_jobs, region)
         elif agent:
             db.commit()
             logger.info("Agent %d has a different runtime_id (%s vs %s); skipping purge (likely recreated)", agent_id, agent.runtime_id, runtime_id)
@@ -4028,6 +4074,7 @@ def redeploy_deploy_agent(
     _sync_attached_skills(agent.id, request.skill_ids, db)
     skill_prompt_text = _get_attached_skill_prompt_text(agent.id, db)
     system_prompt = _build_system_prompt(request, skill_prompt_text)
+    agent.user_system_prompt = _user_system_prompt(request)
     model_max_tokens = next(
         (m["max_tokens"] for m in SUPPORTED_MODELS if m["model_id"] == request.model_id),
         4096,
@@ -4118,6 +4165,7 @@ def redeploy_harness_agent(
     _sync_attached_skills(agent.id, request.skill_ids, db)
     skill_prompt_text = _get_attached_skill_prompt_text(agent.id, db)
     system_prompt = _build_system_prompt(request, skill_prompt_text)
+    agent.user_system_prompt = _user_system_prompt(request)
 
     provider = request.provider
     litellm_base_url: str | None = None
@@ -4358,7 +4406,15 @@ def export_agent(agent_id: int, user: UserInfo = Depends(require_scopes("admin:w
     if agent.description:
         data["description"] = agent.description
 
-    system_prompt = agent_config.get("system_prompt", "")
+    # The user's own prompt, not the built one: the form sends this back as
+    # agent_description, and the built prompt would get the code interpreter
+    # sentence and skills appended again on every edit (issue #98). Agents
+    # saved before user_system_prompt existed fall back to the built prompt
+    # with those parts removed.
+    if agent.user_system_prompt is not None:
+        system_prompt = agent.user_system_prompt
+    else:
+        system_prompt = _strip_generated_prompt_parts(agent_config.get("system_prompt", ""))
     if system_prompt:
         data["system_prompt"] = system_prompt
 

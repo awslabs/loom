@@ -48,6 +48,7 @@ def create_harness(
     execution_role_arn: str,
     model_id: str,
     system_prompt: str,
+    region: str,
     tools: list[dict[str, Any]] | None = None,
     allowed_tools: list[str] | None = None,
     max_iterations: int | None = None,
@@ -61,7 +62,6 @@ def create_harness(
     tags: dict[str, str] | None = None,
     memory_arn: str | None = None,
     memory_retrieval_config: dict[str, Any] | None = None,
-    region: str = "us-east-1",
     provider: str = "bedrock",
     litellm_api_key_arn: str | None = None,
     litellm_api_base: str | None = None,
@@ -128,7 +128,7 @@ def create_harness(
     return result
 
 
-def get_harness(harness_id: str, region: str = "us-east-1") -> dict[str, Any]:
+def get_harness(harness_id: str, region: str) -> dict[str, Any]:
     """Get the current state of a harness."""
     import boto3
 
@@ -139,6 +139,7 @@ def get_harness(harness_id: str, region: str = "us-east-1") -> dict[str, Any]:
 
 def update_harness(
     harness_id: str,
+    region: str,
     execution_role_arn: str | None = None,
     model_id: str | None = None,
     system_prompt: str | None = None,
@@ -154,7 +155,6 @@ def update_harness(
     max_lifetime: int | None = None,
     memory_arn: str | None = None,
     memory_retrieval_config: dict[str, Any] | None = None,
-    region: str = "us-east-1",
     provider: str = "bedrock",
     litellm_api_key_arn: str | None = None,
     litellm_api_base: str | None = None,
@@ -215,7 +215,7 @@ def update_harness(
     return result
 
 
-def delete_harness(harness_id: str, region: str = "us-east-1") -> dict[str, Any]:
+def delete_harness(harness_id: str, region: str) -> dict[str, Any]:
     """Delete a harness."""
     import boto3
 
@@ -229,7 +229,7 @@ def invoke_harness_stream(
     harness_arn: str,
     session_id: str,
     prompt: str,
-    region: str = "us-east-1",
+    region: str,
     model_id: str | None = None,
     system_prompt: str | None = None,
     tools: list[dict[str, Any]] | None = None,
@@ -395,8 +395,8 @@ def resume_harness_stream(
     tool_name: str,
     tool_input: dict[str, Any],
     tool_result_content: str,
+    region: str,
     tool_result_status: str = "success",
-    region: str = "us-east-1",
     tools: list[dict[str, Any]] | None = None,
     access_token: str | None = None,
     actor_id: str | None = None,

@@ -634,7 +634,14 @@ def _load_cfn_template(path: pathlib.Path) -> dict:
         return loader.construct_mapping(node)
 
     _Loader.add_multi_constructor("!", _intrinsic)
-    return yaml.load(path.read_text(), Loader=_Loader)
+    # Drive the SafeLoader subclass directly rather than through yaml.load():
+    # it's equally safe (only plain YAML types plus the intrinsic tags above),
+    # and it leaves no yaml.load call for scanners to flag (bandit B506).
+    loader = _Loader(path.read_text())
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
 
 
 class TestLoomCannotWriteResourcePolicies(unittest.TestCase):

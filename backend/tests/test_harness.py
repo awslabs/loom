@@ -430,6 +430,7 @@ class TestHarnessService(unittest.TestCase):
         result = create_harness(
             name="test",
             execution_role_arn="arn:role",
+            region="us-west-2",
             model_id="us.anthropic.claude-sonnet-4-6-v1",
             system_prompt="You are helpful.",
         )
@@ -454,6 +455,7 @@ class TestHarnessService(unittest.TestCase):
         create_harness(
             name="test2",
             execution_role_arn="arn:role",
+            region="us-west-2",
             model_id="model",
             system_prompt="prompt",
             max_tokens=4096,
@@ -478,6 +480,7 @@ class TestHarnessService(unittest.TestCase):
         create_harness(
             name="test3",
             execution_role_arn="arn:role",
+            region="us-west-2",
             model_id="model",
             system_prompt="prompt",
             tools=tools,
@@ -508,6 +511,7 @@ class TestHarnessService(unittest.TestCase):
         events = list(invoke_harness_stream(
             harness_arn="arn:harness",
             session_id="sess-1",
+            region="us-west-2",
             prompt="Hi",
         ))
 
@@ -541,6 +545,7 @@ class TestHarnessService(unittest.TestCase):
         events = list(invoke_harness_stream(
             harness_arn="arn:harness",
             session_id="sess-2",
+            region="us-west-2",
             prompt="Search for something",
         ))
 
@@ -556,7 +561,7 @@ class TestHarnessService(unittest.TestCase):
         mock_boto3_client.return_value = mock_client
         mock_client.get_harness.return_value = {"harnessId": "h-1", "status": "READY"}
 
-        result = get_harness("h-1")
+        result = get_harness("h-1", "us-west-2")
         self.assertEqual(result["status"], "READY")
         mock_client.get_harness.assert_called_once_with(harnessId="h-1")
 
@@ -568,8 +573,30 @@ class TestHarnessService(unittest.TestCase):
         mock_boto3_client.return_value = mock_client
         mock_client.delete_harness.return_value = {}
 
-        delete_harness("h-1")
+        delete_harness("h-1", "us-west-2")
         mock_client.delete_harness.assert_called_once_with(harnessId="h-1")
+
+    def test_region_is_required_on_every_harness_call(self):
+        """A caller that leaves the region out must fail loudly, not silently
+        target us-east-1 (issue #98)."""
+        import inspect
+        from app.services import harness
+
+        for fn in (harness.create_harness, harness.get_harness, harness.update_harness,
+                   harness.delete_harness, harness.invoke_harness_stream, harness.resume_harness_stream):
+            param = inspect.signature(fn).parameters["region"]
+            self.assertIs(param.default, inspect.Parameter.empty, f"{fn.__name__} defaults its region")
+
+    @patch("boto3.client")
+    def test_harness_calls_use_the_given_region(self, mock_boto3_client):
+        from app.services.harness import delete_harness, get_harness
+
+        mock_boto3_client.return_value.get_harness.return_value = {"harnessId": "h-1"}
+        get_harness("h-1", "eu-west-1")
+        delete_harness("h-1", "eu-west-1")
+        self.assertEqual(len(mock_boto3_client.call_args_list), 2)
+        for call in mock_boto3_client.call_args_list:
+            self.assertEqual(call.kwargs.get("region_name"), "eu-west-1")
 
     @patch("boto3.client")
     def test_create_harness_litellm_provider(self, mock_boto3_client):
@@ -582,6 +609,7 @@ class TestHarnessService(unittest.TestCase):
         create_harness(
             name="litellm_test",
             execution_role_arn="arn:role",
+            region="us-west-2",
             model_id="claude-sonnet-5",
             system_prompt="prompt",
             provider="litellm",
@@ -612,6 +640,7 @@ class TestHarnessService(unittest.TestCase):
         create_harness(
             name="litellm_test2",
             execution_role_arn="arn:role",
+            region="us-west-2",
             model_id="bedrock/anthropic.claude-sonnet-4-6",
             system_prompt="prompt",
             provider="litellm",
@@ -633,6 +662,7 @@ class TestHarnessService(unittest.TestCase):
         list(invoke_harness_stream(
             harness_arn="arn:harness",
             session_id="sess-3",
+            region="us-west-2",
             prompt="Hi",
             model_id="claude-opus-4-8",
             provider="litellm",

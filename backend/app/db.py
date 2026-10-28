@@ -161,6 +161,7 @@ def _migrate_add_columns(eng) -> None:
         ("evaluation_runs", "evaluation_mode", "VARCHAR DEFAULT 'on_demand'"),
         ("evaluation_runs", "batch_job_id", "VARCHAR"),
         ("evaluation_runs", "batch_job_ids", "TEXT"),
+        ("agents", "user_system_prompt", "TEXT"),
     ]
 
     is_postgres = eng.dialect.name == "postgresql"

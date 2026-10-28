@@ -692,6 +692,13 @@ def _validate_system_prompt_size(request: AgentCreateRequest) -> None:
         )
 
 
+_CODE_INTERPRETER_PROMPT = (
+    "You have a sandboxed code interpreter available. Run code via "
+    "the `shell` tool (e.g. write a script and run `python3 script.py`) "
+    "and read/write files via the `file_operations` tool."
+)
+
+
 def _build_system_prompt(request: AgentCreateRequest, skill_prompt_text: str = "") -> str:
     """Combine agent_description, behavioral_guidelines, output_expectations,
     and any attached skills' content into a system prompt."""
@@ -702,16 +709,16 @@ def _build_system_prompt(request: AgentCreateRequest, skill_prompt_text: str = "
         parts.append(request.behavioral_guidelines)
     if request.output_expectations:
         parts.append(request.output_expectations)
-    if getattr(request, "code_interpreter_enabled", False):
-        # AWS's native agentcore_code_interpreter harness tool exposes itself
-        # to the model as `shell` and `file_operations`, not a literal
-        # `code_interpreter` tool — the "name" we send to CreateHarness is
-        # only a bookkeeping label, not the model-facing tool name.
-        parts.append(
-            "You have a sandboxed code interpreter available. Run code via "
-            "the `shell` tool (e.g. write a script and run `python3 script.py`) "
-            "and read/write files via the `file_operations` tool."
-        )
+    # AWS's native agentcore_code_interpreter harness tool exposes itself
+    # to the model as `shell` and `file_operations`, not a literal
+    # `code_interpreter` tool — the "name" we send to CreateHarness is
+    # only a bookkeeping label, not the model-facing tool name.
+    # Skip it when it is already there, e.g. when a stored system prompt is
+    # fed back in as agent_description on update or import.
+    if getattr(request, "code_interpreter_enabled", False) and not any(
+        _CODE_INTERPRETER_PROMPT in part for part in parts
+    ):
+        parts.append(_CODE_INTERPRETER_PROMPT)
     if skill_prompt_text:
         parts.append(skill_prompt_text)
     return "\n\n".join(parts) if parts else "You are a helpful assistant."

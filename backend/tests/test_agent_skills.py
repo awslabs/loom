@@ -177,6 +177,19 @@ class TestAttachedSkillPromptText(unittest.TestCase):
         prompt = _build_system_prompt(request)
         self.assertEqual(prompt, "You are a helpful bot.")
 
+    def test_build_system_prompt_does_not_repeat_code_interpreter_sentence(self):
+        request = AgentCreateRequest(
+            source="harness",
+            agent_description="You are a helpful bot.",
+            code_interpreter_enabled=True,
+        )
+        first = _build_system_prompt(request)
+        # A stored prompt fed back in as the description must not grow.
+        request.agent_description = first
+        second = _build_system_prompt(request)
+        self.assertEqual(second, first)
+        self.assertEqual(first.count("sandboxed code interpreter"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

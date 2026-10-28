@@ -35,7 +35,8 @@ strands_agent/
 │   ├── test_a2a_client.py
 │   └── test_memory.py
 ├── makefile
-├── requirements.txt
+├── requirements.in     # Direct dependencies (version ranges)
+├── requirements.txt    # Generated: every dependency pinned (make lock)
 └── README.md
 ```
 
@@ -124,6 +125,16 @@ This allows the frontend to pass the user-configured prompt as a deploy-time par
 ```bash
 make install
 ```
+
+### Update Dependencies
+
+`requirements.txt` pins every dependency, including transitive ones, so two builds of the same Loom release deploy the same versions. Don't edit it by hand: change `requirements.in`, then regenerate it with:
+
+```bash
+make lock
+```
+
+The lock resolves for the AgentCore Runtime build target (linux/arm64, Python 3.13). After re-locking, run `make install` and `make test`.
 
 ### Run Locally
 

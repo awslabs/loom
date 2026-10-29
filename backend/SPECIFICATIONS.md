@@ -430,6 +430,7 @@ A persona with no access rule for a given MCP server has no access (deny by defa
 | `qualifier` | TEXT NOT NULL | Endpoint qualifier used (e.g., `DEFAULT`) |
 | `status` | TEXT NOT NULL | `pending`, `streaming`, `complete`, `error` |
 | `created_at` | DATETIME NOT NULL | Session creation timestamp |
+| `groups` | TEXT | JSON list snapshot of the user's groups at invoke time (used for group-scoped usage limits) |
 
 ### `invocations` table
 
@@ -459,10 +460,13 @@ Each session contains one or more invocations. Timing measurements and latency d
 | `memory_estimated_cost` | REAL | Memory feature estimated cost |
 | `stm_cost` | REAL | Short-term memory cost |
 | `ltm_cost` | REAL | Long-term memory cost |
+| `model_id` | TEXT | Resolved model used for this invocation (runtime override, or the agent's configured default) |
+| `model_family` | TEXT | Resolved model family (e.g. `anthropic`, `openai`) for fast SQL limit grouping |
 | `cost_source` | TEXT | "estimated" (from invoke duration) or "usage_logs" (from CloudWatch) |
 | `status` | TEXT NOT NULL | `pending`, `streaming`, `complete`, `error` |
 | `error_message` | TEXT | Error detail if status is `error` |
 | `created_at` | DATETIME NOT NULL | Invocation creation timestamp |
+
 
 **Computed fields (not stored in the database):**
 - `active_session_count` — returned on agent responses. Counts sessions with at least one invocation whose last activity is within `LOOM_SESSION_IDLE_TIMEOUT_SECONDS` of the current time.
@@ -1165,6 +1169,26 @@ AgentCore Harness API wrapper for managed agent deployments. `region` is a requi
 - `resume_harness_stream(harness_arn, session_id, tool_result, region, ..., user_access_token) -> Generator[dict]` — re-invokes a harness with a `toolResult` to resume after an inline function call. Supports the same `user_access_token` header injection for OBO flows.
 - `_build_model_config(provider, model_id, max_tokens=None, litellm_api_key_arn=None, litellm_api_base=None) -> dict` — internal helper selecting the `model` payload shape for `CreateHarness`/`UpdateHarness`/`InvokeHarness` based on `provider`.
 
+
+### `services/usage_limits.py`
+
+Core evaluation logic for usage limits, called as a pre-flight check across all agent invoke paths (HTTP invoke, WebSocket invoke, and evaluation runs):
+
+- `check_usage_limits(db, username, groups, model_id) -> UsageDecision` — finds every enabled `UsageLimit` whose scope (user or group) and target (all/model/family) match the request, and returns the single most-restrictive decision among those actually exceeded. Precedence is block > warn; limits that are enabled but not yet exceeded are ignored.
+- Enforcement is necessarily based on already-completed usage, not the current request's own (not-yet-known) token/cost count — there's no way to meter or interrupt a request mid-stream.
+- `_current_usage()` reads cache-first: if `UsageLimit.cached_usage` was refreshed at or after the current window started, it's used directly; otherwise the function falls back to a live aggregation query computed directly in SQL using `func.sum()` rather than loading rows into Python memory.
+- Group matching uses escaped LIKE matching so `_` and `%` wildcards in group names match literally.
+- "budget" measure sums `estimated_cost + compute_cost + memory_estimated_cost` — the three cost components actually charged. `idle_*` costs are excluded (per their own column comments, they're an unmeasurable upper bound, not a real charge). `compute_cost` is used directly rather than the live-recomputed `compute_cpu_cost + compute_memory_cost` the cost dashboard prefers for display, since a usage limit should reflect the cost actually incurred at invoke time, not a value that could shift under a later pricing change.
+- Model family grouping (`get_model_family()` in `model_catalog.py`) classifies models into coarse families and writes `model_family` to `Invocation` at creation time, allowing SQL-level target filtering.
+- Note on Custom Agents: for Custom Agents, token counts are estimated from prompt and final response text only (intermediate tool-loop tokens are not metered); Managed Agents report actual usage through the harness.
+
+### `services/usage_limit_aggregator.py`
+
+Background job that keeps `UsageLimit.cached_usage` warm so the pre-flight check above can usually avoid a live query:
+
+- `start_usage_limit_aggregator()` — async task, runs every 60 seconds (`POLL_INTERVAL_SECONDS`). Much shorter than `usage_poller.py`'s 10-minute interval, since that job reconciles historical data where staleness is harmless, while this one backs a live enforcement decision.
+- `_refresh_once()` recomputes and stores `cached_usage` + `cached_usage_updated_at` for every enabled limit, reusing the same `_current_usage()`/`_window_start()` logic from `usage_limits.py` so the cached value and the live-fallback value can never silently drift apart into two different definitions of "current usage."
+
 AgentCore Harness only reaches models via the `bedrock-runtime` endpoint. `app.routers.agents._deploy_harness()` and `redeploy_harness_agent()` call `bedrock_invocation.assert_model_supports_endpoint(model_id, SUPPORTED_MODELS, BEDROCK_RUNTIME)` before `create_harness`/`update_harness` and reject `bedrock-mantle`-only models (e.g. Gemma 4) with a 400 rather than letting `CreateHarness`/`UpdateHarness` fail opaquely (#64 R1). Models missing from the curated catalog (dynamically-discovered LiteLLM/live-Bedrock models) are not validated — nothing to check against.
 
 ### `services/bedrock_invocation.py`
@@ -1187,6 +1211,7 @@ Regenerates `etc/models.json` from the curated `etc/bedrock_model_catalog.json` 
 - `refresh_models_json(catalog_path, output_path, lookback_months=6, region="us-east-1", skip_live_check=False, reference_date=None, dry_run=False) -> dict` — does the filtering; returns `{"included", "excluded_stale", "excluded_incomplete", "excluded_unavailable", "cutoff"}` (each a list of `model_id`s except `cutoff`, an ISO date string).
 - `reload_supported_models()` — re-reads `etc/models.json` and pushes it into `app.routers.agents.SUPPORTED_MODELS`, since that module-level list is otherwise only loaded once at import.
 - Used by `scripts/refresh_models_json.py` (CLI — run via `make refresh-models` at each major release; accepts `LOOKBACK_MONTHS`/`REGION` env overrides) and `POST /api/settings/models/refresh` (on-demand admin trigger, reads the `models_json_lookback_months` site setting unless overridden in the request body).
+
 
 ### `services/credential.py`
 
@@ -2031,3 +2056,50 @@ Deploying and exercising this feature end-to-end also surfaced (and required fix
 - **CloudWatch Logs delivery pipeline:** `logs:PutDeliveryDestination`/`PutDeliverySource`/`CreateDelivery` (+ matching `Delete*`) and `logs:DescribeDeliveries` (list-only, no resource-level scoping), used by `services/observability.py` to route AgentCore Runtime and Code Interpreter vended logs into `/aws/vendedlogs/bedrock-agentcore/*`.
 - **Live Bedrock discovery:** `bedrock:ListFoundationModels`/`ListInferenceProfiles` (list-only), used by `model_catalog.py`'s live Bedrock availability/catalog fetch.
 - A dedicated `LogsKmsKey` (customer-managed, rotation enabled) now encrypts the backend's own ECS CloudWatch log group.
+
+
+## 17. Usage Limits
+
+Admins can cap token usage or spend per user or group, scoped to all models, a specific model, or a model family, over a daily/weekly/monthly/rolling window, with a configurable action (warn/block) when exceeded.
+
+### 17.1 UsageLimit Model
+
+Stored in `usage_limits` table, following the same scope/target JSON pattern as `approval_policies`:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `name` | TEXT UNIQUE NOT NULL | Display name |
+| `scope` | TEXT NOT NULL | JSON: `{"type": "user", "username": ...}` or `{"type": "group", "group": ...}`. No default — unlike `target`, who a limit applies to must always be explicit. |
+| `target` | TEXT | JSON: `{"type": "all"}` (default) \| `{"type": "model", "model_id": ...}` \| `{"type": "family", "family": ...}` |
+| `measure` | TEXT NOT NULL | `tokens` or `budget` |
+| `threshold` | REAL NOT NULL | Limit value for the chosen measure |
+| `window` | TEXT NOT NULL | `daily` / `weekly` / `monthly` (calendar-aligned reset) or `rolling` (trailing 24h) |
+| `enforcement` | TEXT NOT NULL | `warn` / `block` |
+| `enabled` | BOOLEAN NOT NULL | |
+| `cached_usage` | REAL | Last value computed by the aggregator, see 17.3 |
+| `cached_usage_updated_at` | DATETIME | When `cached_usage` was last refreshed |
+
+CRUD via `/api/settings/usage-limits`, gated behind `security:read`/`security:write`. Unlike `approval_policies`, scope and target contents are validated server-side (not just that they parse as JSON) — a malformed scope here risks a limit silently applying to the wrong people rather than just matching nothing.
+
+### 17.2 Enforcement Flow
+
+All invoke paths (HTTP invoke, WebSocket invoke at `/{agent_id}/ws`, and test-case evaluation runs) execute `check_usage_limits()` as a pre-flight check **before** session creation or dispatch:
+
+1. `block` — raises HTTP `429` (or emits WebSocket error frame with code 1008; or marks evaluation run as `ERROR`), leaving no orphaned `InvocationSession` row created.
+2. `warn` — proceeds normally; the triggered limit's message is attached to the `session_start` SSE/WebSocket event as `usage_warnings` (both the standard and harness invoke paths).
+
+Precedence among multiple matching, exceeded limits is most-restrictive-wins: block beats warn.
+
+Group-scoped limits snapshot the user's groups (`UserInfo.groups`) onto `InvocationSession.groups` at invoke time for internal aggregation. To prevent sensitive group exposure, `InvocationSession.groups` is omitted from `to_dict()` and never returned in API responses.
+
+### 17.3 Aggregation & Live Enforcement
+
+Aggregation is performed directly in SQL using `func.sum()` with model/family filtering, avoiding in-memory row loading. See `services/usage_limit_aggregator.py` above.
+- **Block enforcements** bypass `cached_usage` and always query SQL live, ensuring that parallel or burst requests are checked against immediately-recorded invocations without a 60-second cache stale window.
+- **Warn enforcements** use `cached_usage` when fresh (refreshed at or after window start), falling back to live SQL calculation when stale or missing.
+- Both this job and the pre-existing `services/usage_poller.py` cost-reconciliation job are started from `main.py`'s lifespan handler as cancellable `asyncio` tasks (previously, `usage_poller.py` existed but was never actually wired into startup).
+
+### 17.4 Design Considerations & Identity Scope
+
+- **Shared Group Budget:** Group-scoped limits represent a shared collective pool for all users in that group (e.g. departmental or team budget ceiling). When any user in the group consumes usage, it counts toward the group limit, and exceeding the limit triggers the configured action (warn or block) for all members of that group.
+- **User Identity Keying:** User-scoped limits match on `username`, which aligns with `InvocationSession.user_id`, session ownership checks, memory partitioning, and audit logging throughout Loom. External federated IdP identity normalization to `sub` is deferred to a platform-wide identity refactoring PR so as not to break session ownership and audit consistency.

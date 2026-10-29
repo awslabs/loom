@@ -1107,6 +1107,7 @@ The Settings page's "Enabled Models" section (§ 9) is split into a Bedrock bloc
 
 ---
 
+
 ## 18. Bedrock Model Catalog UI (issue #64)
 
 Backend design (dual-endpoint model invocation, curated-catalog-driven `models.json` refresh, deprecated-model grandfathering) is documented in [`backend/SPECIFICATIONS.md` § 37](../backend/SPECIFICATIONS.md) (Phase 37 and its follow-up). This section covers the frontend surface.
@@ -1134,7 +1135,31 @@ An agent's `model_id`/`allowed_model_ids` can outlive the catalog (a `models.jso
 
 ---
 
-## 19. Future Work
+## 19. Usage Limits
+
+### 19.1 Usage Limits Administration (`UsageLimitsPanel.tsx`)
+
+A new tab in the Security Admin page (`SecurityAdminPage.tsx`), following the same structure as `ApprovalPolicyPanel.tsx`:
+- Table view listing each limit's scope ("Applies To"), target ("Model Scope"), current cached usage against threshold, enforcement action, and enabled state, using the existing `StatusPill` component for the enforcement and enabled columns.
+- Inline create/edit form, matching the existing panel's layout: two-step scope selector (type + value), two-step target selector (type + value, value field conditional on target type), and selects for measure/window/enforcement (warn, block).
+- Custom Agent token estimation note displayed in panel help text.
+- No user/group autocomplete picker exists elsewhere in the app for this kind of field, so scope/target values are plain text inputs, consistent with the rest of the admin UI rather than introducing a new input pattern.
+
+### 19.2 API Client (`api/usage_limits.ts`)
+
+Standard CRUD wrapper over `apiFetch`, matching `api/approvals.ts`'s structure: `listUsageLimits`, `getUsageLimit`, `createUsageLimit`, `updateUsageLimit`, `deleteUsageLimit`.
+
+### 19.3 Types
+
+`UsageLimit` added to `api/types.ts`, with `scope`/`target` typed as discriminated unions rather than loose `Record<string, unknown>`, so the panel component gets exhaustiveness checking on scope/target type branches.
+
+### 19.4 Usage Warnings UI Display
+
+The backend emits `usage_warnings` on the `session_start` SSE/WebSocket event when a `warn`-tier limit is exceeded (see backend §17.2). Both the Chat UI (`ChatPage.tsx`) and the test playground (`InvokePanel.tsx`) read this field:
+- **ChatPage:** Renders an amber alert banner at the top of the conversation view displaying all active warning messages with a dismiss action, and additionally surfaces a notification toast via `toast.warning()`.
+- **InvokePanel:** Renders a warning alert card above the prompt composer displaying the exceeded usage limit details.
+
+## 20. Future Work
 
 - **VPC network mode** support
 - **Operate Tab** — aggregate dashboard with summary cards, per-agent latency charts

@@ -557,6 +557,7 @@ export interface SSESessionStart {
   token_source?: string;
   has_token?: boolean;
   user_token?: SSETokenInfo;
+  usage_warnings?: string[];
 }
 
 export interface SSEChunk {
@@ -634,6 +635,22 @@ export interface ApprovalPolicy {
   agent_scope: Record<string, unknown>;
   approval_cache_ttl: number;
   enabled: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface UsageLimit {
+  id: number;
+  name: string;
+  scope: { type: "user"; username: string } | { type: "group"; group: string };
+  target: { type: "all" } | { type: "model"; model_id: string } | { type: "family"; family: string };
+  measure: "tokens" | "budget";
+  threshold: number;
+  window: "daily" | "weekly" | "monthly" | "rolling";
+  enforcement: "warn" | "block";
+  enabled: boolean;
+  cached_usage: number | null;
+  cached_usage_updated_at: string | null;
   created_at: string | null;
   updated_at: string | null;
 }

@@ -17,6 +17,8 @@ class Invocation(Base):
     session_id = Column(String, ForeignKey("invocation_sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
     invocation_id = Column(String, nullable=False, unique=True, index=True)
     request_id = Column(String, nullable=True)  # AWS Request ID from invoke_agent_runtime ResponseMetadata
+    model_id = Column(String, nullable=True, index=True)  # Added Model ID for Identification,classifying & calculating  model-level usage
+    model_family = Column(String, nullable=True, index=True)  # Model family (e.g. anthropic, openai) for fast SQL grouping
     # Timing measurements (Unix timestamps in seconds)
     client_invoke_time = Column(Float, nullable=True)
     client_done_time = Column(Float, nullable=True)
@@ -72,6 +74,8 @@ class Invocation(Base):
             "session_id": self.session_id,
             "invocation_id": self.invocation_id,
             "request_id": self.request_id,
+            "model_id": self.model_id,
+            "model_family": self.model_family,
             "client_invoke_time": self.client_invoke_time,
             "client_done_time": self.client_done_time,
             "agent_start_time": self.agent_start_time,

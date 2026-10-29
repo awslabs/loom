@@ -1,8 +1,10 @@
 """InvocationSession ORM model for storing session containers."""
+import json
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from app.db import Base
+
 
 
 class InvocationSession(Base):
@@ -20,6 +22,7 @@ class InvocationSession(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     user_id = Column(String, nullable=True, index=True)
     hidden_at = Column(DateTime, nullable=True)  # Set when user hides the session from their view
+    groups = Column(Text, nullable=True)  # JSON list snapshot of the user's groups at invoke time
 
     # Relationships
     agent = relationship("Agent", back_populates="sessions")

@@ -598,3 +598,53 @@ def get_providers_merged() -> list[dict[str, Any]]:
     from app.routers.agents import SUPPORTED_PROVIDERS
 
     return SUPPORTED_PROVIDERS
+
+
+# Family groupings for non-Bedrock-style model ids (LiteLLM-routed models
+# that don't use Bedrock's "<lab>.<model>" naming convention). Checked as a
+# prefix match against the normalized id, in this order.
+_LITELLM_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("claude", "anthropic"),
+    ("gpt", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("gemini", "gemini"),
+    ("llama", "meta"),
+    ("mistral", "mistral"),
+    ("deepseek", "deepseek"),
+    ("qwen", "qwen"),
+)
+
+
+def get_model_family(model_id: str) -> str:
+    """Return a coarse model-family key for grouping usage limits (e.g.
+    "anthropic", "openai") given a raw model id in any shape Loom sees
+    them in — Bedrock's "anthropic.claude-..." or LiteLLM's flat "gpt-4o".
+
+    Deliberately coarser than the catalog's own "group"/"lab" concepts,
+    which distinguish *how* a model is routed (see _litellm_group's
+    Bedrock-vs-Router split) rather than which model family it belongs to.
+    A usage limit scoped to "any Claude model" should match a Claude model
+    whether it's invoked directly via Bedrock or proxied through LiteLLM —
+    so we normalize first and look only at the model name, never the
+    routing path.
+
+    Falls back to "other" rather than raising: an unrecognized model id
+    should still be limitable under a catch-all family, not break usage-
+    limit evaluation entirely.
+    """
+    normalized = _normalize_model_id(model_id)
+
+    # Bedrock-style ids carry an explicit lab prefix already — reuse the
+    # same mapping the catalog uses so the two concepts can't drift apart.
+    lab = _bedrock_lab(normalized)
+    if lab:
+        return lab
+
+    # LiteLLM-style flat ids have no dot prefix to split on, so fall back
+    # to matching known model-name prefixes instead.
+    for prefix, family in _LITELLM_FAMILY_PREFIXES:
+        if normalized.startswith(prefix):
+            return family
+
+    return "other"

@@ -187,6 +187,35 @@ class TestInvokeWebsocketRequiresAuth(unittest.TestCase):
 
         self.assertFalse(any(f.get("type") == "session_start" for f in frames), frames)
 
+    @patch("app.routers.invocations.authenticate_bearer_token")
+    def test_websocket_blocked_by_usage_limit_sends_error(self, mock_auth) -> None:
+        """Usage limit enforcement: a blocked user receives an error frame and no session_start."""
+        import json
+        from datetime import datetime
+        from app.models.usage_limit import UsageLimit
+
+        mock_auth.return_value = _user(["t-user", "g-users-demo"])
+        limit = UsageLimit(
+            name="WS Block Limit",
+            scope=json.dumps({"type": "user", "username": "u"}),
+            target=json.dumps({"type": "all"}),
+            measure="tokens",
+            threshold=10,
+            enforcement="block",
+            cached_usage=50.0,
+            cached_usage_updated_at=datetime.utcnow(),
+        )
+        self.db.add(limit)
+        self.db.commit()
+
+        frames = self._frames_until_close(
+            self.agent_id, {"type": "prompt", "prompt": "hi", "token": "valid"}
+        )
+        self.assertFalse(any(f.get("type") == "session_start" for f in frames))
+        error_frames = [f for f in frames if f.get("type") == "error"]
+        self.assertTrue(len(error_frames) > 0)
+        self.assertIn("Usage limit 'WS Block Limit' exceeded", error_frames[0].get("content", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

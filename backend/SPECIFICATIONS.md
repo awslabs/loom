@@ -461,6 +461,7 @@ Each session contains one or more invocations. Timing measurements and latency d
 | `stm_cost` | REAL | Short-term memory cost |
 | `ltm_cost` | REAL | Long-term memory cost |
 | `model_id` | TEXT | Resolved model used for this invocation (runtime override, or the agent's configured default) |
+| `model_family` | TEXT | Resolved model family (e.g. `anthropic`, `openai`) for fast SQL limit grouping |
 | `cost_source` | TEXT | "estimated" (from invoke duration) or "usage_logs" (from CloudWatch) |
 | `status` | TEXT NOT NULL | `pending`, `streaming`, `complete`, `error` |
 | `error_message` | TEXT | Error detail if status is `error` |
@@ -1171,13 +1172,15 @@ AgentCore Harness API wrapper for managed agent deployments. `region` is a requi
 
 ### `services/usage_limits.py`
 
-Core evaluation logic for usage limits, called as a pre-flight check from the invoke endpoint:
+Core evaluation logic for usage limits, called as a pre-flight check across all agent invoke paths (HTTP invoke, WebSocket invoke, and evaluation runs):
 
-- `check_usage_limits(db, username, groups, model_id) -> UsageDecision` — finds every enabled `UsageLimit` whose scope (user or group) and target (all/model/family) match the request, and returns the single most-restrictive decision among those actually exceeded. Precedence is block > throttle > warn; limits that are enabled but not yet exceeded are ignored.
+- `check_usage_limits(db, username, groups, model_id) -> UsageDecision` — finds every enabled `UsageLimit` whose scope (user or group) and target (all/model/family) match the request, and returns the single most-restrictive decision among those actually exceeded. Precedence is block > warn; limits that are enabled but not yet exceeded are ignored.
 - Enforcement is necessarily based on already-completed usage, not the current request's own (not-yet-known) token/cost count — there's no way to meter or interrupt a request mid-stream.
-- `_current_usage()` reads cache-first: if `UsageLimit.cached_usage` was refreshed at or after the current window started, it's used directly; otherwise the function falls back to a live aggregation query. This avoids both trusting a stale number and doing a full recompute on every request once the cache is warm.
+- `_current_usage()` reads cache-first: if `UsageLimit.cached_usage` was refreshed at or after the current window started, it's used directly; otherwise the function falls back to a live aggregation query computed directly in SQL using `func.sum()` rather than loading rows into Python memory.
+- Group matching uses escaped LIKE matching so `_` and `%` wildcards in group names match literally.
 - "budget" measure sums `estimated_cost + compute_cost + memory_estimated_cost` — the three cost components actually charged. `idle_*` costs are excluded (per their own column comments, they're an unmeasurable upper bound, not a real charge). `compute_cost` is used directly rather than the live-recomputed `compute_cpu_cost + compute_memory_cost` the cost dashboard prefers for display, since a usage limit should reflect the cost actually incurred at invoke time, not a value that could shift under a later pricing change.
-- Model family grouping (`get_model_family()` in `model_catalog.py`) exists because neither of the catalog's own grouping concepts solve this: `_bedrock_lab()` only parses Bedrock-style dotted IDs, and `_litellm_group()` groups by routing mechanism rather than model identity, so the same model invoked two different ways would land in two different groups under that function.
+- Model family grouping (`get_model_family()` in `model_catalog.py`) classifies models into coarse families and writes `model_family` to `Invocation` at creation time, allowing SQL-level target filtering.
+- Note on Custom Agents: for Custom Agents, token counts are estimated from prompt and final response text only (intermediate tool-loop tokens are not metered); Managed Agents report actual usage through the harness.
 
 ### `services/usage_limit_aggregator.py`
 
@@ -2057,7 +2060,7 @@ Deploying and exercising this feature end-to-end also surfaced (and required fix
 
 ## 17. Usage Limits
 
-Admins can cap token usage or spend per user or group, scoped to all models, a specific model, or a model family, over a daily/weekly/monthly/rolling window, with a configurable action (warn/throttle/block) when exceeded.
+Admins can cap token usage or spend per user or group, scoped to all models, a specific model, or a model family, over a daily/weekly/monthly/rolling window, with a configurable action (warn/block) when exceeded.
 
 ### 17.1 UsageLimit Model
 
@@ -2071,7 +2074,7 @@ Stored in `usage_limits` table, following the same scope/target JSON pattern as 
 | `measure` | TEXT NOT NULL | `tokens` or `budget` |
 | `threshold` | REAL NOT NULL | Limit value for the chosen measure |
 | `window` | TEXT NOT NULL | `daily` / `weekly` / `monthly` (calendar-aligned reset) or `rolling` (trailing 24h) |
-| `enforcement` | TEXT NOT NULL | `warn` / `throttle` / `block` |
+| `enforcement` | TEXT NOT NULL | `warn` / `block` |
 | `enabled` | BOOLEAN NOT NULL | |
 | `cached_usage` | REAL | Last value computed by the aggregator, see 17.3 |
 | `cached_usage_updated_at` | DATETIME | When `cached_usage` was last refreshed |
@@ -2080,16 +2083,15 @@ CRUD via `/api/settings/usage-limits`, gated behind `security:read`/`security:wr
 
 ### 17.2 Enforcement Flow
 
-The invoke endpoint resolves `effective_model_id` (the runtime override, or the agent's configured default if none was given) before session creation, then calls `check_usage_limits()` immediately after the session is created or reused, before the `Invocation` row is written:
+All invoke paths (HTTP invoke, WebSocket invoke at `/{agent_id}/ws`, and test-case evaluation runs) execute `check_usage_limits()` as a pre-flight check **before** session creation or dispatch:
 
-1. `block` — raises `429`, no `Invocation` row is created.
-2. `throttle` — `await asyncio.sleep(3)` before proceeding. A fixed pre-dispatch delay rather than live metering, since usage for the current request isn't known until it completes.
-3. `warn` — proceeds normally; the triggered limit's message is attached to the `session_start` SSE event as `usage_warnings` (both the standard and harness invoke paths).
+1. `block` — raises HTTP `429` (or emits WebSocket error frame with code 1008; or marks evaluation run as `ERROR`), leaving no orphaned `InvocationSession` row created.
+2. `warn` — proceeds normally; the triggered limit's message is attached to the `session_start` SSE/WebSocket event as `usage_warnings` (both the standard and harness invoke paths).
 
-Precedence among multiple matching, exceeded limits is most-restrictive-wins: block beats throttle beats warn.
+Precedence among multiple matching, exceeded limits is most-restrictive-wins: block beats warn.
 
-Group-scoped limits need to know which users belonged to a group at the time usage happened. Rather than query Cognito live on every invoke, the user's groups (`UserInfo.groups`, already resolved from the auth token) are snapshotted onto `InvocationSession.groups` at invoke time.
+Group-scoped limits snapshot the user's groups (`UserInfo.groups`) onto `InvocationSession.groups` at invoke time for internal aggregation. To prevent sensitive group exposure, `InvocationSession.groups` is omitted from `to_dict()` and never returned in API responses.
 
 ### 17.3 Aggregation
 
-See `services/usage_limit_aggregator.py` above. Both this job and the pre-existing `services/usage_poller.py` cost-reconciliation job are started from `main.py`'s lifespan handler as cancellable `asyncio` tasks (previously, `usage_poller.py` existed but was never actually wired into startup).
+Aggregation is performed directly in SQL using `func.sum()` with model/family filtering, avoiding in-memory row loading. See `services/usage_limit_aggregator.py` above. Both this job and the pre-existing `services/usage_poller.py` cost-reconciliation job are started from `main.py`'s lifespan handler as cancellable `asyncio` tasks (previously, `usage_poller.py` existed but was never actually wired into startup).

@@ -13,7 +13,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from app.services.usage_limits import check_usage_limits
+from app.services.usage_limits import check_usage_limits, resolve_effective_model_id
+from app.services.model_catalog import get_model_family
 
 logger = logging.getLogger(__name__)
 
@@ -1455,15 +1456,17 @@ async def invoke_agent_endpoint(
     # Invocation record and before we check usage limits — not just when
     # the caller explicitly overrides it. Mirrors the same agent-config
     # fallback used later during finalization.
-    effective_model_id = runtime_model_id
-    if not effective_model_id:
-        config_map = {e.key: e.value for e in agent.config_entries}
-        config_json_str = config_map.get("AGENT_CONFIG_JSON", "")
-        if config_json_str:
-            try:
-                effective_model_id = json.loads(config_json_str).get("model_id")
-            except (json.JSONDecodeError, TypeError):
-                pass
+    effective_model_id = resolve_effective_model_id(agent, runtime_model_id)
+
+    # Pre-flight usage-limit check. Runs before creating or reusing a session,
+    # so a blocked request leaves no empty/orphaned session row behind.
+    decision = check_usage_limits(db, user.username, user.groups or [], effective_model_id)
+    if decision.enforcement == "block":
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Usage limit '{decision.limit_name}' exceeded "
+                   f"({decision.current_usage}/{decision.threshold} {decision.measure})",
+        )
 
     # Record client invoke time before session creation
     client_invoke_time = time.time()
@@ -1506,23 +1509,6 @@ async def invoke_agent_endpoint(
         db.commit()
         db.refresh(session)
 
-    # Pre-flight usage-limit check. Runs for every invoke regardless of
-    # whether the session is new or reused. Necessarily based on already-
-    # completed usage, not this request's own (not-yet-known) cost — see
-    # app/services/usage_limits.py for why.
-    decision = check_usage_limits(db, user.username, user.groups or [], effective_model_id)
-    if decision.enforcement == "block":
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Usage limit '{decision.limit_name}' exceeded "
-                   f"({decision.current_usage}/{decision.threshold} {decision.measure})",
-        )
-    if decision.enforcement == "throttle":
-        # No mechanism exists to meter or cut off a request mid-stream (it's
-        # already dispatched to Bedrock by the time usage is known), so
-        # throttling is a fixed pre-dispatch delay rather than a live cap.
-        await asyncio.sleep(3)
-
     # Create invocation record within the session
     invocation = Invocation(
         session_id=session.session_id,
@@ -1530,6 +1516,7 @@ async def invoke_agent_endpoint(
         status="pending",
         prompt_text=request_body.prompt,
         model_id=effective_model_id,
+        model_family=get_model_family(effective_model_id) if effective_model_id else None,
         created_at=datetime.utcnow(),
     )
     db.add(invocation)
@@ -1929,7 +1916,22 @@ async def invoke_agent_websocket(
             # resolution chain (manual token / credential ID / linked user).
             access_token = data.get("bearer_token")
 
-            await websocket.send_json({"type": "session_start", "session_id": session_id})
+            # Pre-flight usage-limit check for WebSocket invoke
+            ws_effective_model_id = resolve_effective_model_id(agent, data.get("model_id"))
+            ws_decision = check_usage_limits(db, user.username, user.groups or [], ws_effective_model_id)
+            if ws_decision.enforcement == "block":
+                await websocket.send_json({
+                    "type": "error",
+                    "content": f"Usage limit '{ws_decision.limit_name}' exceeded "
+                               f"({ws_decision.current_usage}/{ws_decision.threshold} {ws_decision.measure})",
+                })
+                await websocket.close(code=1008)
+                return
+
+            session_start_msg = {"type": "session_start", "session_id": session_id}
+            if ws_decision.warnings:
+                session_start_msg["usage_warnings"] = ws_decision.warnings
+            await websocket.send_json(session_start_msg)
 
             gen = invoke_agent_ws(
                 arn=agent.arn,

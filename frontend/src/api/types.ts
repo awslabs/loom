@@ -646,7 +646,7 @@ export interface UsageLimit {
   measure: "tokens" | "budget";
   threshold: number;
   window: "daily" | "weekly" | "monthly" | "rolling";
-  enforcement: "warn" | "throttle" | "block";
+  enforcement: "warn" | "block";
   enabled: boolean;
   cached_usage: number | null;
   cached_usage_updated_at: string | null;

@@ -16,7 +16,7 @@ class UsageLimit(Base):
     measure = Column(String, nullable=False)  # tokens, budget
     threshold = Column(Float, nullable=False)
     window = Column(String, nullable=False, default="daily")  # daily, weekly, monthly, rolling
-    enforcement = Column(String, nullable=False, default="warn")  # warn, throttle, block
+    enforcement = Column(String, nullable=False, default="warn")  # warn, block
     enabled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

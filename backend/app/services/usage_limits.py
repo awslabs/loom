@@ -6,10 +6,12 @@ completed* usage in the current window, since a request's own token/cost
 usage isn't known until after it finishes — there's no way to meter or
 cut off a request mid-stream.
 """
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.invocation import Invocation
@@ -19,7 +21,7 @@ from app.services.model_catalog import get_model_family, _normalize_model_id
 
 logger = logging.getLogger(__name__)
 
-_ENFORCEMENT_RANK = {"warn": 0, "throttle": 1, "block": 2}
+_ENFORCEMENT_RANK = {"warn": 0, "block": 1}
 
 
 @dataclass
@@ -30,6 +32,22 @@ class UsageDecision:
     threshold: float | None = None
     measure: str | None = None
     warnings: list[str] = field(default_factory=list)
+
+
+def resolve_effective_model_id(agent, runtime_model_id: str | None = None) -> str | None:
+    """Resolve the effective model ID for an invocation: runtime override if provided,
+    otherwise the default model configured on the agent (from AGENT_CONFIG_JSON).
+    """
+    if runtime_model_id:
+        return runtime_model_id
+    config_map = {e.key: e.value for e in getattr(agent, "config_entries", [])}
+    config_json_str = config_map.get("AGENT_CONFIG_JSON", "")
+    if config_json_str:
+        try:
+            return json.loads(config_json_str).get("model_id")
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return None
 
 
 def _window_start(window: str, now: datetime) -> datetime:
@@ -78,7 +96,7 @@ def _limit_matches_target(target: dict, model_id: str | None) -> bool:
     return False
 
 
-def _matching_limits(db: Session, username: str, groups: list[str], model_id: str) -> list[UsageLimit]:
+def _matching_limits(db: Session, username: str, groups: list[str], model_id: str | None) -> list[UsageLimit]:
     """Enabled limits whose scope and target both apply to this request.
 
     Filtered in Python after one query for all enabled limits, since
@@ -97,6 +115,9 @@ def _current_usage(db: Session, limit: UsageLimit, window_start: datetime) -> fl
     """Sum of `limit.measure` across invocations matching this limit's
     scope and target, since `window_start`.
 
+    Computed directly in SQL with func.sum() rather than loading all matching
+    rows into Python memory.
+
     "budget" sums estimated_cost + compute_cost + memory_estimated_cost —
     the three cost components actually charged. idle_* costs are
     deliberately excluded: per their own column comments on Invocation,
@@ -111,30 +132,47 @@ def _current_usage(db: Session, limit: UsageLimit, window_start: datetime) -> fl
     if scope.get("type") == "user":
         query = query.filter(InvocationSession.user_id == scope.get("username"))
     elif scope.get("type") == "group":
-        # groups is a JSON list snapshotted at invoke time; a plain LIKE
-        # match on the group name avoids depending on SQLite's optional
-        # JSON1 extension being present.
-        query = query.filter(InvocationSession.groups.like(f'%"{scope.get("group")}"%'))
+        raw_group = scope.get("group", "")
+        # Escape \, %, _ so they match literally in LIKE pattern
+        escaped_group = raw_group.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.filter(InvocationSession.groups.like(f'%"{escaped_group}"%', escape="\\"))
     else:
         return 0.0
 
-    invocations = query.all()
-
     target = limit.get_target()
-    if target.get("type") != "all":
-        invocations = [inv for inv in invocations if _limit_matches_target(target, inv.model_id)]
+    target_type = target.get("type", "all")
+    if target_type == "model":
+        target_model = target.get("model_id", "")
+        norm_target = _normalize_model_id(target_model)
+        query = query.filter((Invocation.model_id == target_model) | (Invocation.model_id == norm_target))
+    elif target_type == "family":
+        query = query.filter(Invocation.model_family == target.get("family"))
 
     if limit.measure == "tokens":
-        return sum((inv.input_tokens or 0) + (inv.output_tokens or 0) for inv in invocations)
-    return sum(
-        (inv.estimated_cost or 0) + (inv.compute_cost or 0) + (inv.memory_estimated_cost or 0)
-        for inv in invocations
-    )
+        metric = (
+            func.coalesce(Invocation.input_tokens, 0)
+            + func.coalesce(Invocation.output_tokens, 0)
+        )
+    else:
+        metric = (
+            func.coalesce(Invocation.estimated_cost, 0.0)
+            + func.coalesce(Invocation.compute_cost, 0.0)
+            + func.coalesce(Invocation.memory_estimated_cost, 0.0)
+        )
+
+    total = query.with_entities(func.sum(metric)).scalar()
+    return float(total or 0.0)
 
 
+def check_usage_limits(db: Session, username: str, groups: list[str], model_id: str | None) -> UsageDecision:
+    """Evaluate all matching usage limits and return the single decision
+    to act on.
 
-def check_usage_limits(db: Session, username: str, groups: list[str], model_id: str) -> UsageDecision:
-    
+    Precedence: among limits already exceeded, block wins over warn
+    (most-restrictive-wins) — an exceeded "warn" limit never softens an
+    exceeded "block" limit on a different scope. Limits not yet exceeded are
+    ignored entirely, even if enabled and matching.
+    """
     now = datetime.utcnow()
     decision = UsageDecision()
 
@@ -169,12 +207,3 @@ def check_usage_limits(db: Session, username: str, groups: list[str], model_id: 
             decision.measure = limit.measure
 
     return decision
-
-    """Evaluate all matching usage limits and return the single decision
-    to act on.
-
-    Precedence: among limits already exceeded, block wins over throttle
-    wins over warn (most-restrictive-wins) — an exceeded "warn" limit
-    never softens an exceeded "block" limit on a different scope. Limits
-    not yet exceeded are ignored entirely, even if enabled and matching.
-    """

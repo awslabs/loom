@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/settings", tags=["usage-limits"])
 
 VALID_MEASURES = ("tokens", "budget")
 VALID_WINDOWS = ("daily", "weekly", "monthly", "rolling")
-VALID_ENFORCEMENTS = ("warn", "throttle", "block")
+VALID_ENFORCEMENTS = ("warn", "block")
 VALID_SCOPE_TYPES = ("user", "group")
 VALID_TARGET_TYPES = ("all", "model", "family")
 
@@ -31,7 +31,7 @@ class UsageLimitCreateRequest(BaseModel):
     measure: str = Field(..., description="tokens or budget")
     threshold: float
     window: str = Field(default="daily", description="daily, weekly, monthly, or rolling")
-    enforcement: str = Field(default="warn", description="warn, throttle, or block")
+    enforcement: str = Field(default="warn", description="warn or block")
     enabled: bool = Field(default=True)
 
 

@@ -1937,6 +1937,30 @@ class TestExecuteRun(unittest.TestCase):
         from app.routers.evaluations import _execute_run
         _execute_run(999999, self.tc.id, self.agent.id, "s1", None, None, None, ADMIN)  # must not raise
 
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_eval_run_blocked_by_usage_limit_fails_as_error(self, mock_invoke):
+        from app.routers.evaluations import _execute_run
+        from app.models.usage_limit import UsageLimit
+        limit = UsageLimit(
+            name="Eval Block Limit",
+            scope=json.dumps({"type": "user", "username": ADMIN.username}),
+            target=json.dumps({"type": "all"}),
+            measure="tokens",
+            threshold=10,
+            enforcement="block",
+            cached_usage=50.0,
+            cached_usage_updated_at=datetime.utcnow(),
+        )
+        self.session.add(limit)
+        self.session.commit()
+
+        _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", "say hi", None, None, ADMIN)
+        self.session.expire_all()
+        updated = self.session.query(EvaluationRun).filter_by(id=self.run.id).first()
+        self.assertEqual(updated.status, "ERROR")
+        self.assertIn("Usage limit 'Eval Block Limit' exceeded", updated.get_errors()[0])
+        mock_invoke.assert_not_called()
+
 
 class TestExecuteRunAll(unittest.TestCase):
     """Run all queues one background task, and FastAPI runs a request's

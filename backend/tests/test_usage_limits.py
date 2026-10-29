@@ -177,12 +177,23 @@ class TestUsageLimitCRUD(unittest.TestCase):
         # accidentally wipe out anything we didn't mention.
         response = self.client.put(f"/api/settings/usage-limits/{limit_id}", json={
             "threshold": 500,
-            "enforcement": "throttle",
+            "enforcement": "block",
         })
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["threshold"], 500)
-        self.assertEqual(data["enforcement"], "throttle")
+        self.assertEqual(data["enforcement"], "block")
+
+    def test_create_throttle_enforcement_returns_400(self) -> None:
+        # Throttle enforcement was dropped from the PR; only warn and block are valid.
+        response = self.client.post("/api/settings/usage-limits", json={
+            "name": "Throttle Cap",
+            "scope": {"type": "user", "username": "grace"},
+            "measure": "tokens",
+            "threshold": 100,
+            "enforcement": "throttle",
+        })
+        self.assertEqual(response.status_code, 400)
 
     def test_delete_usage_limit(self) -> None:
         create = self.client.post("/api/settings/usage-limits", json={

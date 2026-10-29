@@ -38,7 +38,7 @@ interface LimitFormData {
   measure: "tokens" | "budget";
   threshold: number;
   window: "daily" | "weekly" | "monthly" | "rolling";
-  enforcement: "warn" | "throttle" | "block";
+  enforcement: "warn" | "block";
   enabled: boolean;
 }
 
@@ -55,9 +55,8 @@ const EMPTY_FORM: LimitFormData = {
   enabled: true,
 };
 
-const ENFORCEMENT_VARIANT: Record<UsageLimit["enforcement"], "destructive" | "warning" | "neutral"> = {
+const ENFORCEMENT_VARIANT: Record<UsageLimit["enforcement"], "destructive" | "neutral"> = {
   block: "destructive",
-  throttle: "warning",
   warn: "neutral",
 };
 
@@ -203,7 +202,12 @@ export function UsageLimitsPanel({ readOnly, onCountChange }: { readOnly?: boole
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium">Usage limits</h3>
+        <div>
+          <h3 className="text-sm font-medium">Usage limits</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Configure token and spend caps per user or group. Note: for Custom Agents, token counts are estimated from prompt and final response.
+          </p>
+        </div>
         {!readOnly && !isFormOpen && (
           <Button
             size="sm"
@@ -339,7 +343,6 @@ export function UsageLimitsPanel({ readOnly, onCountChange }: { readOnly?: boole
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="warn">Warn only</SelectItem>
-                  <SelectItem value="throttle">Throttle</SelectItem>
                   <SelectItem value="block">Block</SelectItem>
                 </SelectContent>
               </Select>

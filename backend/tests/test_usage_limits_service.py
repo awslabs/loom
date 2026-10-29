@@ -13,6 +13,7 @@ from app.models.session import InvocationSession
 from app.models.invocation import Invocation
 from app.models.usage_limit import UsageLimit
 from app.services.usage_limits import check_usage_limits
+from app.services.model_catalog import get_model_family
 
 
 class TestCheckUsageLimits(unittest.TestCase):
@@ -64,6 +65,7 @@ class TestCheckUsageLimits(unittest.TestCase):
             status="complete",
             prompt_text="test",
             model_id=model_id,
+            model_family=get_model_family(model_id) if model_id else None,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             estimated_cost=estimated_cost,
@@ -217,6 +219,35 @@ class TestCheckUsageLimits(unittest.TestCase):
         decision = check_usage_limits(self.db, "frank", [], "anthropic.claude-sonnet-4-6")
         self.assertEqual(decision.enforcement, "block")
         self.assertEqual(decision.current_usage, 1.2)
+
+    def test_group_scope_escapes_like_wildcards(self):
+        # Cognito group names can contain underscores, e.g. g-users-a_b.
+        # Ensure that SQL LIKE does not treat '_' as a wildcard matching g-users-aXb.
+        limit = UsageLimit(
+            name="Underscore Group Cap",
+            scope=json.dumps({"type": "group", "group": "g-users-a_b"}),
+            target=json.dumps({"type": "all"}),
+            measure="tokens",
+            threshold=50,
+            window="daily",
+            enforcement="block",
+        )
+        self.db.add(limit)
+        self.db.commit()
+
+        # Session with group containing 'X' instead of '_'
+        self._make_session("s_other", "other_user", groups=["g-users-aXb"])
+        self._make_invocation("s_other", "i_other", "anthropic.claude-sonnet-4-6", input_tokens=100, output_tokens=100)
+
+        # Check limit for a user in g-users-a_b: their usage should be 0 because g-users-aXb must not match!
+        decision = check_usage_limits(self.db, "target_user", ["g-users-a_b"], "anthropic.claude-sonnet-4-6")
+        self.assertIsNone(decision.enforcement)
+
+    def test_session_to_dict_does_not_contain_groups(self):
+        # Privacy: session owner's group memberships must not leak in session responses.
+        session = self._make_session("s_priv", "alice", groups=["g-admins-security", "g-users"])
+        data = session.to_dict()
+        self.assertNotIn("groups", data)
 
 
 if __name__ == "__main__":

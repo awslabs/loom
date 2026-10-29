@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error(f"Failed to initialize database: {e}")
         raise
 
-        # Initialize registry client from site_settings (or env var fallback)
+    # Initialize registry client from site_settings (or env var fallback)
     try:
         from app.services.registry import init_registry_from_db
         from app.db import SessionLocal

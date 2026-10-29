@@ -24,7 +24,6 @@ export function SecurityAdminPage({ readOnly, agents = [] }: { readOnly?: boolea
     { key: "approvals", label: "Approval policies" },
     { key: "usage-limits", label: "Usage limits" },
   ];
-  ];
 
   return (
     <div className="space-y-4">

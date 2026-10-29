@@ -1141,7 +1141,8 @@ An agent's `model_id`/`allowed_model_ids` can outlive the catalog (a `models.jso
 
 A new tab in the Security Admin page (`SecurityAdminPage.tsx`), following the same structure as `ApprovalPolicyPanel.tsx`:
 - Table view listing each limit's scope ("Applies To"), target ("Model Scope"), current cached usage against threshold, enforcement action, and enabled state, using the existing `StatusPill` component for the enforcement and enabled columns.
-- Inline create/edit form, matching the existing panel's layout: two-step scope selector (type + value), two-step target selector (type + value, value field conditional on target type), and selects for measure/window/enforcement.
+- Inline create/edit form, matching the existing panel's layout: two-step scope selector (type + value), two-step target selector (type + value, value field conditional on target type), and selects for measure/window/enforcement (warn, block).
+- Custom Agent token estimation note displayed in panel help text.
 - No user/group autocomplete picker exists elsewhere in the app for this kind of field, so scope/target values are plain text inputs, consistent with the rest of the admin UI rather than introducing a new input pattern.
 
 ### 19.2 API Client (`api/usage_limits.ts`)

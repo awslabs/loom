@@ -39,5 +39,4 @@ class InvocationSession(Base):
             "user_id": self.user_id,
             "hidden_at": (self.hidden_at.isoformat() + "Z") if self.hidden_at else None,
             "invocations": [inv.to_dict() for inv in self.invocations] if self.invocations else [],
-            "groups": json.loads(self.groups) if self.groups else [],
         }

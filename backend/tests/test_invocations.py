@@ -682,6 +682,7 @@ class TestInvocationsRouter(unittest.TestCase):
         self.session.add(prior_inv)
         self.session.commit()
 
+        session_count_before = self.session.query(InvocationSession).count()
         invocation_count_before = self.session.query(Invocation).count()
 
         response = self.client.post(
@@ -692,7 +693,12 @@ class TestInvocationsRouter(unittest.TestCase):
         self.assertEqual(response.status_code, 429)
         self.assertIn("Local Dev Block", response.json()["detail"])
 
+        session_count_after = self.session.query(InvocationSession).count()
         invocation_count_after = self.session.query(Invocation).count()
+        self.assertEqual(
+            session_count_before, session_count_after,
+            "A blocked invoke must not create an orphaned InvocationSession row",
+        )
         self.assertEqual(
             invocation_count_before, invocation_count_after,
             "A blocked invoke must not create a new Invocation row",

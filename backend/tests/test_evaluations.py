@@ -1941,6 +1941,8 @@ class TestExecuteRun(unittest.TestCase):
     def test_eval_run_blocked_by_usage_limit_fails_as_error(self, mock_invoke):
         from app.routers.evaluations import _execute_run
         from app.models.usage_limit import UsageLimit
+        from app.models.session import InvocationSession
+        from app.models.invocation import Invocation
         limit = UsageLimit(
             name="Eval Block Limit",
             scope=json.dumps({"type": "user", "username": ADMIN.username}),
@@ -1948,10 +1950,24 @@ class TestExecuteRun(unittest.TestCase):
             measure="tokens",
             threshold=10,
             enforcement="block",
-            cached_usage=50.0,
-            cached_usage_updated_at=datetime.utcnow(),
         )
         self.session.add(limit)
+        session = InvocationSession(
+            session_id="s_eval_limit",
+            agent_id=self.agent.id,
+            qualifier="DEFAULT",
+            user_id=ADMIN.username,
+            status="active",
+        )
+        inv = Invocation(
+            invocation_id="i_eval_limit",
+            session_id="s_eval_limit",
+            input_tokens=25,
+            output_tokens=25,
+            status="complete",
+        )
+        self.session.add(session)
+        self.session.add(inv)
         self.session.commit()
 
         _execute_run(self.run.id, self.tc.id, self.agent.id, "s1", "say hi", None, None, ADMIN)

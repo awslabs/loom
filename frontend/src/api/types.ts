@@ -557,6 +557,7 @@ export interface SSESessionStart {
   token_source?: string;
   has_token?: boolean;
   user_token?: SSETokenInfo;
+  usage_warnings?: string[];
 }
 
 export interface SSEChunk {

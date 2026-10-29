@@ -684,6 +684,20 @@ export function InvokePanel({
             </>
           )}
 
+          {sessionStart?.usage_warnings && sessionStart.usage_warnings.length > 0 && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/[0.08] p-3 text-sm text-amber-800 dark:text-amber-200">
+              <div className="flex items-center gap-2 font-medium">
+                <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                <span>Usage Limit Warning</span>
+              </div>
+              <ul className="mt-1.5 list-disc list-inside text-xs space-y-0.5">
+                {sessionStart.usage_warnings.map((w, idx) => (
+                  <li key={idx}>{w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {error && (
             <div className="rounded-md border border-destructive/30 bg-destructive/[0.06] p-3 text-sm text-destructive">
               <p>{error}</p>

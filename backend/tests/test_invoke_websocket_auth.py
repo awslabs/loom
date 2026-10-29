@@ -22,6 +22,9 @@ from app.main import app
 from app.db import SessionLocal
 from app.dependencies.auth import UserInfo, derive_scopes
 from app.models.agent import Agent
+from app.models.session import InvocationSession
+from app.models.invocation import Invocation
+from app.models.usage_limit import UsageLimit
 
 
 @pytest.fixture(autouse=True)
@@ -60,10 +63,16 @@ class TestInvokeWebsocketRequiresAuth(unittest.TestCase):
         self.agent_id = self.agent.id
 
     def tearDown(self) -> None:
-        self.db.query(Agent).filter(Agent.id == self.agent_id).delete()
-        self.db.commit()
-        self.db.close()
-        app.dependency_overrides.clear()
+        try:
+            self.db.rollback()
+            self.db.query(Invocation).delete()
+            self.db.query(InvocationSession).delete()
+            self.db.query(UsageLimit).delete()
+            self.db.query(Agent).filter(Agent.id == self.agent_id).delete()
+            self.db.commit()
+        finally:
+            self.db.close()
+            app.dependency_overrides.clear()
 
     def _frames_until_close(self, agent_id: int, message: dict, max_frames: int = 8) -> list[dict]:
         """Send one frame and collect replies until the server closes.
@@ -193,6 +202,8 @@ class TestInvokeWebsocketRequiresAuth(unittest.TestCase):
         import json
         from datetime import datetime
         from app.models.usage_limit import UsageLimit
+        from app.models.session import InvocationSession
+        from app.models.invocation import Invocation
 
         mock_auth.return_value = _user(["t-user", "g-users-demo"])
         limit = UsageLimit(
@@ -202,10 +213,24 @@ class TestInvokeWebsocketRequiresAuth(unittest.TestCase):
             measure="tokens",
             threshold=10,
             enforcement="block",
-            cached_usage=50.0,
-            cached_usage_updated_at=datetime.utcnow(),
         )
         self.db.add(limit)
+        session = InvocationSession(
+            session_id="s_ws_limit",
+            agent_id=self.agent_id,
+            qualifier="DEFAULT",
+            user_id="u",
+            status="active",
+        )
+        inv = Invocation(
+            invocation_id="i_ws_limit",
+            session_id="s_ws_limit",
+            input_tokens=25,
+            output_tokens=25,
+            status="complete",
+        )
+        self.db.add(session)
+        self.db.add(inv)
         self.db.commit()
 
         frames = self._frames_until_close(

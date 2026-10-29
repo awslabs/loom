@@ -2092,6 +2092,14 @@ Precedence among multiple matching, exceeded limits is most-restrictive-wins: bl
 
 Group-scoped limits snapshot the user's groups (`UserInfo.groups`) onto `InvocationSession.groups` at invoke time for internal aggregation. To prevent sensitive group exposure, `InvocationSession.groups` is omitted from `to_dict()` and never returned in API responses.
 
-### 17.3 Aggregation
+### 17.3 Aggregation & Live Enforcement
 
-Aggregation is performed directly in SQL using `func.sum()` with model/family filtering, avoiding in-memory row loading. See `services/usage_limit_aggregator.py` above. Both this job and the pre-existing `services/usage_poller.py` cost-reconciliation job are started from `main.py`'s lifespan handler as cancellable `asyncio` tasks (previously, `usage_poller.py` existed but was never actually wired into startup).
+Aggregation is performed directly in SQL using `func.sum()` with model/family filtering, avoiding in-memory row loading. See `services/usage_limit_aggregator.py` above.
+- **Block enforcements** bypass `cached_usage` and always query SQL live, ensuring that parallel or burst requests are checked against immediately-recorded invocations without a 60-second cache stale window.
+- **Warn enforcements** use `cached_usage` when fresh (refreshed at or after window start), falling back to live SQL calculation when stale or missing.
+- Both this job and the pre-existing `services/usage_poller.py` cost-reconciliation job are started from `main.py`'s lifespan handler as cancellable `asyncio` tasks (previously, `usage_poller.py` existed but was never actually wired into startup).
+
+### 17.4 Design Considerations & Identity Scope
+
+- **Shared Group Budget:** Group-scoped limits represent a shared collective pool for all users in that group (e.g. departmental or team budget ceiling). When any user in the group consumes usage, it counts toward the group limit, and exceeding the limit triggers the configured action (warn or block) for all members of that group.
+- **User Identity Keying:** User-scoped limits match on `username`, which aligns with `InvocationSession.user_id`, session ownership checks, memory partitioning, and audit logging throughout Loom. External federated IdP identity normalization to `sub` is deferred to a platform-wide identity refactoring PR so as not to break session ownership and audit consistency.

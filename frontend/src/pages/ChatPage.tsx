@@ -70,6 +70,7 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
   const [queuedPrompt, setQueuedPrompt] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  const [usageWarnings, setUsageWarnings] = useState<string[]>([]);
   // Persist HITL segments per invocation ID so they survive re-fetches
   const hitlSegmentsMap = useRef<Map<string, StreamSegment[]>>(new Map());
 
@@ -473,6 +474,14 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
     if (sessionStart && sessionStart !== lastSessionStartRef.current && selectedAgentId !== null) {
       lastSessionStartRef.current = sessionStart;
       setCurrentSessionId(sessionStart.session_id);
+      if (sessionStart.usage_warnings && sessionStart.usage_warnings.length > 0) {
+        setUsageWarnings(sessionStart.usage_warnings);
+        for (const warning of sessionStart.usage_warnings) {
+          toast.warning(warning, { duration: 6000 });
+        }
+      } else {
+        setUsageWarnings([]);
+      }
       // Use the backend's authoritative user_id for future session queries
       if (sessionStart.user_id && sessionStart.user_id !== backendUserId) {
         setBackendUserId(sessionStart.user_id);
@@ -655,6 +664,7 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
     setCurrentSessionId(null);
     setPendingPrompt(null);
     setQueuedPrompt(null);
+    setUsageWarnings([]);
     lastSessionEndRef.current = null;
     lastSessionStartRef.current = null;
     if (selectedAgentId !== null) {
@@ -683,6 +693,7 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
       setPendingPrompt(saved?.pendingPrompt ?? null);
       setQueuedPrompt(null);
       setCurrentSessionId(saved?.currentSessionId ?? null);
+      setUsageWarnings([]);
       // Reset so the sessionEnd effect re-fires for the restored agent
       lastSessionEndRef.current = null;
       setSelectedAgentId(id);
@@ -713,6 +724,7 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
         setMessages(msgs);
         setCurrentSessionId(sessionId);
         setPendingPrompt(null);
+        setUsageWarnings([]);
       } catch {
         // silently fail
       }
@@ -997,6 +1009,26 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
                   )}
                 </div>
               </div>
+
+              {/* Usage warnings banner */}
+              {usageWarnings.length > 0 && (
+                <div className="bg-amber-500/10 border-b border-amber-500/20 px-6 py-2.5 flex items-start gap-2.5 text-xs text-amber-700 dark:text-amber-300 shrink-0">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                  <div className="flex-1 space-y-0.5">
+                    {usageWarnings.map((w, idx) => (
+                      <p key={idx} className="font-medium">{w}</p>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setUsageWarnings([])}
+                    className="text-amber-600/70 hover:text-amber-700 dark:text-amber-400/70 dark:hover:text-amber-300 transition-colors ml-2"
+                    title="Dismiss warning"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
 
               {/* Messages */}
               <div className="flex-1 overflow-y-auto relative">

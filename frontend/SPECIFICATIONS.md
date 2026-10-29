@@ -1153,9 +1153,11 @@ Standard CRUD wrapper over `apiFetch`, matching `api/approvals.ts`'s structure: 
 
 `UsageLimit` added to `api/types.ts`, with `scope`/`target` typed as discriminated unions rather than loose `Record<string, unknown>`, so the panel component gets exhaustiveness checking on scope/target type branches.
 
-### 19.4 Known Gap
+### 19.4 Usage Warnings UI Display
 
-The backend emits `usage_warnings` on the `session_start` SSE event when a `warn`-tier limit is exceeded (see backend §17.2), but nothing in the chat/invoke UI currently reads or displays it. Follow-up work.
+The backend emits `usage_warnings` on the `session_start` SSE/WebSocket event when a `warn`-tier limit is exceeded (see backend §17.2). Both the Chat UI (`ChatPage.tsx`) and the test playground (`InvokePanel.tsx`) read this field:
+- **ChatPage:** Renders an amber alert banner at the top of the conversation view displaying all active warning messages with a dismiss action, and additionally surfaces a notification toast via `toast.warning()`.
+- **InvokePanel:** Renders a warning alert card above the prompt composer displaying the exceeded usage limit details.
 
 ## 20. Future Work
 

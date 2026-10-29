@@ -206,7 +206,7 @@ function _startInvokeWs(
     },
     {
       onSessionStart: (data) => {
-        _update(agentId, { sessionStart: { session_id: data.session_id, invocation_id: "", client_invoke_time: Date.now() } });
+        _update(agentId, { sessionStart: { session_id: data.session_id, invocation_id: "", client_invoke_time: Date.now(), usage_warnings: data.usage_warnings } });
       },
       onText: (text) => {
         const cur = _get(agentId);

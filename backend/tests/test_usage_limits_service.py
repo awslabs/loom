@@ -249,6 +249,52 @@ class TestCheckUsageLimits(unittest.TestCase):
         data = session.to_dict()
         self.assertNotIn("groups", data)
 
+    def test_block_enforcement_skips_cache_and_computes_live(self):
+        # Block limits must bypass cached_usage to prevent parallel overshoot
+        limit = UsageLimit(
+            name="Block Bypass Cache",
+            scope=json.dumps({"type": "user", "username": "alice"}),
+            target=json.dumps({"type": "all"}),
+            measure="tokens",
+            threshold=100,
+            window="daily",
+            enforcement="block",
+            cached_usage=10.0,
+            cached_usage_updated_at=datetime.utcnow(),
+        )
+        self.db.add(limit)
+        self.db.commit()
+
+        self._make_session("s_block", "alice")
+        self._make_invocation("s_block", "i_block", "anthropic.claude-sonnet-4-6", input_tokens=70, output_tokens=70)
+
+        decision = check_usage_limits(self.db, "alice", [], "anthropic.claude-sonnet-4-6")
+        self.assertEqual(decision.enforcement, "block")
+        self.assertEqual(decision.current_usage, 140.0)
+
+    def test_warn_enforcement_uses_fresh_cache(self):
+        # Warn limits use cached_usage when fresh
+        limit = UsageLimit(
+            name="Warn Fresh Cache",
+            scope=json.dumps({"type": "user", "username": "alice"}),
+            target=json.dumps({"type": "all"}),
+            measure="tokens",
+            threshold=100,
+            window="daily",
+            enforcement="warn",
+            cached_usage=10.0,
+            cached_usage_updated_at=datetime.utcnow(),
+        )
+        self.db.add(limit)
+        self.db.commit()
+
+        self._make_session("s_warn", "alice")
+        self._make_invocation("s_warn", "i_warn", "anthropic.claude-sonnet-4-6", input_tokens=70, output_tokens=70)
+
+        decision = check_usage_limits(self.db, "alice", [], "anthropic.claude-sonnet-4-6")
+        self.assertIsNone(decision.enforcement)
+        self.assertEqual(len(decision.warnings), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

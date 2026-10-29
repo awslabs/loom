@@ -186,7 +186,7 @@ export async function invokeAgentStream(
  * back to the agent while it's running.
  */
 export interface WsInvokeCallbacks {
-  onSessionStart?: (data: { session_id: string }) => void;
+  onSessionStart?: (data: { session_id: string; usage_warnings?: string[] }) => void;
   onText?: (text: string) => void;
   onToolUse?: (data: SSEToolUse) => void;
   onElicitation?: (data: { id: string; message: string }) => void;

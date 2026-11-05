@@ -1,7 +1,9 @@
 """A2A agent service layer for Agent Card fetching and connection testing."""
 import logging
+import re
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -25,9 +27,27 @@ AGENT_JSON_PATH = "/.well-known/agent.json"
 AGENT_CARD_JSON_PATH = "/.well-known/agent-card.json"
 
 
+# AgentCore data plane host, e.g. bedrock-agentcore.us-east-1.amazonaws.com
+# (invoke URL form: https://bedrock-agentcore.<region>.amazonaws.com/runtimes/<escaped-arn>/invocations/)
+_AGENTCORE_HOST_RE = re.compile(r"bedrock-agentcore\.[a-z]{2}(-[a-z]+)+-\d+\.amazonaws\.com", re.ASCII)
+
+
 def _is_agentcore_url(base_url: str) -> bool:
-    """Detect if the base URL points to an AgentCore Runtime endpoint."""
-    return "bedrock-agentcore" in base_url
+    """Detect if the base URL points to an AgentCore Runtime endpoint.
+
+    Matches the parsed hostname against the AgentCore host pattern, so a URL that
+    merely contains the text in its path, query or userinfo is not treated as AgentCore.
+    """
+    # A real AgentCore URL is plain ASCII with no surrounding whitespace; urlsplit would otherwise
+    # fold Unicode lookalikes (for example the Kelvin sign) and strip whitespace before matching.
+    if not base_url.isascii() or base_url != base_url.strip():
+        return False
+    try:
+        parts = urlsplit(base_url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and host is not None and _AGENTCORE_HOST_RE.fullmatch(host) is not None
 
 
 def _is_salesforce_url(base_url: str) -> bool:

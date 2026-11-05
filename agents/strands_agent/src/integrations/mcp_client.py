@@ -204,7 +204,7 @@ class _OAuth2Auth(httpx.Auth):
         claims = _decode_jwt_claims(token)
         if claims:
             event = {
-                "token_type": "obo",
+                "token_type": "obo" if self._oauth2_flow == "ON_BEHALF_OF_TOKEN_EXCHANGE" else "m2m",
                 "credential_provider": self._credential_provider_name,
                 "flow": self._oauth2_flow,
                 "claims": {
@@ -225,7 +225,8 @@ class _OAuth2Auth(httpx.Auth):
                 _token_info_events.append(event)
 
     def _fetch_resource_token(self, workload_token: str) -> Optional[str]:
-        cache_key = (self._credential_provider_name, self._oauth2_flow, workload_token[:32])
+        # Key on the whole token: the first 32 characters of a JWT are the shared header, not an identity.
+        cache_key = (self._credential_provider_name, self._oauth2_flow, hashlib.sha256(workload_token.encode()).hexdigest())
         now = time.time()
         with _TOKEN_CACHE_LOCK:
             cached = _TOKEN_CACHE.get(cache_key)

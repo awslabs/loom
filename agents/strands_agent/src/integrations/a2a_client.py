@@ -8,7 +8,6 @@ agent can invoke during a conversation.
 
 import json as _json
 import logging
-import os
 from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
@@ -61,7 +60,6 @@ class _AuthenticatedA2AAgent(A2AAgent):
         name: str | None = None,
         timeout: int = _DEFAULT_TIMEOUT,
         http_auth: httpx.Auth | None = None,
-        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         super().__init__(
             endpoint,
@@ -69,7 +67,6 @@ class _AuthenticatedA2AAgent(A2AAgent):
             timeout=timeout,
         )
         self._http_auth = http_auth
-        self._http_client = http_client
 
     async def get_agent_card(self):
         """Fetch the agent card using an authenticated httpx client.
@@ -197,7 +194,13 @@ class _AuthenticatedA2AAgent(A2AAgent):
 
             # Use streaming request so we can inspect Content-Type before
             # deciding how to consume the body (SSE vs plain JSON).
-            async with self._http_client.stream(
+            # The client is created per call, like in get_agent_card(): Strands
+            # runs every call in a fresh event loop (asyncio.run), and a pooled
+            # keep-alive connection from an earlier call is bound to that closed
+            # loop ("RuntimeError: Event loop is closed" on every second call).
+            async with httpx.AsyncClient(
+                auth=self._http_auth, timeout=self.timeout,
+            ) as client, client.stream(
                 "POST", agent_card.url, json=payload, timeout=self.timeout,
             ) as response:
                 response.raise_for_status()
@@ -352,12 +355,14 @@ def _build_a2a_tool(config: A2AAgentConfig) -> Any:
     if config.auth and config.auth.type == "oauth2" and config.auth.credential_provider_name:
         scope_list = config.auth.scopes.split() if config.auth.scopes else []
         delegation_mode = (config.auth.delegation_mode or "m2m").lower()
-        user_access_token = os.environ.get("USER_ACCESS_TOKEN") or None
+        # Same construction as mcp_client._build_transport_callable. The user's identity for obo travels in the
+        # workload token; _OAuth2Auth takes no user token (and neither does get_resource_oauth2_token).
         auth = _OAuth2Auth(
             credential_provider_name=config.auth.credential_provider_name,
             scopes=scope_list,
             delegation_mode=delegation_mode,
-            user_access_token=user_access_token if delegation_mode == "obo" else None,
+            obo_grant_type=config.auth.obo_grant_type or None,
+            audience=config.auth.audience or "",
         )
         logger.info(
             "A2A agent '%s' configured with OAuth2 auth (credential_provider=%s, scopes=%s, delegation_mode=%s)",
@@ -367,16 +372,13 @@ def _build_a2a_tool(config: A2AAgentConfig) -> Any:
             delegation_mode,
         )
 
-        # Long-lived authenticated httpx client used for both agent card
-        # fetch and message sending (bypasses the SDK's SSE transport
-        # which is incompatible with AgentCore's JSON proxy).
-        authenticated_client = httpx.AsyncClient(auth=auth, timeout=_DEFAULT_TIMEOUT)
-
+        # The agent fetches its card and sends messages with its own httpx
+        # client per request (bypasses the SDK's SSE transport which is
+        # incompatible with AgentCore's JSON proxy).
         a2a_agent = _AuthenticatedA2AAgent(
             endpoint=config.endpoint_url,
             name=config.name,
             http_auth=auth,
-            http_client=authenticated_client,
         )
     else:
         a2a_agent = A2AAgent(

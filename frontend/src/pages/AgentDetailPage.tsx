@@ -548,7 +548,7 @@ function TokenInfoCard({ userToken, oboTokens, groupMappings, authorizerName }: 
         {oboTokens.map((t, i) => (
           <details key={i} open>
             <summary className="cursor-pointer text-xs font-medium flex items-center gap-1.5">
-              <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-500/50 text-amber-700 dark:text-amber-400">obo</Badge>
+              <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-500/50 text-amber-700 dark:text-amber-400">{t.token_type === "m2m" ? "m2m" : "obo"}</Badge>
               <span className="text-muted-foreground">{t.credential_provider ?? t.flow ?? "exchange"}</span>
             </summary>
             <div className="mt-1.5 pl-2 border-l-2 border-amber-500/30">

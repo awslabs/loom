@@ -22,7 +22,21 @@ import { useAuth } from "@/contexts/AuthContext";
 import { listMemories } from "@/api/memories";
 import { listRegistryRecords } from "@/api/registry";
 import { ResourceTagFields } from "@/components/ResourceTagFields";
-import type { AgentDeployRequest, AgentHarnessDeployRequest, ModelOption, Provider, ManagedRole, AuthorizerConfigResponse, TagProfile, McpServer, A2aAgent, MemoryResponse, RegistryRecord, VpcConfig, VpcConfigDetail } from "@/api/types";
+import { GuardrailAlternatesPicker, GuardrailConfigSummary, GuardrailPicker, SegmentedToggle } from "@/components/GuardrailControls";
+import { useGuardrailCatalog } from "@/hooks/useGuardrails";
+import {
+  buildGuardrailRequest,
+  emptyGuardrailConfig,
+  guardrailAvailability,
+  guardrailFromManifest,
+  guardrailRefLabel,
+  guardrailToManifest,
+  inheritWarning,
+  isModeSupported,
+  preferredMode,
+  validateGuardrailChoice,
+} from "@/lib/guardrails";
+import type { GuardrailConfig, GuardrailMode, GuardrailSelection, GuardrailStreamProcessingMode, AgentDeployRequest, AgentHarnessDeployRequest, ModelOption, Provider, ManagedRole, AuthorizerConfigResponse, TagProfile, McpServer, A2aAgent, MemoryResponse, RegistryRecord, VpcConfig, VpcConfigDetail } from "@/api/types";
 import { groupModels } from "@/lib/models";
 import { toast } from "sonner";
 
@@ -256,6 +270,16 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   const [enableHumanConfirmation, setEnableHumanConfirmation] = useState(false);
   const [confirmationPolicy, setConfirmationPolicy] = useState("Ask the user to confirm before performing any destructive, irreversible, or high-impact action. Always call this tool before deleting data, modifying production resources, or executing financial transactions.");
 
+  // Bedrock Guardrails (issue #17). Selection "default" = inherit the global default.
+  const [guardrailSelection, setGuardrailSelection] = useState<GuardrailSelection>("default");
+  const [guardrailConfig, setGuardrailConfig] = useState<GuardrailConfig>(() => emptyGuardrailConfig());
+  const {
+    guardrails,
+    listError: guardrailListError,
+    listLoading: guardrailListLoading,
+    guardrailDefault,
+  } = useGuardrailCatalog({ enabled: mode === "deploy" });
+
   // Discovery data
   const [models, setModels] = useState<ModelOption[]>([]);
   const [litellmModels, setLitellmModels] = useState<ModelOption[]>([]);
@@ -410,6 +434,20 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [exportAgentId, models.length, dataLoaded]);
 
+  // Editing: prefill the guardrail section from the agent's own record
+  // (guardrail_selection + the config baked at its last deploy). null
+  // selection = agent predates the feature → inherit default.
+  useEffect(() => {
+    if (!exportAgentId) return;
+    let cancelled = false;
+    void agentsApi.getAgent(exportAgentId).then((agent) => {
+      if (cancelled) return;
+      setGuardrailSelection(agent.guardrail_selection ?? "default");
+      setGuardrailConfig(agent.guardrail ? { ...agent.guardrail, allowed: agent.guardrail.allowed ?? [] } : emptyGuardrailConfig());
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [exportAgentId]);
+
   // Deferred VPC config resolution: if vpcConfigs wasn't loaded when the export ran,
   // resolve the pending name once vpcConfigs becomes available.
   useEffect(() => {
@@ -462,6 +500,14 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       setDeploymentType("custom");
     }
   }, [selectedProviderInfo, deploymentType]);
+
+  // Switching runtime/provider can make the chosen mode unsupported (e.g.
+  // managed → no monitor, non-Bedrock → no enforce): move to a supported one.
+  useEffect(() => {
+    const avail = guardrailAvailability(deploymentType, selectedProvider);
+    if (!avail.available) return;
+    setGuardrailConfig((c) => (isModeSupported(avail, c.mode) ? c : { ...c, mode: preferredMode(avail) }));
+  }, [deploymentType, selectedProvider]);
 
   const handleProviderChange = (providerId: string) => {
     setSelectedProvider(providerId);
@@ -530,12 +576,31 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   // without it — block the deploy rather than surface a 400.
   const missingGroupTag = !tagValues["loom:group"];
 
+  // Guardrail support matrix + validation (mirrors the backend's 422 rules).
+  const guardrailAvail = guardrailAvailability(deploymentType, selectedProvider);
+  const guardrailDefaultLocked = !!guardrailDefault?.enabled && !!guardrailDefault.locked;
+  const guardrailError = validateGuardrailChoice(guardrailSelection, guardrailConfig, guardrailAvail, guardrailDefault);
+  const guardrailInheritWarning = guardrailSelection === "default" ? inheritWarning(guardrailAvail, guardrailDefault) : null;
+  const handleGuardrailSelectionChange = (next: GuardrailSelection) => {
+    if (next === "custom" && !guardrailConfig.guardrail_id) {
+      // Start a custom guardrail from the current default, if there is one.
+      const base = guardrailDefault?.config ? { ...guardrailDefault.config, allowed: [] } : emptyGuardrailConfig();
+      setGuardrailConfig({ ...base, mode: isModeSupported(guardrailAvail, base.mode) ? base.mode : preferredMode(guardrailAvail) });
+    }
+    setGuardrailSelection(next);
+  };
+
   // Shared by the "View / Paste JSON" disclosure and manifest import (R5/R6):
   // parses a manifest and applies it to form state. Returns an error string on
   // failure (invalid JSON), or null on success.
   const applyManifestJson = (json: string): string | null => {
     try {
       const parsed = JSON.parse(json);
+      // Absent `guardrail` = inherit the default (manifests from before #17).
+      const parsedGuardrail = guardrailFromManifest(parsed.guardrail);
+      if (!parsedGuardrail.ok) return parsedGuardrail.error;
+      setGuardrailSelection(parsedGuardrail.selection);
+      if (parsedGuardrail.config) setGuardrailConfig(parsedGuardrail.config);
       if (parsed.deployment_type === "custom" || parsed.deployment_type === "managed") {
         setDeploymentType(parsed.deployment_type);
       }
@@ -672,7 +737,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   // (jumping directly to a step) stays unrestricted — steps show state, not gates.
   const stepValid = (i: number): boolean => {
     switch (i) {
-      case 1: return !!name.trim() && !nameError && !!modelId && !systemPromptTooLarge;
+      case 1: return !!name.trim() && !nameError && !!modelId && !systemPromptTooLarge && !guardrailError;
       case 2: return !!selectedRoleId;
       case 4: return !idleTimeoutError && !maxLifetimeError;
       default: return true;
@@ -703,6 +768,10 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       // connection now, not per-agent — drop them from the
       // manifest and just record which provider was used.
       const { base_url: _base_url, api_key: _api_key, ...rest } = data;
+      if (!("guardrail" in rest)) {
+        const g = guardrailToManifest(guardrailSelection, guardrailConfig);
+        if (g) rest.guardrail = g;
+      }
       return JSON.stringify(rest, null, 2);
     }
     const result: Record<string, unknown> = {};
@@ -784,6 +853,8 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       }
       result.code_interpreter = ciObj;
     }
+    const manifestGuardrail = guardrailToManifest(guardrailSelection, guardrailConfig);
+    if (manifestGuardrail) result.guardrail = manifestGuardrail;
     return JSON.stringify(result, null, 2);
   };
 
@@ -812,6 +883,8 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
     setCodeInterpreterRegion("us-east-1");
     setCodeInterpreterNetworkMode("SANDBOX");
     setCodeInterpreterRoleId("");
+    setGuardrailSelection("default");
+    setGuardrailConfig(emptyGuardrailConfig());
     setStep(0);
     setImportApplied(false);
   };
@@ -823,7 +896,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       await onRegister(arn.trim(), modelId || undefined);
       setArn("");
     } else if (deploymentType === "managed") {
-      if (!name.trim() || !modelId || !selectedRoleId || !onDeployHarness || hasValidationErrors || missingGroupTag) return;
+      if (!name.trim() || !modelId || !selectedRoleId || !onDeployHarness || hasValidationErrors || missingGroupTag || guardrailError) return;
 
       const roleArn = selectedRole?.role_arn ?? "";
       const authConfig = selectedAuthConfig;
@@ -885,9 +958,11 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
           },
         }] : undefined,
       };
+      const harnessGuardrail = buildGuardrailRequest(guardrailSelection, guardrailConfig, guardrailAvail, guardrailDefault);
+      if (harnessGuardrail) request.guardrail = harnessGuardrail;
       await onDeployHarness(request);
     } else {
-      if (!name.trim() || !modelId || !selectedRoleId || !onDeploy || hasValidationErrors || systemPromptTooLarge || missingGroupTag) return;
+      if (!name.trim() || !modelId || !selectedRoleId || !onDeploy || hasValidationErrors || systemPromptTooLarge || missingGroupTag || guardrailError) return;
 
       // Resolve managed role to role_arn
       const roleArn = selectedRole?.role_arn ?? null;
@@ -938,6 +1013,8 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
           Object.entries(tagValues).filter(([, v]) => v.trim() !== "")
         ),
       };
+      const deployGuardrail = buildGuardrailRequest(guardrailSelection, guardrailConfig, guardrailAvail, guardrailDefault);
+      if (deployGuardrail) request.guardrail = deployGuardrail;
       await onDeploy(request);
       setSelectedAllowedModelIds([]);
       resetFormFields();
@@ -1404,6 +1481,150 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                 </div>
                 </>
               )}
+
+              {/* Guardrail (issue #17) */}
+              <div className="h-px bg-border" />
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <h4 className="text-sm font-semibold">Guardrail</h4>
+                  <span className="text-[11px] text-muted-foreground">Amazon Bedrock Guardrails</span>
+                  {guardrailAvail.available && (
+                    <div className="ml-auto">
+                      <SegmentedToggle<GuardrailSelection>
+                        options={[
+                          { value: "default", label: "Inherit default" },
+                          { value: "custom", label: "Custom" },
+                          {
+                            value: "none",
+                            label: "None",
+                            disabled: guardrailDefaultLocked,
+                            title: guardrailDefaultLocked ? "The global default guardrail is locked, so agents can't opt out." : undefined,
+                          },
+                        ]}
+                        value={guardrailSelection}
+                        onChange={handleGuardrailSelectionChange}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {!guardrailAvail.available ? (
+                  <p className="rounded-md border bg-muted/40 px-3 py-2 text-[11.5px] leading-[1.5] text-muted-foreground">{guardrailAvail.reason}</p>
+                ) : (
+                  <>
+                    {guardrailSelection === "default" && (
+                      <div className="space-y-1.5 rounded-md border bg-muted/30 px-3 py-2.5">
+                        {guardrailDefault?.enabled && guardrailDefault.config ? (
+                          <GuardrailConfigSummary config={guardrailDefault.config} guardrails={guardrails} />
+                        ) : (
+                          <p className="text-[12px] text-muted-foreground">No default guardrail is set, so this agent deploys without one. If an administrator sets a default later, redeploy to apply it.</p>
+                        )}
+                        <div className="flex flex-wrap gap-3 font-mono text-[10.5px] text-muted-foreground">
+                          {guardrailDefaultLocked && <span>locked by an administrator</span>}
+                          {guardrailDefault?.source === "environment" && <span>from backend environment</span>}
+                        </div>
+                        {guardrailInheritWarning && <p className="text-[11.5px] text-warning">{guardrailInheritWarning}</p>}
+                      </div>
+                    )}
+
+                    {guardrailSelection === "none" && (
+                      <p className="text-[12px] text-muted-foreground">This agent deploys without a guardrail, even if a default is set.</p>
+                    )}
+
+                    {guardrailSelection === "custom" && (
+                      <div className="space-y-3 rounded-md border p-3">
+                        <div className="space-y-1">
+                          <label className="text-xs text-muted-foreground">Guardrail and version</label>
+                          <GuardrailPicker
+                            guardrails={guardrails}
+                            value={guardrailConfig}
+                            loading={guardrailListLoading}
+                            error={guardrailListError}
+                            onChange={(ref) => setGuardrailConfig((c) => ({
+                              ...c,
+                              guardrail_id: ref.guardrail_id,
+                              guardrail_arn: ref.guardrail_arn ?? "",
+                              guardrail_version: ref.guardrail_version,
+                              allowed: c.allowed.filter((a) => !(a.guardrail_id === ref.guardrail_id && a.guardrail_version === ref.guardrail_version)),
+                            }))}
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1">
+                            <label className="block text-xs text-muted-foreground">Mode</label>
+                            <SegmentedToggle<GuardrailMode>
+                              options={[
+                                { value: "enforce", label: "Enforce", disabled: !guardrailAvail.enforce, title: guardrailAvail.enforce ? undefined : "Not supported for this agent" },
+                                { value: "monitor", label: "Monitor", disabled: !guardrailAvail.monitor, title: guardrailAvail.monitor ? undefined : "Not supported for this agent" },
+                              ]}
+                              value={guardrailConfig.mode}
+                              onChange={(m) => setGuardrailConfig((c) => ({ ...c, mode: m }))}
+                            />
+                            <p className="text-[11px] text-muted-foreground">
+                              {guardrailConfig.mode === "enforce"
+                                ? "Attached to every model call."
+                                : "ApplyGuardrail on input and output; logs only, never changes content."}
+                            </p>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="block text-xs text-muted-foreground">Stream processing</label>
+                            <SegmentedToggle<GuardrailStreamProcessingMode>
+                              options={[{ value: "sync", label: "Sync" }, { value: "async", label: "Async" }]}
+                              value={guardrailConfig.stream_processing_mode}
+                              disabled={guardrailConfig.mode === "monitor"}
+                              onChange={(v) => setGuardrailConfig((c) => ({ ...c, stream_processing_mode: v }))}
+                            />
+                            {guardrailConfig.mode === "monitor" ? (
+                              <p className="text-[11px] text-muted-foreground">Enforce only.</p>
+                            ) : guardrailConfig.stream_processing_mode === "async" ? (
+                              <p className="text-[11px] text-warning">Bedrock can&apos;t mask sensitive information in async mode.</p>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          <label className={`flex w-fit items-center gap-2 text-xs ${guardrailConfig.mode === "monitor" ? "text-muted-foreground" : ""}`}>
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 accent-primary"
+                              checked={guardrailConfig.redact_history}
+                              disabled={guardrailConfig.mode === "monitor"}
+                              onChange={(e) => setGuardrailConfig((c) => ({ ...c, redact_history: e.target.checked }))}
+                            />
+                            Redact history after an intervention
+                          </label>
+                          <p className="text-[11px] text-muted-foreground">
+                            {guardrailConfig.mode === "monitor"
+                              ? "Enforce only."
+                              : deploymentType === "custom" && agentFramework === "strands"
+                                ? "Replaces the offending turn in the conversation history so the session can continue."
+                                : "Only applies to Strands custom agents."}
+                          </p>
+                        </div>
+                        {guardrailAvail.alternates ? (
+                          guardrailConfig.guardrail_id && (
+                            <div className="space-y-1">
+                              <label className="text-xs text-muted-foreground">Alternate guardrails (runtime selection)</label>
+                              <GuardrailAlternatesPicker
+                                guardrails={guardrails}
+                                primary={guardrailConfig}
+                                value={guardrailConfig.allowed}
+                                onChange={(allowed) => setGuardrailConfig((c) => ({ ...c, allowed }))}
+                              />
+                              <p className="text-[11px] text-muted-foreground">Callers can pick one of these per invocation. Mode and stream settings always come from the primary guardrail.</p>
+                            </div>
+                          )
+                        ) : (
+                          <p className="text-[11px] text-muted-foreground">Runtime guardrail selection is only available for custom agents.</p>
+                        )}
+                      </div>
+                    )}
+
+                    {guardrailAvail.reason && <p className="text-[11px] text-muted-foreground">{guardrailAvail.reason}</p>}
+                    <p className="text-[11px] text-muted-foreground">Block, mask, and detect behavior is configured on the guardrail itself in Amazon Bedrock.</p>
+                  </>
+                )}
+                {guardrailError && <p className="text-xs text-destructive">{guardrailError}</p>}
+              </div>
               </div>
 
               <div className="flex items-center gap-2 border-t px-4 py-2.5">
@@ -1905,6 +2126,28 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                       </div>
 
                       <div className="grid grid-cols-[130px_minmax(0,1fr)_40px] items-baseline gap-3 px-4 py-3">
+                        <div className="text-sm font-semibold">Guardrail</div>
+                        <div className="min-w-0 space-y-1">
+                          <div className="truncate font-mono text-[11.5px]">
+                            {!guardrailAvail.available
+                              ? "unavailable for this agent"
+                              : guardrailSelection === "none"
+                                ? "none"
+                                : guardrailSelection === "default"
+                                  ? (guardrailDefault?.enabled && guardrailDefault.config
+                                    ? `inherit default · ${guardrailRefLabel(guardrailDefault.config, guardrails)} · ${guardrailDefault.config.mode}`
+                                    : "inherit default · none set")
+                                  : guardrailConfig.guardrail_id
+                                    ? `custom · ${guardrailRefLabel(guardrailConfig, guardrails)} · ${guardrailConfig.mode}${guardrailAvail.alternates && guardrailConfig.allowed.length > 0 ? ` · +${guardrailConfig.allowed.length} alternate${guardrailConfig.allowed.length === 1 ? "" : "s"}` : ""}`
+                                    : "custom · no guardrail selected"}
+                          </div>
+                          {guardrailError && <p className="text-[11.5px] text-destructive">{guardrailError}</p>}
+                          {!guardrailError && guardrailInheritWarning && <p className="text-[11.5px] text-warning">{guardrailInheritWarning}</p>}
+                        </div>
+                        <button type="button" onClick={() => setStep(1)} className="text-right text-xs text-primary hover:underline">Edit</button>
+                      </div>
+
+                      <div className="grid grid-cols-[130px_minmax(0,1fr)_40px] items-baseline gap-3 px-4 py-3">
                         <div className="text-sm font-semibold">Access</div>
                         <div className="truncate font-mono text-[11.5px]">
                           {networkMode.toLowerCase()}
@@ -1956,7 +2199,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                           type="submit"
                           size="sm"
                           className="flex-1"
-                          disabled={isLoading || !name.trim() || !modelId || !selectedRoleId || (deploymentType === "custom" ? !onDeploy : !onDeployHarness) || hasValidationErrors || systemPromptTooLarge || missingGroupTag}
+                          disabled={isLoading || !name.trim() || !modelId || !selectedRoleId || (deploymentType === "custom" ? !onDeploy : !onDeployHarness) || hasValidationErrors || systemPromptTooLarge || missingGroupTag || !!guardrailError}
                         >
                           {isLoading ? "Deploying..." : (exportAgentId ? "Update agent" : (deploymentType === "managed" ? "Deploy harness" : "Deploy agent"))}
                         </Button>

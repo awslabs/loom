@@ -26,7 +26,9 @@ import { fetchModels, fetchLitellmModels } from "@/api/agents";
 import { listConnectors, setUserApiKey, deleteUserApiKey } from "@/api/mcp";
 import { sendElicitationResponse, type StreamSegment } from "@/hooks/useInvoke";
 import { groupModels } from "@/lib/models";
-import type { SessionResponse, AuthorizerCredential, ModelOption, ConnectorInfo, SSESessionStart, SSESessionEnd } from "@/api/types";
+import { GuardrailNotice } from "@/components/GuardrailControls";
+import { guardrailRefKey, guardrailRefLabel, guardrailSummariesFromDetails, invokableGuardrails } from "@/lib/guardrails";
+import type { SessionResponse, AuthorizerCredential, ModelOption, ConnectorInfo, SSESessionStart, SSESessionEnd, GuardrailConfig, GuardrailDetails, GuardrailRef } from "@/api/types";
 
 const NEW_SESSION = "__new__";
 const USER_TOKEN = "__user__";
@@ -58,7 +60,11 @@ interface InvokePanelProps {
   sessionEnd: SSESessionEnd | null;
   error: string | null;
   rawError: string | null;
-  onInvoke: (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean) => void;
+  /** The agent's baked guardrail; a selector is shown when it has `allowed` alternates. */
+  guardrail?: GuardrailConfig | null;
+  /** Stored GetGuardrail snapshot — labels guardrails without a ListGuardrails call. */
+  guardrailDetails?: GuardrailDetails | null;
+  onInvoke: (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean, guardrail?: GuardrailRef) => void;
   onCancel: () => void;
   onOpenSessionDetail?: (sessionId: string) => void;
 }
@@ -144,6 +150,9 @@ function LiveTurnBody({ agentId, segments, isStreaming }: { agentId: number; seg
     } else if (seg.type === "elicitation_request") {
       flushTools();
       blocks.push(<ElicitationRequestBubble key={`elicit-${i}`} data={seg.data} onRespond={(id, action, content) => sendElicitationResponse(agentId, id, action, content)} />);
+    } else if (seg.type === "guardrail") {
+      flushTools();
+      blocks.push(<GuardrailNotice key={`guardrail-${i}`} event={seg.data} />);
     } else {
       flushTools();
       blocks.push(<MarkdownBlock key={i} text={seg.content} />);
@@ -240,7 +249,7 @@ function EmptyState({ agentName, onSeed }: { agentName: string; onSeed: (text: s
 export function InvokePanel({
   agentId, agentName, qualifiers, sessions, isStreaming, modelId, allowedModelIds = [], memoryNames = [], mcpNames = [],
   authorizerName, authorizerId, authorizerPoolId, authorizerDiscoveryUrl, isExternalIdp, loginIssuerUrl, currentUserId,
-  streamedText, segments, sessionStart, sessionEnd, error, rawError, onInvoke, onCancel, onOpenSessionDetail,
+  streamedText, segments, sessionStart, sessionEnd, error, rawError, guardrail, guardrailDetails, onInvoke, onCancel, onOpenSessionDetail,
 }: InvokePanelProps) {
   const { timezone } = useTimezone();
   const promptKey = `loom:invokePrompt:${agentId}`;
@@ -266,6 +275,13 @@ export function InvokePanel({
   const [resolvedAuthorizerId, setResolvedAuthorizerId] = useState<number | undefined>(authorizerId);
   const [selectedModel, setSelectedModel] = useState(modelId ?? "");
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+
+  // Runtime guardrail selection (primary + `allowed` alternates). Empty key = the agent's primary.
+  const guardrailOptions = invokableGuardrails(guardrail);
+  const primaryGuardrailKey = guardrailOptions[0] ? guardrailRefKey(guardrailOptions[0]) : "";
+  const [selectedGuardrailKey, setSelectedGuardrailKey] = useState(primaryGuardrailKey);
+  useEffect(() => { setSelectedGuardrailKey(primaryGuardrailKey); }, [primaryGuardrailKey, agentId]);
+  const guardrailCatalog = guardrailSummariesFromDetails(guardrailDetails);
 
   // Connector state
   const connectorStorageKey = `loom:enabledConnectors:${agentId}:${currentUserId ?? "anonymous"}`;
@@ -552,8 +568,14 @@ export function InvokePanel({
     });
     const activeConnectorIds = invokeOnlyIds.length > 0 ? invokeOnlyIds : undefined;
     const useLinkedToken = selectedCredential === LINKED_TOKEN ? true : undefined;
+    const runtimeGuardrail = selectedGuardrailKey && selectedGuardrailKey !== primaryGuardrailKey
+      ? guardrailOptions.find((g) => guardrailRefKey(g) === selectedGuardrailKey)
+      : undefined;
     setLastPrompt(trimmed);
-    onInvoke(trimmed, qualifier, sessionId, credentialId, token, runtimeModelId, activeConnectorIds, useLinkedToken);
+    // Clear the box once sent (like ChatPage) — the prompt stays visible in
+    // the user bubble, and clearing also drops the persisted draft.
+    setPrompt("");
+    onInvoke(trimmed, qualifier, sessionId, credentialId, token, runtimeModelId, activeConnectorIds, useLinkedToken, runtimeGuardrail);
   };
 
   const handleQualifierChange = (value: string) => {
@@ -875,6 +897,25 @@ export function InvokePanel({
                     ))}
                   </SelectContent>
                 </Select>
+              </div>
+            )}
+
+            {guardrailOptions.length > 1 && (
+              <div className="flex flex-col gap-1.5">
+                <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Guardrail</span>
+                <Select value={selectedGuardrailKey} onValueChange={setSelectedGuardrailKey}>
+                  <SelectTrigger size="sm" className="w-full text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {guardrailOptions.map((g, i) => (
+                      <SelectItem key={guardrailRefKey(g)} value={guardrailRefKey(g)}>
+                        {guardrailRefLabel(g, guardrailCatalog)}{i === 0 ? " (default)" : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {guardrail && <span className="text-[10.5px] text-muted-foreground">Mode: {guardrail.mode}</span>}
               </div>
             )}
 

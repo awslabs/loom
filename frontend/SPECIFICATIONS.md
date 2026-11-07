@@ -46,6 +46,7 @@ frontend/
 │   │   ├── useInvoke.ts        # Streaming invocation state + AbortController + StreamSegment tracking + tool_use events
 │   │   ├── useLogs.ts          # On-demand session and stream log fetching with optional cache-busting (`noCache` parameter appends `_t` timestamp)
 │   │   ├── useDeployment.ts    # Agent config, credential providers, integrations hooks
+│   │   ├── useGuardrails.ts   # useGuardrailCatalog(): account guardrail list + global default guardrail (issue #17)
 │   │   ├── useMcpServers.ts   # MCP server list state + CRUD actions
 │   │   ├── useA2aAgents.ts  # A2A agent list with auto-fetch, CRUD callbacks
 │   │   └── useTraces.ts    # Trace list + detail state management
@@ -69,6 +70,9 @@ frontend/
 │   │   ├── MemoryManagementPanel.tsx    # Memory resource create form + list table
 │   │   ├── ResourceTagFields.tsx       # Shared tag profile selector + tag resolution
 │   │   ├── DeploymentPanel.tsx # Deployment details panel
+│   │   ├── GuardrailControls.tsx # Guardrail + version picker, segmented toggle, alternates checklist, config summary, stream-event notice (issue #17)
+│   │   ├── GuardrailDefaultSettings.tsx # Settings > Models "Guardrails" card (global default)
+│   │   ├── GuardrailPanel.tsx  # Agent detail: effective guardrail card + "Guardrail interventions" table
 │   │   ├── ExternalIntegrationSection.tsx # External integration info (endpoints, auth, code snippets)
 │   │   ├── AttachedSkillsSection.tsx # Attach/detach APPROVED registry SKILL records to an agent (issue #61)
 │   │   ├── SkillDocument.tsx   # Renders SKILL.md body: IMPORTANT callouts, dash bullets, a 3-col numbered step table — hand-styled to match the Claude Design mockup's type scale, not Tailwind's prose defaults
@@ -104,6 +108,7 @@ frontend/
 │   │   ├── utils.ts            # shadcn cn() utility
 │   │   ├── format.ts           # Timezone-aware timestamp + metric formatters
 │   │   ├── models.ts           # groupModels() utility — groups ModelOption[] by vendor, sorted alphabetically
+│   │   ├── guardrails.ts       # Pure guardrail helpers: support matrix, validation, request/manifest (de)serialization, event labels
 │   │   ├── status.ts           # Status badge variant mapping
 │   │   └── errors.ts           # Friendly invoke error message mapping
 │   ├── App.tsx                 # Auth gate + persona-based navigation + sidebar
@@ -1134,7 +1139,59 @@ An agent's `model_id`/`allowed_model_ids` can outlive the catalog (a `models.jso
 
 ---
 
-## 19. Future Work
+## 19. Bedrock Guardrails UI (issue #17)
+
+Design, support matrix and REST contract live in `tmp/issues/017-add-integration-with-bedrock-guardrails.md` (CONTRACT 5). Loom only picks which guardrail/version an agent uses and how it's applied; block/mask/detect behavior is defined on the guardrail in Bedrock, and the UI says so wherever a guardrail is chosen.
+
+### 19.1 Types and API client
+- `api/types.ts`: `GuardrailRef`, `GuardrailConfig`, `GuardrailSelection`, `GuardrailRequest` (`{selection, config}`), `GuardrailSummary` (list entry), `GuardrailDefault` (+ update request), `SSEGuardrail`, `GuardrailIntervention(sResponse)`. `AgentResponse` gains `guardrail_selection`, `guardrail`, `guardrail_drift`, `guardrail_supported`. `AgentDeployRequest`/`AgentHarnessDeployRequest` gain optional `guardrail`; `InvokeRequest` gains optional `guardrail_id`/`guardrail_version`.
+- `api/settings.ts`: `listGuardrails()`, `getGuardrailDefault()`, `updateGuardrailDefault()`. `api/agents.ts`: `listGuardrailInterventions(id, {session_id, hours, limit})`.
+- Streaming: `invokeAgentStream()` dispatches `event: guardrail` to `onGuardrail`; the WebSocket path sends `guardrail_id`/`guardrail_version` in the prompt message and handles `{"type": "guardrail", "content": {...}}`. `useInvoke` appends both as a `{type: "guardrail"}` `StreamSegment`, and `invoke()` takes an optional trailing `GuardrailRef`.
+
+### 19.2 Pure helpers (`lib/guardrails.ts`)
+- `guardrailAvailability(deploymentType, provider)` encodes the support matrix for the wizard: custom + Bedrock → enforce and monitor; custom + other provider → monitor only; managed + Bedrock → enforce only; managed + other provider → unavailable. Runtime alternates are offered wherever guardrails are available: custom agents re-validate the selection in their runtime, and managed agents receive it as an `InvokeHarness` model override that carries the alternate's `guardrailConfig`. `guardrailAvailabilityForAgent()` derives the same from `AgentResponse.guardrail_supported`.
+- `validateGuardrailChoice()` mirrors the backend's 422 rules (None on a locked default, unsupported mode, custom monitor while the locked default enforces, missing guardrail/version). `inheritWarning()` flags an inherited default whose mode this agent can't use.
+- `buildGuardrailRequest()` builds the create/redeploy field (alternates deduped, primary removed). When guardrails are unavailable for the agent it sends `selection: "none"`, or omits the field if the default is locked (validation blocks that deploy).
+- Manifest: `guardrailToManifest()` omits the key for "default", writes `{"selection": "none"}` or `{"selection": "custom", "config": {...}}`. `guardrailFromManifest()` treats absent/null as "default" (older manifests), and also accepts a bare `GuardrailConfig` (→ custom) or a selection string.
+- `guardrailEventLabel()` → e.g. "Guardrail intervened · input · contentPolicy HATE", "Guardrail detected (monitor)".
+
+### 19.3 Settings > Models > Guardrails card (`GuardrailDefaultSettings`)
+Enabled toggle, guardrail picker (name + id from `GET /api/settings/guardrails`, then a version select defaulting to the newest numeric version), mode (enforce/monitor), stream processing (sync/async, with an inline note that Bedrock can't mask in async mode; disabled in monitor), redact history (disabled in monitor), and locked (agents can't opt out). The card header shows the source: `from settings`, `from environment` (with a note that saving overrides the `LOOM_GUARDRAIL_*` env fallback), or `not set`. A 502 from the list endpoint is shown under the picker. Editing requires `admin:write` (`canEditGuardrails` prop from `App.tsx`); everyone else sees the card read-only. Save/Discard bar like the enabled-models card; enabling without a guardrail/version is blocked.
+
+### 19.4 Agent wizard (`AgentRegistrationForm`)
+A "Guardrail" section at the end of the Prompt & models step: Inherit default / Custom / None.
+- Inherit shows the current default read-only (`GuardrailConfigSummary`), whether it is locked or env-sourced, and a warning if its mode doesn't fit the agent.
+- None is disabled when the default is enabled and locked.
+- Custom shows the picker, mode (unsupported modes disabled; switching runtime/provider moves an unsupported mode to a supported one), stream processing, redact history (noted as Strands-only), and "Alternate guardrails (runtime selection)" as a checklist of every other guardrail/version. Picking Custom first time starts from the default's config.
+- Managed + non-Bedrock: the selector is replaced by an explanation that guardrails are unavailable.
+- Validation errors gate the step's Next button and the Deploy button. The review step has a Guardrail row with an Edit link. `buildManifestJson()`/`applyManifestJson()` include the field (edit-mode export adds it only if the backend export doesn't already). Editing an agent prefills from `GET /api/agents/{id}` (`guardrail_selection`, `guardrail`).
+
+### 19.5 Agent detail
+- `GuardrailCard` (Details tab, deployed agents): selection pill (inherit default / custom / none / not configured), effective guardrail name/id, version, mode, stream/redact chips, alternates, and the supported modes.
+  - Below that, `GuardrailDetailsView` renders the guardrail's policy configuration from `AgentResponse.guardrail_details`, the `GetGuardrail` snapshot taken at deploy/update time:
+    - content filters with strength and action
+    - denied topics with definitions
+    - PII entities and regex names
+    - word lists and custom-word count
+    - contextual grounding
+    - automated-reasoning count
+    - blocked messages, and status, region, cross-region profile and KMS
+  - Actions read as block, mask, detect or off, per direction when they differ.
+  - Alternates' policies sit behind "Show policies". Error entries (not found, access denied) show as a warning.
+  - The footer shows when the details were read ("captured at deploy, not live"). With `agent:write`, a **Refresh details** button calls `POST /api/agents/{id}/guardrails/refresh`.
+  - The card makes no Bedrock calls on load: names come from `guardrailSummariesFromDetails()`, which `InvokePanel` and `ChatPage` also use for their guardrail selectors instead of `useGuardrailCatalog()`. `guardrail_drift` shows a "Redeploy to apply" badge here and in the `DeploymentPanel` header.
+- `GuardrailInterventionsCard` (when the agent has a guardrail): table of time, session (opens session detail), source, action, mode and policy chips from `GET /api/agents/{id}/guardrails/interventions`, with a last hour / 24 hours / 7 days picker and refresh. When `supported` is false (harness agents) it shows the backend's `note`.
+
+### 19.6 Invoke panel and chat
+- `InvokePanel` and `ChatPage` show a guardrail selector (rail Select / footer popover next to the model picker) when the agent's `guardrail.allowed` is non-empty. Picking the primary sends nothing; picking an alternate sends `guardrail_id`/`guardrail_version` on both SSE and WebSocket paths.
+- `guardrail` stream segments render inline as `GuardrailNotice` (red for intervened, amber for detected/monitor, with policy chips). `ChatPage` keeps them with the HITL segments so the notice stays on the persisted message after the session reloads. Historical invocations loaded from the API don't carry guardrail events.
+
+### 19.7 i18n
+The Settings card's strings are under `settings.guardrails.*` in `i18n/locales/en.json` and `ja.json`. Other surfaces (wizard, detail, invoke, chat) don't use i18n today, so their new strings are inline English like their neighbors.
+
+---
+
+## 20. Future Work
 
 - **VPC network mode** support
 - **Operate Tab** — aggregate dashboard with summary cards, per-agent latency charts

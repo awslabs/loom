@@ -59,16 +59,61 @@ class TestCreateA2AClients(unittest.TestCase):
                 auth=AuthConfig(
                     type="oauth2",
                     well_known_endpoint="https://auth.example.com/.well-known/openid-configuration",
-                    credentials_secret_arn="arn:aws:secretsmanager:us-east-1:000000000000:secret:test-secret",  # nosec B106
+                    credential_provider_name="loom-1-authed-a2a-authed",
+                    scopes="read write",
                 ),
             )
         ]
         with patch("src.integrations.a2a_client.logger") as mock_logger:
             clients = create_a2a_clients(agents)
-            # Verify auth info was logged
-            info_calls = [str(c) for c in mock_logger.info.call_args_list]
-            auth_logged = any("oauth2" in c for c in info_calls)
-            self.assertTrue(auth_logged)
+            info_calls = [str(c).lower() for c in mock_logger.info.call_args_list]
+            self.assertTrue(any("oauth2" in c and "loom-1-authed-a2a-authed" in c for c in info_calls))
+            mock_logger.warning.assert_not_called()
+        self.assertEqual(len(clients), 1)
+
+    @patch("src.integrations.a2a_client._AuthenticatedA2AAgent")
+    @patch("src.integrations.a2a_client._OAuth2Auth")
+    def test_obo_auth_matches_mcp_construction(self, mock_auth_cls: MagicMock, _agent_cls: MagicMock) -> None:
+        """OBO A2A auth is built like MCP auth: grant type and audience, no raw user token."""
+        agents = [
+            A2AAgentConfig(
+                name="obo",
+                enabled=True,
+                endpoint_url="https://a2a.example.com/obo",
+                auth=AuthConfig(
+                    type="oauth2",
+                    credential_provider_name="loom-1-obo-a2a-obo",
+                    scopes="read",
+                    delegation_mode="obo",
+                    obo_grant_type="TOKEN_EXCHANGE",
+                    audience="api://downstream",
+                ),
+            )
+        ]
+        create_a2a_clients(agents)
+        mock_auth_cls.assert_called_once_with(
+            credential_provider_name="loom-1-obo-a2a-obo",
+            scopes=["read"],
+            delegation_mode="obo",
+            obo_grant_type="TOKEN_EXCHANGE",
+            audience="api://downstream",
+        )
+
+    @patch("src.integrations.a2a_client.A2AAgent")
+    def test_oauth2_without_credential_provider_warns(self, mock_a2a_cls: MagicMock) -> None:
+        """OAuth2 with no credential provider can't authenticate — say so instead of failing with a bare 401."""
+        agents = [
+            A2AAgentConfig(
+                name="misconfigured",
+                enabled=True,
+                endpoint_url="https://a2a.example.com/misconfigured",
+                auth=AuthConfig(type="oauth2", well_known_endpoint="https://auth.example.com/.well-known/openid-configuration"),
+            )
+        ]
+        with patch("src.integrations.a2a_client.logger") as mock_logger:
+            clients = create_a2a_clients(agents)
+            warnings = [str(c) for c in mock_logger.warning.call_args_list]
+            self.assertTrue(any("misconfigured" in w and "credential provider" in w for w in warnings))
         self.assertEqual(len(clients), 1)
 
 

@@ -46,6 +46,35 @@ class TestBuildAgentArtifact(unittest.TestCase):
                 build_agent_artifact("us-east-1")
 
 
+class TestPipErrorSurfacing(unittest.TestCase):
+    """The artifact build reports pip's own error instead of a bare exit status."""
+
+    def test_pip_error_summary_keeps_error_lines(self) -> None:
+        from app.services.deployment import _pip_error_summary
+        stderr = (
+            "Collecting litellm==1.100.4\n"
+            "ERROR: Could not find a version that satisfies the requirement litellm==1.100.4 (from versions: "
+            + ", ".join(f"1.{i}.0" for i in range(200)) + ")\n"
+            "ERROR: No matching distribution found for litellm==1.100.4\n"
+        )
+        summary = _pip_error_summary(stderr)
+        self.assertIn("No matching distribution found for litellm==1.100.4", summary)
+        self.assertNotIn("Collecting", summary)
+        self.assertLess(len(summary), 800)  # the long "from versions" list is truncated
+        self.assertIn("no ERROR lines", _pip_error_summary(""))
+
+    @patch("app.services.deployment.shutil.copytree")
+    @patch("app.services.deployment.subprocess.run")
+    @patch.dict(os.environ, {"LOOM_ARTIFACT_BUCKET": "my-bucket"})
+    def test_build_raises_with_pip_error(self, mock_run: MagicMock, _copytree: MagicMock) -> None:
+        import subprocess
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, ["pip"], stderr="ERROR: No matching distribution found for litellm==1.100.4\n")
+        with self.assertRaisesRegex(RuntimeError, "strands agent artifact failed: .*litellm==1.100.4"):
+            build_agent_artifact("us-east-1")
+        self.assertTrue(mock_run.call_args.kwargs["text"])
+
+
 class TestCreateRuntime(unittest.TestCase):
     """Test cases for create_runtime function."""
 

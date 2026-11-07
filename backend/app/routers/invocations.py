@@ -37,6 +37,13 @@ from app.routers.utils import (
 
 from app.services.agentcore import invoke_agent, invoke_agent_ws
 from app.services.harness import invoke_harness_stream
+from app.services.guardrails import (
+    GuardrailError,
+    guardrail_block_from_config_json,
+    harness_additional_params,
+    sanitize_event as sanitize_guardrail_event,
+    validate_invocation_guardrail,
+)
 from app.services.cloudwatch import (
     get_log_events, get_usage_log_events,
     parse_agent_start_time, parse_agentcore_request_id,
@@ -121,6 +128,8 @@ class InvokeRequest(BaseModel):
     use_linked_token: bool = Field(default=False, description="Use linked user token for cross-IdP auth")
     model_id: str | None = Field(default=None, description="Runtime model override (must be in agent's allowed_model_ids)")
     connector_ids: list[int] | None = Field(default=None, description="User-enabled MCP connector IDs for runtime tool access")
+    guardrail_id: str | None = Field(default=None, max_length=2048, description="Per-invocation guardrail (must be the agent's guardrail or an allowed alternate)")
+    guardrail_version: str | None = Field(default=None, max_length=16, description="Version for guardrail_id (default DRAFT)")
 
 
 class InvocationResponse(BaseModel):
@@ -336,6 +345,21 @@ def _estimate_compute_costs(
     return cpu_cost, memory_cost, round(cpu_cost + memory_cost, 6)
 
 
+def _validate_guardrail_selection(
+    agent: Agent, guardrail_id: str | None, guardrail_version: str | None,
+) -> dict[str, str] | None:
+    """Validate a per-invocation guardrail selection, raising HTTP 400 if not allowed."""
+    if not guardrail_id:
+        return None
+    config_json = next((e.value for e in agent.config_entries if e.key == "AGENT_CONFIG_JSON"), None)
+    try:
+        return validate_invocation_guardrail(
+            guardrail_block_from_config_json(config_json), guardrail_id, guardrail_version,
+        )
+    except GuardrailError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 def format_sse_event(event: str, data: dict) -> str:
     """
     Format a Server-Sent Event message.
@@ -527,6 +551,7 @@ async def invoke_agent_stream(
     supports_elicitation: bool = False,
     user_access_token: str | None = None,
     delegation_mode: str = "m2m",
+    guardrail_override: dict[str, str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Invoke the agent and yield SSE events as the response streams.
@@ -627,6 +652,7 @@ async def invoke_agent_stream(
             approval_policies=approval_policies,
             supports_elicitation=supports_elicitation,
             user_access_token=user_access_token,
+            guardrail=guardrail_override,
         )
 
         # Stream chunks to frontend. Each next() call on the synchronous
@@ -651,6 +677,12 @@ async def invoke_agent_stream(
                 structured = chunk["content"]
                 if isinstance(structured, dict):
                     logger.info("Structured event keys: %s", list(structured.keys()))
+                    # Guardrail intervention/detection reported by the agent
+                    # runtime (issue #17) — Loom only relays it.
+                    guardrail_evt = structured.get("guardrail")
+                    if isinstance(guardrail_evt, dict):
+                        yield format_sse_event("guardrail", sanitize_guardrail_event(guardrail_evt))
+                        continue
                     # Tool use event forwarded from the agent handler
                     tool_use = structured.get("tool_use")
                     if isinstance(tool_use, dict) and tool_use.get("name"):
@@ -703,6 +735,7 @@ async def invoke_agent_stream(
                             supports_elicitation=True,
                             elicitation_response={"action": elicit_action, "content": elicit_content},
                             user_access_token=user_access_token,
+                            guardrail=guardrail_override,
                         )
 
                         def _next_elicit_resume():
@@ -719,6 +752,9 @@ async def invoke_agent_stream(
                             elif rchunk.get("type") == "structured":
                                 rs = rchunk["content"]
                                 if isinstance(rs, dict):
+                                    rguard = rs.get("guardrail")
+                                    if isinstance(rguard, dict):
+                                        yield format_sse_event("guardrail", sanitize_guardrail_event(rguard))
                                     rtool = rs.get("tool_use")
                                     if isinstance(rtool, dict) and rtool.get("name"):
                                         yield format_sse_event("tool_use", {"name": rtool["name"]})
@@ -783,6 +819,7 @@ async def invoke_agent_stream(
                                 runtime_model_id=runtime_model_id,
                                 interrupt_response=interrupt_response_payload,
                                 user_access_token=user_access_token,
+                                guardrail=guardrail_override,
                             )
 
                             def _next_resume():
@@ -799,6 +836,9 @@ async def invoke_agent_stream(
                                 elif rchunk.get("type") == "structured":
                                     rs = rchunk["content"]
                                     if isinstance(rs, dict):
+                                        rguard = rs.get("guardrail")
+                                        if isinstance(rguard, dict):
+                                            yield format_sse_event("guardrail", sanitize_guardrail_event(rguard))
                                         rtool = rs.get("tool_use")
                                         if isinstance(rtool, dict) and rtool.get("name"):
                                             yield format_sse_event("tool_use", {"name": rtool["name"]})
@@ -1022,6 +1062,7 @@ async def invoke_harness_agent_stream(
     dynamic_tools: list[dict[str, Any]] | None = None,
     user_access_token: str | None = None,
     delegation_mode: str = "m2m",
+    guardrail_override: dict[str, str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Invoke a harness-deployed agent and yield SSE events.
 
@@ -1050,6 +1091,20 @@ async def invoke_harness_agent_stream(
 
     if runtime_model_id:
         agent_model_id = runtime_model_id
+
+    # Guardrails (issue #17): an InvokeHarness `model` override replaces the
+    # harness's whole model config for this call, so whenever Loom sends one
+    # (runtime model or guardrail selection) it must carry the guardrail too.
+    harness_guardrail_block = guardrail_block_from_config_json(config_json_str)
+    harness_additional = harness_additional_params(harness_guardrail_block, guardrail_override)
+    harness_model_override = runtime_model_id or (agent_model_id if guardrail_override else None)
+    harness_guardrail_ref = guardrail_override or (
+        {
+            "guardrail_id": harness_guardrail_block.get("guardrail_id", ""),
+            "guardrail_version": harness_guardrail_block.get("guardrail_version", ""),
+        }
+        if harness_guardrail_block else None
+    )
 
     # Build tools with OAuth2 M2M tokens injected for this invocation.
     # Each MCP server has its own OAuth2 credentials — resolve a
@@ -1169,7 +1224,7 @@ async def invoke_harness_agent_stream(
             session_id=session_id,
             prompt=prompt,
             region=agent.region,
-            model_id=runtime_model_id,
+            model_id=harness_model_override,
             actor_id=actor_id,
             access_token=access_token,
             tools=invoke_tools,
@@ -1177,6 +1232,8 @@ async def invoke_harness_agent_stream(
             provider=agent_provider,
             litellm_api_key_arn=agent_litellm_api_key_arn,
             litellm_api_base=agent_litellm_api_base,
+            additional_params=harness_additional,
+            guardrail_ref=harness_guardrail_ref,
         )
 
         _sentinel = object()
@@ -1295,6 +1352,9 @@ async def invoke_harness_agent_stream(
             elif chunk.get("type") == "structured":
                 structured = chunk["content"]
                 if isinstance(structured, dict):
+                    guardrail_evt = structured.get("guardrail")
+                    if isinstance(guardrail_evt, dict):
+                        yield format_sse_event("guardrail", sanitize_guardrail_event(guardrail_evt))
                     tool_use = structured.get("tool_use")
                     if isinstance(tool_use, dict) and tool_use.get("name"):
                         yield format_sse_event("tool_use", {"name": tool_use["name"]})
@@ -1442,6 +1502,12 @@ async def invoke_agent_endpoint(
                 detail=f"Model '{request_body.model_id}' is not in this agent's allowed models: {allowed}",
             )
         runtime_model_id = request_body.model_id
+
+    # Validate per-invocation guardrail selection against the agent's
+    # allowlist (fast-fail; the agent runtime re-validates for custom agents).
+    guardrail_override = _validate_guardrail_selection(
+        agent, request_body.guardrail_id, request_body.guardrail_version,
+    )
 
     # Record client invoke time before session creation
     client_invoke_time = time.time()
@@ -1754,6 +1820,7 @@ async def invoke_agent_endpoint(
             dynamic_harness_tools,
             user_access_token=user_access_token,
             delegation_mode=delegation_mode,
+            guardrail_override=guardrail_override,
         )
     else:
         stream_gen = invoke_agent_stream(
@@ -1765,6 +1832,7 @@ async def invoke_agent_endpoint(
             supports_elicitation=has_elicitation_connector,
             user_access_token=user_access_token,
             delegation_mode=delegation_mode,
+            guardrail_override=guardrail_override,
         )
 
     return StreamingResponse(
@@ -1886,6 +1954,15 @@ async def invoke_agent_websocket(
             # resolution chain (manual token / credential ID / linked user).
             access_token = data.get("bearer_token")
 
+            try:
+                ws_guardrail = _validate_guardrail_selection(
+                    agent, data.get("guardrail_id"), data.get("guardrail_version"),
+                )
+            except HTTPException as exc:
+                await websocket.send_json({"type": "error", "content": str(exc.detail)})
+                data = await websocket.receive_json()
+                continue
+
             await websocket.send_json({"type": "session_start", "session_id": session_id})
 
             gen = invoke_agent_ws(
@@ -1898,6 +1975,7 @@ async def invoke_agent_websocket(
                 actor_id=actor_id,
                 dynamic_mcp_servers=dynamic_mcp_servers,
                 runtime_model_id=data.get("model_id"),
+                guardrail=ws_guardrail,
             )
 
             try:

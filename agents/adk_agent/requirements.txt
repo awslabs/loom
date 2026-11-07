@@ -290,8 +290,10 @@ langgraph-sdk==0.4.10
     # via langgraph
 langsmith==0.14.14
     # via langchain-core
-litellm==1.102.4
-    # via google-adk
+litellm==1.91.5
+    # via
+    #   -r requirements.in
+    #   google-adk
 llama-index-core==0.14.25
     # via
     #   llama-index-embeddings-google-genai

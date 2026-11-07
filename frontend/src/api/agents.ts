@@ -6,6 +6,7 @@ import type {
   AgentHarnessDeployRequest,
   ConfigEntry,
   ConfigUpdateRequest,
+  GuardrailInterventionsResponse,
   IamRole,
   CognitoPool,
   ModelOption,
@@ -164,4 +165,30 @@ export function getAgentIntegration(id: number): Promise<IntegrationInfoResponse
 
 export function exportAgent(id: number): Promise<Record<string, unknown>> {
   return apiFetch<Record<string, unknown>>(`/api/agents/${id}/export`);
+}
+
+export interface GuardrailInterventionsQuery {
+  session_id?: string;
+  hours?: number;
+  limit?: number;
+}
+
+/** Guardrail intervention history from the agent's runtime log group, newest first. */
+/** Re-read the agent's guardrail details from Bedrock (DRAFT versions can change); doesn't change enforcement. */
+export function refreshGuardrailDetails(id: number): Promise<AgentResponse> {
+  return apiFetch<AgentResponse>(`/api/agents/${id}/guardrails/refresh`, { method: "POST" });
+}
+
+export function listGuardrailInterventions(
+  id: number,
+  query: GuardrailInterventionsQuery = {},
+): Promise<GuardrailInterventionsResponse> {
+  const params = new URLSearchParams();
+  if (query.session_id) params.set("session_id", query.session_id);
+  if (query.hours != null) params.set("hours", String(query.hours));
+  if (query.limit != null) params.set("limit", String(query.limit));
+  const qs = params.toString();
+  return apiFetch<GuardrailInterventionsResponse>(
+    `/api/agents/${id}/guardrails/interventions${qs ? `?${qs}` : ""}`,
+  );
 }

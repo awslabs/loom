@@ -67,6 +67,13 @@ class Agent(Base):
     # this so editing an agent doesn't feed generated text back in as the
     # description. Loom's own record only; never sent to the runtime.
     user_system_prompt = Column(Text, nullable=True)
+    # Guardrail selection made at the last deploy: 'default' (inherit the
+    # global default), 'custom' or 'none'. The resolved guardrail itself is
+    # the `guardrail` block of AGENT_CONFIG_JSON (what the runtime enforces).
+    guardrail_selection = Column(String, nullable=True)
+    # GetGuardrail summary of the agent's guardrail(s), read at deploy/update
+    # time (JSON) so the agent page never calls Bedrock on load.
+    guardrail_details = Column(Text, nullable=True)
 
     # Relationships
     sessions = relationship("InvocationSession", back_populates="agent", cascade="all, delete-orphan")
@@ -126,6 +133,20 @@ class Agent(Base):
     def set_allowed_model_ids(self, model_ids: list[str]) -> None:
         """Serialize allowed_model_ids to JSON text."""
         self.allowed_model_ids = json.dumps(model_ids) if model_ids else None
+
+    def get_guardrail_details(self) -> dict | None:
+        """Return the stored guardrail details snapshot, or None."""
+        if not self.guardrail_details:
+            return None
+        try:
+            value = json.loads(self.guardrail_details)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def set_guardrail_details(self, details: dict | None) -> None:
+        """Store (or clear) the guardrail details snapshot."""
+        self.guardrail_details = json.dumps(details) if details else None
 
     def get_authorizer_config(self) -> dict | None:
         """Parse authorizer_config from JSON text."""

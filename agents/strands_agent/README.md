@@ -189,7 +189,7 @@ MCP (Model Context Protocol) tool servers are dynamically loaded from configurat
 
 Agent-to-agent (A2A) communication uses the Strands SDK `A2AAgent` class. Each enabled A2A agent in the configuration is wrapped as a `@tool` function that the orchestrating agent can invoke during conversation.
 
-**`_AuthenticatedA2AAgent`** — Subclass of `A2AAgent` for OAuth2-protected A2A endpoints. Injects OAuth2 Bearer tokens via the AgentCore Identity service M2M flow (using the workload token from `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`). Handles:
+**`_AuthenticatedA2AAgent`** — Subclass of `A2AAgent` for OAuth2-protected A2A endpoints. Injects OAuth2 Bearer tokens from the AgentCore Identity service using the same `_OAuth2Auth` handler as MCP servers: M2M by default, or on-behalf-of (`delegation_mode: obo`) with the configured `obo_grant_type` and `audience`. An A2A agent configured for OAuth2 without a `credential_provider_name` logs a warning and is called unauthenticated. Handles:
 
 - **Agent Card fetching** with authentication, backfilling required fields that older agent cards may omit, and overriding the card's internal URL with the external AgentCore Runtime endpoint.
 - **Message sending** with capability-aware method selection. Checks `agent_card.capabilities.streaming` — uses `message/stream` (SSE) only when streaming is supported, otherwise goes directly to `message/send`. Falls back from `message/stream` to `message/send` when the server returns "Method not found".
@@ -235,6 +235,32 @@ When enabled, the agent gains access to a sandboxed Code Interpreter tool powere
 A separate CI execution role (deployed via `shared/iac/code_interpreter_role.yaml`) serves as the sandbox identity for the custom interpreter. This two-role pattern keeps agent execution permissions separate from sandbox execution permissions.
 
 **Security:** The sandbox has no access to the host filesystem or network. All code runs in an isolated environment managed by AWS.
+
+### Bedrock Guardrails
+
+The optional top-level `guardrail` config key (absent or `null` = no guardrail) is written by Loom at deploy time:
+
+```json
+"guardrail": {
+  "guardrail_id": "<guardrail-id>",
+  "guardrail_arn": "",
+  "guardrail_version": "1",
+  "mode": "enforce",
+  "stream_processing_mode": "sync",
+  "redact_history": true,
+  "source": "default",
+  "allowed": [{"guardrail_id": "<other-guardrail-id>", "guardrail_arn": "", "guardrail_version": "DRAFT"}]
+}
+```
+
+- **`enforce`** (provider `bedrock` only): the guardrail is attached to every `BedrockModel` call (`guardrail_id` = `guardrail_arn or guardrail_id`, `guardrail_trace="enabled"`, `guardrail_stream_processing_mode`, `guardrail_redact_input=True`, `guardrail_redact_output=redact_history`), so it covers every model call in the tool loop. Interventions are detected from the stream's `metadata.trace.guardrail` assessments (`inputAssessment` → `INPUT`, `outputAssessments` → `OUTPUT`), with `stop_reason == "guardrail_intervened"` as a fallback (`source: "UNKNOWN"`); each intervention is reported once. On the WebSocket path only the stop reason is available, so events there use `source: "UNKNOWN"`. Enforce on a non-Bedrock provider logs a warning and attaches nothing (the backend rejects that combination). Note that Bedrock can't mask PII in `async` stream processing mode.
+- **`monitor`** (any provider): nothing is attached inline. The agent calls `bedrock-runtime:ApplyGuardrail` (off the event loop) on the user prompt (`INPUT`) and on the final streamed response text (`OUTPUT`). Content is never changed; an event is emitted only when the result is `GUARDRAIL_INTERVENED`. Failures are logged as warnings and never break the stream.
+
+**Per-invocation override:** the payload may carry `"guardrail": {"guardrail_id": "...", "guardrail_version": "..."}`. The agent accepts it only if it matches the primary or an `allowed` entry (mode and other settings always come from the primary); otherwise it returns `Error: Requested guardrail is not allowed for this agent.` without calling the model. The same applies to the WebSocket `prompt` message, which gets `{"type": "error", ...}` on rejection.
+
+**Events and logs:** every intervention/detection is streamed as `{"guardrail": {"mode", "source", "action", "guardrail_id", "guardrail_version", "policies"}}` (WebSocket: `{"type": "guardrail", "content": {...}}`) and written to stdout as one JSON line with `"loom_event": "guardrail_intervention"`, which Loom queries with CloudWatch Logs Insights. `policies` lists only the policy, type/name and action — the trace `match` field (which holds the original matched text/PII) and regex patterns are always dropped, and prompt/response text is never logged.
+
+**IAM:** the agent execution role needs `bedrock:ApplyGuardrail` on the guardrail ARNs (`arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail/*` in `shared/iac/role.yaml`). This is required for enforce mode too, not only for the standalone API. The guardrail must be in the same region as the model.
 
 ### Observability (OTEL)
 

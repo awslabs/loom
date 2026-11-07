@@ -39,9 +39,16 @@ from strands.models.bedrock import BedrockModel
 
 from mcp.types import ElicitResult
 
-from src.config import AgentConfig, MCPServerConfig, AuthConfig, load_config
+from src.config import AgentConfig, GuardrailConfig, MCPServerConfig, AuthConfig, load_config
 from src.agent import _build_model, attach_mcp_tools, build_agent
 from src.integrations.approval import ApprovalHook
+from src.integrations.guardrails import (
+    GUARDRAIL_NOT_ALLOWED_MESSAGE,
+    GUARDRAIL_NOT_ALLOWED_TEXT,
+    GuardrailSession,
+    guardrail_cache_key,
+    resolve_invocation_guardrail,
+)
 from src.integrations.mcp_client import has_deferred_auth_servers, _build_transport_callable, drain_token_info_events, reset_token_info_state, set_user_access_token
 from src.telemetry import trace_invocation
 
@@ -64,7 +71,10 @@ _config: AgentConfig | None = None
 _mcp_attached = False
 _dynamic_mcp_clients: dict[str, Any] = {}  # keyed by (server_name, actor_id)
 _default_model: Model | None = None
-_model_cache: dict[tuple[str, str, str], Model] = {}  # keyed by (provider, model_id, base_url)
+# keyed by (provider, model_id, base_url, inline-guardrail key) so a
+# per-invocation guardrail override gets its own model and runtime model
+# overrides keep the guardrail.
+_model_cache: dict[tuple[Any, ...], Model] = {}
 _approval_hook: ApprovalHook | None = None
 _code_interpreter = None  # AgentCoreCodeInterpreter instance for pre-warm
 
@@ -113,6 +123,42 @@ def _get_agent():
             t.start()
         logger.info("Agent initialized successfully")
     return _agent
+
+
+def _select_model(runtime_model_id: str | None, guardrail: GuardrailConfig | None) -> Model | None:
+    """Return the model to use for this invocation.
+
+    The cold-start default model is used unless the payload overrides the
+    model id or picked an alternate guardrail; otherwise a cached model is
+    built with the effective model id *and* the effective guardrail.
+    """
+    if _config is None:
+        return _default_model
+    if not runtime_model_id and guardrail == _config.guardrail:
+        return _default_model
+    model_id = runtime_model_id or _config.model_id
+    cache_key = (_config.provider, model_id, _config.base_url, guardrail_cache_key(guardrail, _config.provider))
+    if cache_key not in _model_cache:
+        _model_cache[cache_key] = _build_model(dataclasses.replace(_config, model_id=model_id, guardrail=guardrail))
+        logger.info(
+            "Created cached model for runtime override: provider=%s model_id=%s guardrail=%s",
+            _config.provider, model_id, guardrail.guardrail_id if guardrail else None,
+        )
+    return _model_cache[cache_key]
+
+
+def _resolve_guardrail(requested: Any) -> tuple[GuardrailConfig | None, bool]:
+    """Validate a payload ``guardrail`` override against the agent's config (Contract 2)."""
+    configured = _config.guardrail if _config is not None else None
+    guardrail, ok = resolve_invocation_guardrail(configured, requested)
+    if not ok:
+        logger.warning("Rejected payload guardrail override (not the primary or an allowed guardrail)")
+    return guardrail, ok
+
+
+def _new_guardrail_session(guardrail: GuardrailConfig | None, session_id: str) -> GuardrailSession | None:
+    provider = _config.provider if _config is not None else "bedrock"
+    return GuardrailSession.create(guardrail, provider, session_id)
 
 
 def _ensure_mcp_tools(actor_id: str = ""):
@@ -240,6 +286,13 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
     session_id = payload.get("session_id", "")
     actor_id = payload.get("actor_id") or "loom-agent"
 
+    # Per-invocation guardrail override (Contract 2): validated by the agent
+    # itself because direct runtime callers can send anything.
+    guardrail, guardrail_ok = _resolve_guardrail(payload.get("guardrail"))
+    if not guardrail_ok:
+        yield GUARDRAIL_NOT_ALLOWED_MESSAGE
+        return
+
     # Make user access token available for OBO token exchange flows
     set_user_access_token(payload.get("user_access_token"))
 
@@ -336,16 +389,11 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
         _approval_hook.policies = invocation_policies
         logger.info("Injected %d approval policy(ies) from payload", len(invocation_policies))
 
-    # Runtime model override
+    # Runtime model override (and/or guardrail override)
     runtime_model_id = payload.get("model_id")
-    if runtime_model_id and _config:
-        cache_key = (_config.provider, runtime_model_id, _config.base_url)
-        if cache_key not in _model_cache:
-            _model_cache[cache_key] = _build_model(dataclasses.replace(_config, model_id=runtime_model_id))
-            logger.info("Created cached model for runtime override: provider=%s model_id=%s", _config.provider, runtime_model_id)
-        agent.model = _model_cache[cache_key]
-    elif _default_model:
-        agent.model = _default_model
+    selected_model = _select_model(runtime_model_id, guardrail)
+    if selected_model is not None:
+        agent.model = selected_model
 
     # Determine if this is a new prompt or an interrupt resume
     interrupt_responses = payload.get("interruptResponse")
@@ -360,6 +408,12 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
     user_role = payload.get("user_role")
     if user_role:
         agent.state.set("user_role", user_role)
+
+    # Guardrail observation for this invocation (enforce: trace/stop reason;
+    # monitor: ApplyGuardrail on input, started now so the model isn't delayed).
+    guardrail_session = _new_guardrail_session(guardrail, session_id)
+    if guardrail_session:
+        guardrail_session.start_input(agent_input)
 
     if supports_elicitation:
         # Run agent in background task so elicitation can block without stopping the stream
@@ -377,6 +431,9 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
                     result = None
                     stream = agent.stream_async(agent_input, invocation_state={"session_id": session_id, "actor_id": actor_id})
                     async for event in stream:
+                        if guardrail_session:
+                            for g_event in guardrail_session.poll() + guardrail_session.observe_stream_event(event):
+                                await queue.put(g_event)
                         if isinstance(event, dict):
                             if "result" in event:
                                 result = event["result"]
@@ -388,6 +445,8 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
                             elif isinstance(event.get("delta"), dict):
                                 text = event["delta"].get("text")
                             if text:
+                                if guardrail_session:
+                                    guardrail_session.record_output(text)
                                 await queue.put(text)
                                 continue
                             chunk = event.get("event")
@@ -402,6 +461,10 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
                         # Drain any OBO token info events acquired during tool execution
                         for ti in drain_token_info_events():
                             await queue.put({"token_info": ti})
+
+                    if guardrail_session:
+                        for g_event in await guardrail_session.finish(_guardrail_stopped(result)):
+                            await queue.put(g_event)
 
                     if result and getattr(result, "stop_reason", None) == "interrupt":
                         interrupts = getattr(result, "interrupts", [])
@@ -435,6 +498,9 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
                 result = None
                 stream = agent.stream_async(agent_input, invocation_state={"session_id": session_id, "actor_id": actor_id})
                 async for event in stream:
+                    if guardrail_session:
+                        for g_event in guardrail_session.poll() + guardrail_session.observe_stream_event(event):
+                            yield g_event
                     if isinstance(event, dict):
                         if "result" in event:
                             result = event["result"]
@@ -446,6 +512,8 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
                         elif isinstance(event.get("delta"), dict):
                             text = event["delta"].get("text")
                         if text:
+                            if guardrail_session:
+                                guardrail_session.record_output(text)
                             yield text
                             continue
                         event_keys = list(event.keys())
@@ -463,6 +531,10 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
                     for ti in drain_token_info_events():
                         yield {"token_info": ti}
 
+                if guardrail_session:
+                    for g_event in await guardrail_session.finish(_guardrail_stopped(result)):
+                        yield g_event
+
                 if result and getattr(result, "stop_reason", None) == "interrupt":
                     interrupts = getattr(result, "interrupts", [])
                     logger.info("Agent interrupted with %d pending approval(s)", len(interrupts))
@@ -477,6 +549,11 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
                 logger.exception("Agent stream error session_id=%s (%s): %s", session_id, type(e).__name__, e)
                 detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
                 yield f"\n\nError: {detail}"
+
+
+def _guardrail_stopped(result: Any) -> bool:
+    """True when the Strands result says the guardrail intervened."""
+    return getattr(result, "stop_reason", None) == "guardrail_intervened"
 
 
 async def _drain_queue(queue: asyncio.Queue) -> AsyncGenerator[Any, None]:
@@ -561,6 +638,11 @@ async def ws_invoke(websocket, context) -> None:
             session_id = data.get("session_id", "")
             actor_id = data.get("actor_id") or "loom-agent"
 
+            guardrail, guardrail_ok = _resolve_guardrail(data.get("guardrail"))
+            if not guardrail_ok:
+                await websocket.send_json({"type": "error", "content": GUARDRAIL_NOT_ALLOWED_TEXT})
+                continue
+
             set_user_access_token(data.get("user_access_token"))
             _ensure_mcp_tools(actor_id)
 
@@ -573,21 +655,22 @@ async def ws_invoke(websocket, context) -> None:
             if dynamic_mcp_elicit:
                 _attach_dynamic_mcp_servers_ws(agent, dynamic_mcp_elicit, actor_id, elicitation_callback)
 
-            # Runtime model override
-            runtime_model_id = data.get("model_id")
-            if runtime_model_id and _config:
-                cache_key = (_config.provider, runtime_model_id, _config.base_url)
-                if cache_key not in _model_cache:
-                    _model_cache[cache_key] = _build_model(dataclasses.replace(_config, model_id=runtime_model_id))
-                agent.model = _model_cache[cache_key]
-            elif _default_model:
-                agent.model = _default_model
+            # Runtime model override (and/or guardrail override)
+            selected_model = _select_model(data.get("model_id"), guardrail)
+            if selected_model is not None:
+                agent.model = selected_model
+
+            guardrail_session = _new_guardrail_session(guardrail, session_id)
+            if guardrail_session:
+                guardrail_session.start_input(prompt)
 
             # Run agent in executor so we can receive messages concurrently
             loop = asyncio.get_event_loop()
+            run_state: dict[str, Any] = {}
 
             def _run_agent(p=prompt):
                 result = agent(p)
+                run_state["stopped"] = _guardrail_stopped(result)
                 return str(result)
 
             agent_task = asyncio.ensure_future(
@@ -609,6 +692,12 @@ async def ws_invoke(websocket, context) -> None:
                         elicit_event.set()
 
             result_text = agent_task.result()
+            if guardrail_session:
+                # The blocking agent(...) call exposes no stream trace here, so
+                # enforce mode reports from the stop reason (source UNKNOWN).
+                guardrail_session.record_output(result_text)
+                for g_event in await guardrail_session.finish(run_state.get("stopped", False)):
+                    await websocket.send_json({"type": "guardrail", "content": g_event["guardrail"]})
             await websocket.send_json({"type": "result", "content": result_text})
 
     except Exception as e:

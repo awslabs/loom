@@ -174,22 +174,26 @@ The frontend enforces scope-based access control derived from Cognito group memb
 
 Model metadata (display names, groups, pricing) and AgentCore Runtime pricing are maintained in external JSON configuration files (`backend/etc/models.json` and `backend/etc/runtime_pricing.json`), loaded at backend startup. Models are organized by vendor group and sorted alphabetically in the UI via the `groupModels()` utility.
 
-**Anthropic:**
-- Claude Opus 4.7 (`anthropic.claude-opus-4-7`)
-- Claude Opus 4.6 (`us.anthropic.claude-opus-4-6-v1`)
-- Claude Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`)
-- Claude Opus 4.5 (`us.anthropic.claude-opus-4-5-20251101-v1:0`)
-- Claude Sonnet 4.5 (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`)
-- Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`)
+The list below is the generated `backend/etc/models.json` as of 2026-11-06 (6-month lookback), newest first within each vendor. `backend/etc/bedrock_model_catalog.json` is the curated superset it's generated from (`make refresh-models`).
 
 **Amazon:**
-- Nova 2 Lite (`us.amazon.nova-2-lite-v1:0`)
-- Nova Pro (`us.amazon.nova-pro-v1:0`)
 - Nova Lite (`us.amazon.nova-lite-v1:0`)
 - Nova Micro (`us.amazon.nova-micro-v1:0`)
+- Nova Pro (`us.amazon.nova-pro-v1:0`)
+
+**Anthropic:**
+- Claude Haiku 5.5 (`us.anthropic.claude-haiku-5-5`)
+- Claude Sonnet 5.5 (`us.anthropic.claude-sonnet-5-5`)
+- Claude Opus 5.5 (`us.anthropic.claude-opus-5-5`)
+- Claude Fable 5.1 (`us.anthropic.claude-fable-5-1`)
+- Claude Opus 5 (`us.anthropic.claude-opus-5`)
+- Claude Sonnet 5 (`us.anthropic.claude-sonnet-5`)
+- Claude Opus 4.8 (`us.anthropic.claude-opus-4-8`)
+- Claude Opus 4.6 (`us.anthropic.claude-opus-4-6-v1`)
+- Claude Opus 4.7 (`anthropic.claude-opus-4-7`)
+- Claude Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`)
 
 **DeepSeek:**
-- DeepSeek v3.2 (`deepseek.v3.2`)
 - DeepSeek-R1 (`deepseek.r1-v1:0`)
 
 **Google:**
@@ -198,18 +202,23 @@ Model metadata (display names, groups, pricing) and AgentCore Runtime pricing ar
 - Gemma 3 4B IT (`google.gemma-3-4b-it`)
 
 **Meta:**
-- Llama 4 Maverick 17B Instruct (`meta.llama4-maverick-17b-instruct-v1:0`)
-- Llama 4 Scout 17B Instruct (`meta.llama4-scout-17b-instruct-v1:0`)
 - Llama 3.3 70B Instruct (`meta.llama3-3-70b-instruct-v1:0`)
 
 **MiniMax:**
-- MiniMax M2.5 (`minimax.minimax-m2.5`)
-- MiniMax M2.1 (`minimax.minimax-m2.1`)
 - MiniMax M2 (`minimax.minimax-m2`)
+- MiniMax M2.1 (`minimax.minimax-m2.1`)
 
 **Moonshot AI:**
-- Kimi K2.5 (`moonshotai.kimi-k2.5`)
+- Kimi K3 (`global.moonshotai.kimi-k3`)
 - Kimi K2 Thinking (`moonshot.kimi-k2-thinking`)
+- Kimi K2.5 (`moonshotai.kimi-k2.5`)
+
+**OpenAI:**
+- GPT-6.1 Terra (`us.openai.gpt-6.1-terra`)
+- GPT-6.1 Sol (`us.openai.gpt-6.1-sol`)
+- GPT-6 Luna (`us.openai.gpt-6-luna`)
+- GPT-6 Sol (`us.openai.gpt-6-sol`)
+- GPT-6 Astra (`us.openai.gpt-6-astra`)
 
 Model selectors in the UI are searchable by both display name and model ID, with grouped sections sorted alphabetically by vendor. No default is pre-selected — the user must explicitly choose a model.
 
@@ -756,6 +765,36 @@ Agents support runtime model selection, allowing users to choose from a set of a
 - **R6 — stopping a run.** `POST .../test-cases/{id}/runs/{run_id}/stop` (`agent:write`; 409 once the run has finished) marks a run STOPPED. The background work re-reads run status from the database at each phase and on each poll (the stop may arrive at another backend process), so a stopped run is not invoked, waited on, or scored any further: span waits return early, a stopped run leaves its Run all group before its job starts, and a batch job is stopped in AWS once every run in it is stopped. The stop endpoint also stops a job straight away when no other in-progress run uses it; a job shared with other runs keeps going for them. Job IDs are now recorded as each job starts, so a stop or a deletion can find a running job. An agent invocation already streaming can't be interrupted; its response is kept as a session but not scored. The UI shows a Stop button beside a RUNNING result and a STOPPED result state.
 - **R7 — IAM.** The ECS task role gains `logs:StartQuery` on runtime log groups and `aws/spans`, `logs:GetQueryResults` (no resource-level scoping), and `logs:DeleteLogStream` on `run-loom_*` streams in the batch results log group. Both evaluation modes poll Logs Insights; the role previously lacked these, so span polling only worked when the backend ran with developer credentials.
 - **Not changed:** `expected_response` is still not sent to either API (on-demand `evaluationReferenceInputs`, batch `evaluationMetadata.sessionMetadata[].groundTruth`); Trajectory evaluators still lack an expected-tools field; `Builtin.FailureAnalysis` is still offered in the picker although it is a batch *insight*, not an evaluator.
+
+### Phase 41 — Bedrock Guardrails (issue #17) *(Complete)*
+- **Architecture decision: control plane, not data plane.** Loom resolves each agent's guardrail at deploy time and bakes it into the agent:
+  - custom agents: the `guardrail` block of `AGENT_CONFIG_JSON`, enforced natively by Strands `BedrockModel` / ADK via LiteLLM `guardrailConfig`,
+  - managed agents: `bedrockModelConfig.additionalParams.guardrailConfig` on the harness.
+
+  Enforcement never depends on Loom being in the request path, so direct runtime callers are covered too. A backend-side `ApplyGuardrail` proxy was rejected: it would have put Loom on the data plane, missed tool-loop model calls, and been bypassable by direct callers.
+- **Modes.** Block, mask and detect behavior stays a property of the guardrail's own policies in Bedrock. Loom adds `enforce` (inline) vs `monitor` (agent-side `ApplyGuardrail`, log-only), plus sync/async streaming and conversation-history redaction.
+- **Support matrix:**
+  - custom Bedrock agents: enforce and monitor
+  - custom non-Bedrock agents: monitor only
+  - harness Bedrock agents: enforce only
+  - harness LiteLLM and registered agents: none
+
+  Violations fail with 422 before anything is created.
+- **Levels:**
+  - a global default (Settings, falling back to `LOOM_GUARDRAIL_*` env vars, with a **locked** flag that stops agents opting out or switching to monitor),
+  - a per-agent selection (inherit, custom or none),
+  - per-invocation selection from the agent's `allowed` list. The agent runtime re-validates it, and it can never disable or downgrade.
+- **Drift.** A new default reaches agents only at their next deploy. `guardrail_drift` flags inheriting agents that are behind.
+- **Harness fix.** An `InvokeHarness` `model` override replaces the whole model config, so Loom now re-sends the guardrail whenever it overrides the model.
+- **Visibility:**
+  - agents emit a `guardrail` stream event (relayed as SSE `guardrail`),
+  - agents write a `loom_event: guardrail_intervention` JSON line to their runtime log group, read back via Logs Insights (`GET /api/agents/{id}/guardrails/interventions`).
+  - Matched text never leaves the agent: Bedrock's trace `match` field contains the raw PII.
+- **IAM.**
+  - Agent role: `bedrock:ApplyGuardrail` on `guardrail/*`.
+  - Backend task role: `bedrock:ListGuardrails`/`GetGuardrail`.
+  - ECS parameters `pGuardrailId`/`Version`/`Mode`/`Locked`.
+- See `backend/SPECIFICATIONS.md` § 17 for the full design.
 
 ---
 

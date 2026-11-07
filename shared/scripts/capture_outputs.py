@@ -15,6 +15,7 @@ STACKS = [
     "loom-cognito",
     "loom-rds",
     "loom-ec2",
+    "loom-guardrail",
 ]
 
 # Mapping: (stack, output_key) → env_variable
@@ -42,6 +43,10 @@ OUTPUT_MAP: dict[tuple[str, str], str] = {
     ("loom-rds", "oSecretsKmsKeyArn"): "O_RDS_SECRETS_KMS_KEY_ARN",
     # loom-ec2
     ("loom-ec2", "oInstanceId"): "O_EC2_INSTANCE_ID",
+    # loom-guardrail (default guardrail stack; see iac/guardrail.yaml)
+    ("loom-guardrail", "oGuardrailId"): "O_GUARDRAIL_ID",
+    ("loom-guardrail", "oGuardrailArn"): "O_GUARDRAIL_ARN",
+    ("loom-guardrail", "oGuardrailVersion"): "O_GUARDRAIL_VERSION",
 }
 
 

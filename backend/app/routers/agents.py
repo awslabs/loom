@@ -81,6 +81,16 @@ from app.services.harness import (
     delete_harness as delete_harness_api,
 )
 from app.services.secrets import store_secret, get_secret, delete_secret
+from app.services.guardrails import (
+    GuardrailError,
+    GuardrailSelection,
+    compute_drift,
+    guardrail_block_from_config_json,
+    harness_additional_params,
+    resolve_agent_guardrail,
+    snapshot_guardrail_details,
+    supported_modes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +209,8 @@ class AgentCreateRequest(BaseModel):
     harness_tools: list[dict[str, Any]] | None = Field(None, description="Harness tool configurations")
     harness_max_iterations: int | None = Field(None, description="Max agent loop iterations (default: 75)")
     harness_max_tokens: int | None = Field(None, description="Max tokens for model output")
+    # Guardrail selection (issue #17) — omitted means inherit the global default
+    guardrail: GuardrailSelection | None = Field(None, description="Bedrock guardrail selection: inherit the default, custom, or none")
 
 
 class AgentResponse(BaseModel):
@@ -245,6 +257,15 @@ class AgentResponse(BaseModel):
     code_interpreter_id: str | None = None
     code_interpreter_status: str | None = None
     status_reason: str | None = None
+    # Guardrails (issue #17): `guardrail` is what was baked into the agent at
+    # its last deploy; drift means an inheriting agent is behind the default.
+    guardrail_selection: str | None = None
+    guardrail: dict[str, Any] | None = None
+    guardrail_drift: bool = False
+    # GetGuardrail summary captured at the last deploy/update (or refresh):
+    # {"fetched_at", "guardrails": [primary, *alternates]}
+    guardrail_details: dict[str, Any] | None = None
+    guardrail_supported: dict[str, bool] = Field(default_factory=lambda: {"enforce": False, "monitor": False})
 
 
 class ConfigEntryResponse(BaseModel):
@@ -481,6 +502,14 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
         a2a_names=a2a_names,
         code_interpreter_status=None,
     )
+    guardrail_block = guardrail_block_from_config_json(
+        next((e.value for e in agent.config_entries if e.key == "AGENT_CONFIG_JSON"), None)
+    )
+    result.guardrail_selection = agent.guardrail_selection
+    result.guardrail = guardrail_block
+    result.guardrail_details = agent.get_guardrail_details() if guardrail_block else None
+    result.guardrail_supported = supported_modes(agent.source, provider)
+    result.guardrail_drift = compute_drift(db, agent.guardrail_selection, guardrail_block, agent.source, provider)
     if inv_count > 0 and grand_total > 0:
         result.cost_summary = {
             "total_input_tokens": total_input,
@@ -494,6 +523,27 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     else:
         result.cost_summary = None
     return result
+
+
+def _resolve_guardrail_or_422(
+    request: AgentCreateRequest, source: str, provider: str | None, db: Session,
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve the agent's guardrail block and snapshot its policy details.
+
+    The GetGuardrail read happens here, at deploy/update time, so a wrong
+    guardrail ID or version fails the request with 422 before anything is
+    created, and the agent page can render the stored details without
+    calling Bedrock on every load.
+
+    Returns:
+        (selection, block, details) — details is None when no guardrail applies.
+    """
+    try:
+        selection, block = resolve_agent_guardrail(db, request.guardrail, source, provider)
+        details = snapshot_guardrail_details(block, os.getenv("AWS_REGION", DEFAULT_REGION), strict=True)
+    except GuardrailError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return selection, block, details
 
 
 def _resolve_tags(
@@ -1110,6 +1160,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported provider '{provider}'. Must be one of: {sorted(SUPPORTED_PROVIDER_IDS)}"
         )
+    guardrail_selection, guardrail_block, guardrail_details = _resolve_guardrail_or_422(request, "deploy", provider, db)
     if provider == "litellm":
         from app.services.litellm import get_agent_base_url
         if not get_agent_base_url(db) and not os.getenv("LOOM_LITELLM_PROXY_BASE_URL"):
@@ -1304,6 +1355,8 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
         source="deploy",
         deployment_status="initializing",
         user_system_prompt=_user_system_prompt(request),
+        guardrail_selection=guardrail_selection,
+        guardrail_details=json.dumps(guardrail_details) if guardrail_details else None,
         protocol=request.protocol,
         network_mode=request.network_mode,
         agent_framework=request.agent_framework,
@@ -1397,6 +1450,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
         model_max_tokens=model_max_tokens,
         region=region,
         account_id=account_id,
+        guardrail_block=guardrail_block,
     )
 
     return response_data
@@ -1414,6 +1468,7 @@ def _deploy_agent_background(
     model_max_tokens: int,
     region: str,
     account_id: str,
+    guardrail_block: dict[str, Any] | None = None,
 ) -> None:
     """Background task that performs the actual deployment steps.
 
@@ -1627,6 +1682,7 @@ def _deploy_agent_background(
         except Exception as e:
             agent.deployment_status = "failed"
             agent.status = "FAILED"
+            agent.status_reason = f"Artifact build failed: {e}"[:1000]
             db.commit()
             if ci_future is not None:
                 ci_future.cancel()
@@ -1715,6 +1771,7 @@ def _deploy_agent_background(
             "base_url": agent_base_url,
             "api_key_secret_arn": api_key_secret_arn,
             "integrations": integrations_config,
+            "guardrail": guardrail_block,
         })
         env_vars = {
             "AGENT_CONFIG_JSON": config_json,
@@ -1911,6 +1968,7 @@ def _update_deploy_agent_background(
     old_cp_names: set[str],
     region: str,
     account_id: str,
+    guardrail_block: dict[str, Any] | None = None,
 ) -> None:
     """Background task that updates an existing deploy-type agent runtime in-place.
 
@@ -2084,6 +2142,7 @@ def _update_deploy_agent_background(
         except Exception as e:
             agent.deployment_status = "failed"
             agent.status = "FAILED"
+            agent.status_reason = f"Artifact build failed: {e}"[:1000]
             db.commit()
             logger.error("Failed to build artifact for agent %s: %s", agent.id, e)
             return
@@ -2093,6 +2152,7 @@ def _update_deploy_agent_background(
             "model_id": request.model_id,
             "max_tokens": model_max_tokens,
             "integrations": integrations_config,
+            "guardrail": guardrail_block,
         })
         env_vars = {
             "AGENT_CONFIG_JSON": config_json,
@@ -2248,6 +2308,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported provider '{harness_provider}'. Must be one of: {sorted(SUPPORTED_PROVIDER_IDS)}"
         )
+    guardrail_selection, guardrail_block, guardrail_details = _resolve_guardrail_or_422(request, "harness", harness_provider, db)
     if harness_provider == "litellm":
         from app.services.litellm import get_agent_base_url
         if not get_agent_base_url(db) and not os.getenv("LOOM_LITELLM_PROXY_BASE_URL"):
@@ -2431,6 +2492,8 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
         source="harness",
         deployment_status="initializing",
         user_system_prompt=_user_system_prompt(request),
+        guardrail_selection=guardrail_selection,
+        guardrail_details=json.dumps(guardrail_details) if guardrail_details else None,
         execution_role_arn=request.role_arn,
         protocol="HTTP",
         network_mode=request.network_mode,
@@ -2488,6 +2551,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
         ci_config=harness_ci_config,
         provider=harness_provider,
         base_url=request.base_url,
+        guardrail_block=guardrail_block,
     )
 
     return response_data
@@ -2525,6 +2589,7 @@ def _deploy_harness_background(
     ci_config: dict[str, Any] | None = None,
     provider: str = "bedrock",
     base_url: str | None = None,
+    guardrail_block: dict[str, Any] | None = None,
 ) -> None:
     """Background task that creates credential providers and the harness in AWS."""
     db = SessionLocal()
@@ -2768,6 +2833,7 @@ def _deploy_harness_background(
                 "a2a_agents": [],
                 "memory": {"enabled": len(memory_configs) > 0, "resources": memory_configs},
             },
+            "guardrail": guardrail_block,
         })
 
         # Store config entry
@@ -2815,6 +2881,7 @@ def _deploy_harness_background(
             provider=provider,
             litellm_api_key_arn=litellm_cp_arn,
             litellm_api_base=base_url,
+            additional_params=harness_additional_params(guardrail_block),
         )
 
         harness_id = response.get("harnessId", "")
@@ -2905,6 +2972,7 @@ def _update_harness_background(
     base_url: str | None = None,
     litellm_cp_name: str | None = None,
     litellm_cp_arn: str | None = None,
+    guardrail_block: dict[str, Any] | None = None,
 ) -> None:
     """Background task that updates an existing harness via UpdateHarness API."""
     db = SessionLocal()
@@ -3073,6 +3141,7 @@ def _update_harness_background(
                 "a2a_agents": [],
                 "memory": {"enabled": len(memory_configs) > 0, "resources": memory_configs},
             },
+            "guardrail": guardrail_block,
         })
 
         db.add(ConfigEntry(
@@ -3104,6 +3173,7 @@ def _update_harness_background(
             provider=provider,
             litellm_api_key_arn=litellm_cp_arn,
             litellm_api_base=base_url,
+            additional_params=harness_additional_params(guardrail_block),
         )
 
         harness_status = response.get("status", "UPDATING")
@@ -3932,6 +4002,7 @@ def redeploy_deploy_agent(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only deploy-type agents can be updated via this endpoint",
         )
+    guardrail_selection, guardrail_block, guardrail_details = _resolve_guardrail_or_422(request, "deploy", request.provider, db)
 
     if not agent.runtime_id:
         raise HTTPException(
@@ -4080,6 +4151,8 @@ def redeploy_deploy_agent(
         4096,
     )
 
+    agent.guardrail_selection = guardrail_selection
+    agent.set_guardrail_details(guardrail_details)
     agent.status = "UPDATING"
     agent.deployment_status = "updating"
     db.commit()
@@ -4099,6 +4172,7 @@ def redeploy_deploy_agent(
         old_cp_names=old_cp_names,
         region=region,
         account_id=account_id,
+        guardrail_block=guardrail_block,
     )
 
     return _agent_response(agent, db)
@@ -4124,6 +4198,7 @@ def redeploy_harness_agent(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only harness agents can be updated via this endpoint",
         )
+    guardrail_selection, guardrail_block, guardrail_details = _resolve_guardrail_or_422(request, "harness", request.provider, db)
 
     if not agent.harness_id:
         raise HTTPException(
@@ -4247,6 +4322,8 @@ def redeploy_harness_agent(
             "allowed_scopes": jwt.get("allowedScopes", []),
         })
 
+    agent.guardrail_selection = guardrail_selection
+    agent.set_guardrail_details(guardrail_details)
     db.commit()
     db.refresh(agent)
 
@@ -4363,9 +4440,92 @@ def redeploy_harness_agent(
         base_url=litellm_base_url,
         litellm_cp_name=litellm_cp_name,
         litellm_cp_arn=litellm_cp_arn,
+        guardrail_block=guardrail_block,
     )
 
     return _agent_response(agent, db)
+
+
+@router.post("/{agent_id}/guardrails/refresh", response_model=AgentResponse)
+def refresh_guardrail_details(
+    agent_id: int,
+    user: UserInfo = Depends(require_scopes("agent:write")),
+    db: Session = Depends(get_db),
+) -> AgentResponse:
+    """Re-read the agent's guardrail details from Bedrock (issue #17).
+
+    Details are normally captured at deploy/update time. DRAFT versions are
+    mutable, so this lets a builder pick up policy edits without a redeploy.
+    It never changes what the agent enforces — only the stored description.
+    A guardrail that no longer exists is recorded as an error entry.
+    """
+    agent = get_agent_or_404(agent_id, db, user)
+    block = guardrail_block_from_config_json(
+        next((e.value for e in agent.config_entries if e.key == "AGENT_CONFIG_JSON"), None)
+    )
+    if not block:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This agent has no guardrail configured",
+        )
+    agent.set_guardrail_details(snapshot_guardrail_details(block, agent.region, strict=False))
+    db.commit()
+    db.refresh(agent)
+    return _agent_response(agent, db)
+
+
+class GuardrailInterventionsResponse(BaseModel):
+    """Guardrail intervention history for an agent (read from its runtime logs)."""
+    interventions: list[dict[str, Any]] = []
+    supported: bool = True
+    note: str | None = None
+
+
+@router.get("/{agent_id}/guardrails/interventions", response_model=GuardrailInterventionsResponse)
+def get_guardrail_interventions(
+    agent_id: int,
+    session_id: str | None = None,
+    hours: int = 24,
+    limit: int = 100,
+    user: UserInfo = Depends(require_scopes("agent:read")),
+    db: Session = Depends(get_db),
+) -> GuardrailInterventionsResponse:
+    """List guardrail interventions the agent runtime logged (issue #17).
+
+    Custom agents write one `guardrail_intervention` JSON line per event to
+    their runtime log group, which covers every caller — including ones that
+    invoke the AgentCore runtime directly rather than through Loom.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    from app.services.guardrails import query_interventions
+
+    agent = get_agent_or_404(agent_id, db, user)
+    if agent.source == "harness":
+        return GuardrailInterventionsResponse(
+            supported=False,
+            note="Managed (harness) agents don't write intervention records; interventions are "
+                 "shown live in the invoke stream only.",
+        )
+    if agent.source != "deploy" or not agent.runtime_id:
+        return GuardrailInterventionsResponse(
+            supported=False,
+            note="Guardrails are only managed by Loom for agents it deploys.",
+        )
+    hours = max(1, min(hours, 24 * 14))
+    limit = max(1, min(limit, 500))
+    try:
+        records = query_interventions(
+            derive_log_group(agent.runtime_id, "DEFAULT"), agent.region,
+            session_id=session_id, hours=hours, limit=limit,
+        )
+    except (ClientError, BotoCoreError) as exc:
+        logger.warning("Guardrail intervention query failed for agent %s: %s", agent_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Unable to query guardrail interventions: {exc}",
+        ) from exc
+    return GuardrailInterventionsResponse(interventions=records)
 
 
 @router.get("/{agent_id}/config", response_model=list[ConfigEntryResponse])
@@ -4432,6 +4592,20 @@ def export_agent(agent_id: int, user: UserInfo = Depends(require_scopes("admin:w
             data["api_key"] = get_secret(api_key_secret_arn, agent.region)
         except Exception:
             logger.warning("Failed to retrieve provider API key secret for agent %s", agent_id, exc_info=True)
+
+    # Guardrail selection (issue #17), in the same shape the manifest import
+    # and create/redeploy requests take. Omitted = inherit the global default.
+    if agent.guardrail_selection == "none":
+        data["guardrail"] = {"selection": "none"}
+    elif agent.guardrail_selection == "custom":
+        block = agent_config.get("guardrail")
+        if isinstance(block, dict):
+            data["guardrail"] = {"selection": "custom", "config": {
+                k: block[k] for k in (
+                    "guardrail_id", "guardrail_arn", "guardrail_version", "mode",
+                    "stream_processing_mode", "redact_history", "allowed",
+                ) if k in block
+            }}
 
     if agent.network_mode and agent.network_mode != "PUBLIC":
         vpc_block: dict[str, Any] = {"mode": agent.network_mode}

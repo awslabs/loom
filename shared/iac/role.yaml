@@ -79,6 +79,15 @@ Resources:
                   - bedrock:InvokeModel
                   - bedrock:InvokeModelWithResponseStream
                 Resource: !Ref pBedrockModelArns
+              # Bedrock Guardrails (issue #17): required both for inline
+              # guardrailConfig on Converse/InvokeModel (enforce mode) and for
+              # the standalone ApplyGuardrail API (monitor mode). Guardrails
+              # are regional and must be in the model request's region.
+              - Effect: Allow
+                Action:
+                  - bedrock:ApplyGuardrail
+                Resource:
+                  - !Sub "arn:aws:bedrock:${pAgentCoreRegions}:${AWS::AccountId}:guardrail/*"
         - PolicyName: bedrock-agentcore
           PolicyDocument:
             Version: "2012-10-17"

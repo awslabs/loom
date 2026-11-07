@@ -91,6 +91,7 @@ def invoke_agent(
     supports_elicitation: bool = False,
     elicitation_response: dict[str, Any] | None = None,
     user_access_token: str | None = None,
+    guardrail: dict[str, str] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """
     Invoke an AgentCore Runtime agent and stream the response.
@@ -134,6 +135,13 @@ def invoke_agent(
         payload["elicitationResponse"] = elicitation_response
     if user_access_token:
         payload["user_access_token"] = user_access_token
+    if guardrail:
+        # Per-invocation guardrail selection (issue #17). The agent re-checks
+        # it against its own allowlist — Loom's validation is only a fast-fail.
+        payload["guardrail"] = {
+            "guardrail_id": guardrail.get("guardrail_id", ""),
+            "guardrail_version": guardrail.get("guardrail_version", "DRAFT"),
+        }
     payload_bytes = json.dumps(payload).encode('utf-8')
 
     params: dict[str, Any] = {
@@ -216,6 +224,7 @@ async def invoke_agent_ws(
     actor_id: str | None = None,
     dynamic_mcp_servers: list[dict[str, Any]] | None = None,
     runtime_model_id: str | None = None,
+    guardrail: dict[str, str] | None = None,
 ) -> AsyncGenerator[dict[str, Any], str | None]:
     """Invoke an AgentCore Runtime agent via WebSocket for MCP elicitation support.
 
@@ -273,6 +282,11 @@ async def invoke_agent_ws(
                 payload["dynamic_mcp_servers_elicit"] = dynamic_mcp_servers
             if runtime_model_id:
                 payload["model_id"] = runtime_model_id
+            if guardrail:
+                payload["guardrail"] = {
+                    "guardrail_id": guardrail.get("guardrail_id", ""),
+                    "guardrail_version": guardrail.get("guardrail_version", "DRAFT"),
+                }
 
             await ws.send(json.dumps(payload))
             logger.info("WebSocket prompt sent session_id=%s", session_id)
@@ -294,6 +308,12 @@ async def invoke_agent_ws(
                     return
                 elif msg_type == "text":
                     yield data
+                elif msg_type == "guardrail":
+                    from app.services.guardrails import sanitize_event
+
+                    content = data.get("content")
+                    if isinstance(content, dict):
+                        yield {"type": "guardrail", "content": sanitize_event(content)}
                 else:
                     yield {"type": "structured", "content": data}
 

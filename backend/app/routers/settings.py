@@ -596,6 +596,100 @@ def update_enabled_models(
     return EnabledModelsResponse(model_ids=request.model_ids, all_models=get_merged_models(DEFAULT_REGION))
 
 
+# ---------------------------------------------------------------------------
+# Bedrock Guardrails (issue #17)
+# ---------------------------------------------------------------------------
+class GuardrailSummaryResponse(BaseModel):
+    """One Bedrock guardrail with its available versions."""
+    guardrail_id: str
+    guardrail_arn: str
+    name: str
+    description: str
+    status: str
+    versions: list[str]
+
+
+class GuardrailDefaultResponse(BaseModel):
+    """Effective global default guardrail and where it came from."""
+    enabled: bool
+    locked: bool
+    config: dict[str, Any] | None
+    source: str
+
+
+def _guardrail_default_response(db: Session) -> GuardrailDefaultResponse:
+    from app.services.guardrails import get_guardrail_default
+
+    default, source = get_guardrail_default(db)
+    return GuardrailDefaultResponse(
+        enabled=default.enabled,
+        locked=default.locked,
+        config=default.config.model_dump() if default.config else None,
+        source=source,
+    )
+
+
+@router.get("/guardrails", response_model=list[GuardrailSummaryResponse])
+def list_bedrock_guardrails(
+    user: UserInfo = Depends(require_scopes("agent:read")),
+) -> list[GuardrailSummaryResponse]:
+    """List the account's Bedrock guardrails (and versions) for guardrail pickers."""
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    from app.routers.agents import DEFAULT_REGION
+    from app.services.guardrails import list_guardrails
+
+    try:
+        return [GuardrailSummaryResponse(**g) for g in list_guardrails(DEFAULT_REGION)]
+    except (ClientError, BotoCoreError) as exc:
+        logger.warning("ListGuardrails failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Unable to list Bedrock guardrails: {exc}",
+        ) from exc
+
+
+@router.get("/guardrail-default", response_model=GuardrailDefaultResponse)
+def get_guardrail_default_config(
+    user: UserInfo = Depends(require_scopes("agent:read")),
+    db: Session = Depends(get_db),
+) -> GuardrailDefaultResponse:
+    """Get the global default guardrail (Settings value, else LOOM_GUARDRAIL_* env fallback)."""
+    return _guardrail_default_response(db)
+
+
+class GuardrailDefaultRequest(BaseModel):
+    """Request to update the global default guardrail."""
+    enabled: bool = Field(..., description="Whether new agents inherit a guardrail by default")
+    locked: bool = Field(False, description="Prevent agents from opting out (or switching to monitor)")
+    config: dict[str, Any] | None = Field(None, description="Guardrail configuration (required when enabled)")
+
+
+@router.put("/guardrail-default", response_model=GuardrailDefaultResponse)
+def update_guardrail_default_config(
+    request: GuardrailDefaultRequest,
+    user: UserInfo = Depends(require_scopes("admin:write")),
+    db: Session = Depends(get_db),
+) -> GuardrailDefaultResponse:
+    """Update the global default guardrail.
+
+    Takes effect for agents at their next deploy — inheriting agents deployed
+    with an older default are flagged with `guardrail_drift`.
+    """
+    from app.services.guardrails import GuardrailConfig, GuardrailDefault, GuardrailError, save_guardrail_default
+
+    try:
+        config = GuardrailConfig.model_validate(request.config) if request.config else None
+        save_guardrail_default(db, GuardrailDefault(enabled=request.enabled, locked=request.locked, config=config))
+    except (GuardrailError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    logger.info(
+        "Guardrail default updated by %s: enabled=%s locked=%s guardrail=%s",
+        user.username, request.enabled, request.locked, config.guardrail_id if config else None,
+    )
+    return _guardrail_default_response(db)
+
+
 @router.post("/litellm-proxy/refresh", response_model=EnabledModelsResponse)
 def refresh_litellm_models(
     user: UserInfo = Depends(require_scopes("admin:write")),

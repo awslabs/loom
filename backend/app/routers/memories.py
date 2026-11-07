@@ -269,7 +269,7 @@ def create_memory(
 
     # Resolve tags from tag policies + user-supplied profile tags
     resolved_tags: dict[str, str] = {}
-    user_tags = require_group_tag(request.tags, "memory")
+    user_tags = require_group_tag(request.tags, "memory", user=user)
     policies = db.query(TagPolicy).all()
     for p in policies:
         if p.key in user_tags:

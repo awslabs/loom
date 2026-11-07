@@ -525,6 +525,82 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     return result
 
 
+# Config keys Loom itself writes and later trusts: secret ARNs and the LiteLLM
+# key alias drive force-deletes/revocations on agent delete, and
+# AGENT_CONFIG_JSON carries the credential-provider names deleted on
+# redeploy/delete plus the baked guardrail. None of them may be set through
+# the generic config API, or an agent:write holder could point their own
+# agent's cleanup at another group's resources.
+_LOOM_MANAGED_CONFIG_KEYS = frozenset({
+    "AGENT_CONFIG_JSON",
+    "COGNITO_CLIENT_ID",
+    "COGNITO_CLIENT_SECRET_ARN",
+    "LLM_PROVIDER_API_KEY_SECRET_ARN",
+    "LITELLM_VIRTUAL_KEY_ALIAS",
+})
+
+
+def _is_loom_managed_config_key(key: str) -> bool:
+    """True for a config key the generic config API must not write."""
+    upper = key.strip().upper()
+    return upper in _LOOM_MANAGED_CONFIG_KEYS or upper.endswith("_SECRET_ARN")
+
+
+def _owns_agent_secret(agent: Agent, secret_ref: str | None) -> bool:
+    """True when a secret name/ARN is in this agent's own Secrets Manager namespace.
+
+    Defense in depth for the force-delete on agent deletion: whatever the
+    stored config says, only loom/agents/{agent_id}/... is ever deleted.
+    """
+    if not secret_ref:
+        return False
+    name = secret_ref.split(":secret:", 1)[1] if ":secret:" in secret_ref else secret_ref
+    return name.startswith(f"loom/agents/{agent.id}/")
+
+
+def _owns_credential_provider(agent: Agent, cp_name: str | None) -> bool:
+    """True when a credential provider name is one Loom generated for this agent.
+
+    Names are ``loom-<agent name>-<agent id>-{mcp,a2a}-<target>`` or
+    ``...-litellm-key`` (see credential_provider_name), so the id makes them
+    unforgeable for another agent. Providers named under the pre-id scheme are
+    no longer cleaned up automatically; that leaks a provider rather than
+    deleting someone else's.
+    """
+    if not cp_name:
+        return False
+    prefix = credential_provider_name(agent.id, agent.name, "")
+    if not cp_name.startswith(prefix):
+        return False
+    rest = cp_name[len(prefix):]
+    return rest == "litellm-key" or rest.startswith(("mcp-", "a2a-"))
+
+
+def _owned_credential_providers(agent: Agent, cp_names: Any) -> list[str]:
+    """Filter cleanup targets to this agent's own providers, logging any refused."""
+    owned: list[str] = []
+    for cp_name in cp_names:
+        if _owns_credential_provider(agent, cp_name):
+            owned.append(cp_name)
+        else:
+            # The name came from stored config, so it isn't logged (it may be
+            # attacker-influenced); the agent id is enough to investigate.
+            logger.warning("Skipping cleanup of credential provider: not owned by agent %s", agent.id)
+    return owned
+
+
+def _redeploy_tags(tags: dict[str, str] | None, user: UserInfo) -> dict[str, str] | None:
+    """Tags for a redeploy: unchanged when omitted, otherwise group-checked like a create.
+
+    Omitting tags keeps the agent's current ones (the caller already passed
+    the group check on the existing agent). Supplying them must not move the
+    agent into a group the caller doesn't belong to.
+    """
+    if not tags:
+        return tags
+    return require_group_tag(tags, "agent", user=user)
+
+
 def _resolve_guardrail_or_422(
     request: AgentCreateRequest, source: str, provider: str | None, db: Session,
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
@@ -1191,7 +1267,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
 
     # Resolve tags from tag policies + user-supplied profile values
     # loom:group is what authorization is keyed on, so require it at creation.
-    resolved_tags, tag_policy_dicts = _resolve_tags(db, require_group_tag(request.tags, "agent"))
+    resolved_tags, tag_policy_dicts = _resolve_tags(db, require_group_tag(request.tags, "agent", user=user))
 
     # Model config (system prompt is built after the agent record exists, so
     # any attached skills' content can be folded in via their Integration rows)
@@ -2051,7 +2127,7 @@ def _update_deploy_agent_background(
                 entry["supports_elicitation"] = "true"
             mcp_server_configs.append(entry)
 
-        removed_cps = old_cp_names - new_cp_names
+        removed_cps = _owned_credential_providers(agent, sorted(old_cp_names - new_cp_names))
         for cp_name in removed_cps:
             try:
                 delete_credential_provider(cp_name, region)
@@ -2352,7 +2428,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
     region = os.getenv("AWS_REGION", DEFAULT_REGION)
     account_id = os.getenv("AWS_ACCOUNT_ID", "")
 
-    resolved_tags, _ = _resolve_tags(db, require_group_tag(request.tags, "agent"))
+    resolved_tags, _ = _resolve_tags(db, require_group_tag(request.tags, "agent", user=user))
 
     # Validate skill record IDs — must resolve to an APPROVED SKILL record
     _validate_skill_ids(request.skill_ids)
@@ -3039,7 +3115,7 @@ def _update_harness_background(
         harness_tools.extend(extra_harness_tools)
 
         # Delete old credential providers no longer needed
-        removed_cps = old_cp_names - new_cp_names
+        removed_cps = _owned_credential_providers(agent, sorted(old_cp_names - new_cp_names))
         for cp_name in removed_cps:
             try:
                 from app.services.deployment import delete_oauth2_credential_provider
@@ -3571,10 +3647,18 @@ def delete_agent(
             litellm_cp_name = agent_config.get("litellm_api_key_credential_provider_name") or None
         except (json.JSONDecodeError, TypeError):
             pass
+    # Only ever clean up this agent's own resources, whatever the stored
+    # config names (see _owns_credential_provider / _owns_agent_secret).
+    cp_names = _owned_credential_providers(agent, cp_names)
+    if litellm_cp_name and not _owned_credential_providers(agent, [litellm_cp_name]):
+        litellm_cp_name = None
 
     # Virtual key lives in the external LiteLLM proxy, not AWS — revoke it
-    # regardless of cleanup_aws.
+    # regardless of cleanup_aws. Only this agent's own alias.
     litellm_virtual_key_alias = config_map.get("LITELLM_VIRTUAL_KEY_ALIAS")
+    if litellm_virtual_key_alias and litellm_virtual_key_alias != f"loom-agent-{agent.id}":
+        logger.warning("Skipping revoke of LiteLLM key alias: not owned by agent %s", agent.id)
+        litellm_virtual_key_alias = None
     if litellm_virtual_key_alias:
         from app.services.litellm import revoke_virtual_key
         revoke_virtual_key(litellm_virtual_key_alias, db)
@@ -3583,8 +3667,10 @@ def delete_agent(
     if not cleanup_aws or not agent.runtime_id:
         # Clean up Cognito client secret from Secrets Manager
         secret_arn = config_map.get("COGNITO_CLIENT_SECRET_ARN")
-        if secret_arn:
+        if _owns_agent_secret(agent, secret_arn):
             delete_secret(secret_arn, agent.region)
+        elif secret_arn:
+            logger.warning("Skipping delete of secret not owned by agent %s", agent.id)
 
         result = _agent_response(agent, db)
         # Delete invocations before sessions to avoid FK constraint violations
@@ -3619,6 +3705,9 @@ def delete_agent(
     _endpoint_name = agent.endpoint_name
     _region = agent.region
     _secret_arn = config_map.get("COGNITO_CLIENT_SECRET_ARN")
+    if _secret_arn and not _owns_agent_secret(agent, _secret_arn):
+        logger.warning("Skipping delete of secret not owned by agent %s", agent.id)
+        _secret_arn = None
     _ci_id = agent.code_interpreter_id
     _ci_region = None
     if _ci_id:
@@ -4140,7 +4229,7 @@ def redeploy_deploy_agent(
 
     # A resource with no loom:group is unreachable for anyone but a super-admin
     # (check_resource_group_access fails closed), so refuse to create one.
-    resolved_tags, tag_policy_dicts = _resolve_tags(db, request.tags)
+    resolved_tags, tag_policy_dicts = _resolve_tags(db, _redeploy_tags(request.tags, user))
     _validate_skill_ids(request.skill_ids)
     _sync_attached_skills(agent.id, request.skill_ids, db)
     skill_prompt_text = _get_attached_skill_prompt_text(agent.id, db)
@@ -4235,7 +4324,7 @@ def redeploy_harness_agent(
         db.commit()
 
     # Update agent fields
-    resolved_tags, _ = _resolve_tags(db, request.tags)
+    resolved_tags, _ = _resolve_tags(db, _redeploy_tags(request.tags, user))
     _validate_skill_ids(request.skill_ids)
     _sync_attached_skills(agent.id, request.skill_ids, db)
     skill_prompt_text = _get_attached_skill_prompt_text(agent.id, db)
@@ -4846,8 +4935,22 @@ def update_agent_config(
     user: UserInfo = Depends(require_scopes("agent:write")),
     db: Session = Depends(get_db),
 ) -> list[ConfigEntryResponse]:
-    """Update configuration entries for an agent. Adds new keys and updates existing ones."""
+    """Update configuration entries for an agent. Adds new keys and updates existing ones.
+
+    Keys Loom manages itself (secret ARNs, AGENT_CONFIG_JSON, the LiteLLM key
+    alias) and entries already marked secret are refused with 422.
+    """
     get_agent_or_404(agent_id, db, user)
+
+    secret_keys = {
+        e.key for e in db.query(ConfigEntry).filter(ConfigEntry.agent_id == agent_id, ConfigEntry.is_secret == True)  # noqa: E712
+    }
+    refused = sorted(k for k in request.config if _is_loom_managed_config_key(k) or k in secret_keys)
+    if refused:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"These config keys are managed by Loom and can't be set directly: {', '.join(refused)}",
+        )
 
     for key, value in request.config.items():
         existing = db.query(ConfigEntry).filter(

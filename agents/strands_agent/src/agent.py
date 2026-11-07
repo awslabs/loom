@@ -49,8 +49,7 @@ def _build_model(config: AgentConfig) -> Model:
             "max_tokens": config.max_tokens,
             "streaming": True,
         }
-        if enforce_applies(guardrail, provider):
-            assert guardrail is not None
+        if guardrail is not None and enforce_applies(guardrail, provider):
             model_kwargs.update(
                 guardrail_id=guardrail.identifier,
                 guardrail_version=guardrail.guardrail_version,

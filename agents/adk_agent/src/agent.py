@@ -55,8 +55,7 @@ def build_model(config: AgentConfig) -> str | BaseLlm:
 
     if provider == "bedrock":
         region = os.environ.get("AWS_REGION", "us-east-1")
-        if enforce_applies(guardrail, provider):
-            assert guardrail is not None
+        if guardrail is not None and enforce_applies(guardrail, provider):
             # LiteLLM's Bedrock Converse transformation forwards
             # ``guardrailConfig`` as the Converse request's guardrailConfig
             # (and wraps the latest user turn in guardContent). The custom

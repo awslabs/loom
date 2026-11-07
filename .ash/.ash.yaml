@@ -41,6 +41,12 @@ global_settings:
     - path: agents/strands_agent/tests/test_config.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using placeholder secret-like strings to exercise config validation logic.
+    - path: agents/strands_agent/tests/test_guardrails.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture passes a placeholder api_key_secret_arn ("arn:secret") to build non-Bedrock agent configs; not a real secret.
+    - path: agents/adk_agent/tests/test_guardrails.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixture passes a placeholder api_key_secret_arn ("arn:secret") to build non-Bedrock agent configs; not a real secret.
     - path: agents/strands_agent/tests/test_mcp_client.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using placeholder secret-like strings to exercise MCP client auth logic.

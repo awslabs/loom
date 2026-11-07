@@ -31,8 +31,8 @@ PII_EMAIL = "jane.doe@example.com"
 
 def _guardrail(mode: str = "enforce", **kwargs) -> GuardrailConfig:
     base = dict(
-        guardrail_id="abc123def456",
-        guardrail_arn="arn:aws:bedrock:us-east-1:111122223333:guardrail/abc123def456",
+        guardrail_id="testguardrail1",
+        guardrail_arn="arn:aws:bedrock:us-east-1:111122223333:guardrail/testguardrail1",
         guardrail_version="1",
         mode=mode,
         allowed=[GuardrailRef(guardrail_id="zzz999", guardrail_version="DRAFT", guardrail_arn="")],
@@ -51,7 +51,7 @@ def _config(guardrail: GuardrailConfig | None = None, provider: str = "bedrock")
     )
 
 
-_BLOCKED_INPUT = {"abc123def456": {
+_BLOCKED_INPUT = {"testguardrail1": {
     "contentPolicy": {"filters": [{"type": "HATE", "confidence": "HIGH", "action": "BLOCKED", "detected": True}]},
     "sensitiveInformationPolicy": {"piiEntities": [{"type": "EMAIL", "match": PII_EMAIL, "action": "ANONYMIZED", "detected": True}]},
 }}
@@ -71,8 +71,8 @@ class TestGuardrailConfigParsing(unittest.TestCase):
 
     def test_full_block(self) -> None:
         cfg = self._parse({
-            "guardrail_id": "abc123def456",
-            "guardrail_arn": "arn:aws:bedrock:us-east-1:111122223333:guardrail/abc123def456",
+            "guardrail_id": "testguardrail1",
+            "guardrail_arn": "arn:aws:bedrock:us-east-1:111122223333:guardrail/testguardrail1",
             "guardrail_version": "1",
             "mode": "monitor",
             "stream_processing_mode": "async",
@@ -80,7 +80,7 @@ class TestGuardrailConfigParsing(unittest.TestCase):
             "source": "default",
             "allowed": [{"guardrail_id": "zzz999", "guardrail_arn": "", "guardrail_version": "DRAFT"}],
         }).guardrail
-        self.assertEqual(cfg.guardrail_id, "abc123def456")
+        self.assertEqual(cfg.guardrail_id, "testguardrail1")
         self.assertEqual(cfg.guardrail_version, "1")
         self.assertEqual(cfg.mode, "monitor")
         self.assertEqual(cfg.stream_processing_mode, "async")
@@ -112,7 +112,7 @@ class TestResolveInvocationGuardrail(unittest.TestCase):
 
     def test_primary_accepted(self) -> None:
         primary = _guardrail()
-        guardrail, ok = resolve_invocation_guardrail(primary, {"guardrail_id": "abc123def456", "guardrail_version": "1"})
+        guardrail, ok = resolve_invocation_guardrail(primary, {"guardrail_id": "testguardrail1", "guardrail_version": "1"})
         self.assertTrue(ok)
         self.assertIs(guardrail, primary)
 
@@ -131,16 +131,16 @@ class TestResolveInvocationGuardrail(unittest.TestCase):
         for requested in (
             {"guardrail_id": "zzz999", "guardrail_version": "1"},  # wrong version
             {"guardrail_id": "nope", "guardrail_version": "1"},
-            {"guardrail_id": "abc123def456"},
+            {"guardrail_id": "testguardrail1"},
             {"guardrail_version": "1"},
             {},
-            "abc123def456",
+            "testguardrail1",
             {"guardrail_id": "", "guardrail_version": "1"},
         ):
             self.assertEqual(resolve_invocation_guardrail(primary, requested), (None, False), requested)
         # Any request on an agent with no guardrail is rejected.
         self.assertEqual(
-            resolve_invocation_guardrail(None, {"guardrail_id": "abc123def456", "guardrail_version": "1"}),
+            resolve_invocation_guardrail(None, {"guardrail_id": "testguardrail1", "guardrail_version": "1"}),
             (None, False),
         )
 
@@ -275,7 +275,7 @@ class TestBuildModelGuardrail(unittest.TestCase):
     def test_enforce_async_stream_mode(self, mock_lite_llm: MagicMock) -> None:
         build_model(_config(_guardrail(guardrail_arn="", stream_processing_mode="async")))
         cfg = mock_lite_llm.call_args.kwargs["guardrailConfig"]
-        self.assertEqual(cfg["guardrailIdentifier"], "abc123def456")
+        self.assertEqual(cfg["guardrailIdentifier"], "testguardrail1")
         self.assertEqual(cfg["streamProcessingMode"], "async")
 
     @patch("src.agent.LiteLlm")
@@ -328,8 +328,8 @@ def _bedrock_stream(blocked: bool = True, source: str = "INPUT") -> list:
                   "sensitiveInformationPolicy": {"piiEntities": [{"type": "EMAIL", "match": PII_EMAIL, "action": "ANONYMIZED", "detected": True}]}}
     trace = {}
     if blocked:
-        trace = {"inputAssessment": {"abc123def456": assessment}} if source == "INPUT" \
-            else {"inputAssessment": {}, "outputAssessments": {"abc123def456": [assessment]}}
+        trace = {"inputAssessment": {"testguardrail1": assessment}} if source == "INPUT" \
+            else {"inputAssessment": {}, "outputAssessments": {"testguardrail1": [assessment]}}
     raw = [
         {"start": {}, "contentBlockIndex": 0},
         {"delta": {"text": "Sorry, blocked." if blocked else "Hello"}, "contentBlockIndex": 0},
@@ -466,7 +466,7 @@ class TestRunTurnGuardrails(unittest.IsolatedAsyncioTestCase):
     async def test_override_on_agent_without_guardrail_rejected(self) -> None:
         events, _, _ = await self._collect(
             _config(None), self._model_call_then([_text_event("x")], None),
-            payload_guardrail={"guardrail_id": "abc123def456", "guardrail_version": "1"})
+            payload_guardrail={"guardrail_id": "testguardrail1", "guardrail_version": "1"})
         self.assertEqual(events, [GUARDRAIL_NOT_ALLOWED_MESSAGE])
 
     async def test_accepted_override_builds_guardrail_model(self) -> None:
@@ -506,7 +506,7 @@ class TestRunTurnGuardrails(unittest.IsolatedAsyncioTestCase):
         g_events = [e["guardrail"] for e in events if isinstance(e, dict) and "guardrail" in e]
         self.assertEqual(g_events, [{
             "mode": "enforce", "source": "UNKNOWN", "action": "intervened",
-            "guardrail_id": "abc123def456", "guardrail_version": "1", "policies": [],
+            "guardrail_id": "testguardrail1", "guardrail_version": "1", "policies": [],
         }])
 
     async def test_safety_without_guardrail_is_still_an_error(self) -> None:
@@ -606,7 +606,7 @@ class TestWebSocketGuardrails(unittest.IsolatedAsyncioTestCase):
 
     async def test_guardrail_event_shape(self) -> None:
         body = {"mode": "enforce", "source": "INPUT", "action": "intervened",
-                "guardrail_id": "abc123def456", "guardrail_version": "1", "policies": []}
+                "guardrail_id": "testguardrail1", "guardrail_version": "1", "policies": []}
         sent = await self._ws({"type": "prompt", "prompt": "hi"}, ["Sorry.", {"guardrail": body}])
         self.assertIn({"type": "guardrail", "content": body}, sent)
         self.assertIn({"type": "result", "content": "Sorry."}, sent)

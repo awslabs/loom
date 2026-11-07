@@ -102,9 +102,8 @@ def guardrail_cache_key(guardrail: Optional[GuardrailConfig], provider: str) -> 
     Only enforce mode changes the model object; monitor mode (or no
     guardrail) shares the plain model.
     """
-    if not enforce_applies(guardrail, provider):
+    if guardrail is None or not enforce_applies(guardrail, provider):
         return None
-    assert guardrail is not None
     return (
         guardrail.identifier,
         guardrail.guardrail_version,

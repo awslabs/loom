@@ -41,6 +41,9 @@ global_settings:
     - path: agents/strands_agent/tests/test_config.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture using placeholder secret-like strings to exercise config validation logic.
+    - path: backend/tests/test_cross_group_writes.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Test fixtures use placeholder Secrets Manager ARNs/names (e.g. arn:secret:loom/authorizers/<name>/client-secret) to prove cross-group secret paths are refused; no real secret values.
     - path: agents/strands_agent/tests/test_guardrails.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Test fixture passes a placeholder api_key_secret_arn ("arn:secret") to build non-Bedrock agent configs; not a real secret.

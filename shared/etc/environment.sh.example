@@ -88,6 +88,29 @@ P_AGENT_SG_HTTP_SOURCE_SG=
 P_AGENT_SG_MCP_SOURCE_SG=
 P_AGENT_SG_A2A_SOURCE_SG=
 
+# Bedrock guardrail stack configuration (issue #17)
+# Guardrail policies live here, outside Loom; Loom only references the
+# guardrail by ID. Deploy one stack per guardrail (override P_GUARDRAIL_STACK
+# and P_GUARDRAIL_NAME for additional ones — make outputs only captures the
+# default loom-guardrail stack). To publish a new numbered version after
+# changing the policy, change P_GUARDRAIL_VERSION_DESCRIPTION in the same
+# deploy; older versions are retained.
+P_GUARDRAIL_STACK=loom-guardrail
+P_GUARDRAIL_TEMPLATE=iac/guardrail.yaml
+P_GUARDRAIL_OUTPUT=iac/guardrail_output.yaml
+P_GUARDRAIL_NAME=loom-default
+# true = every policy detects only (no block/mask) — e.g. for observing
+# managed (harness) agents, which have no Loom monitor mode
+P_GUARDRAIL_DETECT_ONLY=false
+P_GUARDRAIL_CONTENT_FILTER_STRENGTH=HIGH
+P_GUARDRAIL_PROMPT_ATTACK_STRENGTH=HIGH
+# ANONYMIZE (mask as {EMAIL}) or BLOCK for email/phone/address/bank account
+P_GUARDRAIL_PII_MASK_ACTION=ANONYMIZE
+P_GUARDRAIL_PROFANITY_FILTER=true
+P_GUARDRAIL_SAMPLE_DENIED_TOPIC=false
+P_GUARDRAIL_KMS_KEY_ARN=
+P_GUARDRAIL_VERSION_DESCRIPTION=initial
+
 # Loom configurations
 P_LOOM_ARTIFACT_BUCKET=$(LOOM_ARTIFACT_BUCKET)
 

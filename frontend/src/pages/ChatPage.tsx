@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { navigateToExternal } from "@/lib/navigation";
-import { Send, Plus, Brain, LogOut, Bot, User, X, Loader2, Sun, Moon, RefreshCw, ChevronDown, Wrench, Plug, KeyRound, Unplug, Link2, UserCheck, AlertTriangle } from "lucide-react";
+import { Send, Plus, Brain, LogOut, Bot, User, X, Loader2, Sun, Moon, RefreshCw, ChevronDown, Wrench, Plug, KeyRound, Unplug, Link2, UserCheck, AlertTriangle, Shield } from "lucide-react";
 import { ApprovalRequestBubble } from "@/components/ApprovalDialog";
 import { ElicitationRequestBubble } from "@/components/ElicitationDialog";
 import { Button } from "@/components/ui/button";
@@ -20,7 +20,9 @@ import { listConnectors, setUserApiKey, deleteUserApiKey } from "@/api/mcp";
 import { listAuthorizerConfigs, checkAuthorizerLinkStatus, getAuthorizerLinkAuthorizeUrl, submitAuthorizerLinkCallback, deleteAuthorizerLink } from "@/api/security";
 import { Input } from "@/components/ui/input";
 import { groupModels } from "@/lib/models";
-import type { AgentResponse, SessionResponse, MemoryResponse, MemoryRecordItem, ModelOption, ConnectorInfo } from "@/api/types";
+import { GuardrailNotice } from "@/components/GuardrailControls";
+import { guardrailRefKey, guardrailRefLabel, guardrailSummariesFromDetails, invokableGuardrails } from "@/lib/guardrails";
+import type { GuardrailRef, AgentResponse, SessionResponse, MemoryResponse, MemoryRecordItem, ModelOption, ConnectorInfo } from "@/api/types";
 
 interface ChatMessage {
   id: string;
@@ -467,6 +469,30 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
     setSelectedModelId(null);
   }, [selectedAgentId]);
 
+  // Runtime guardrail selection — only offered when the agent has `allowed` alternates.
+  const guardrailOptions = useMemo(() => invokableGuardrails(selectedAgent?.guardrail), [selectedAgent]);
+  const [selectedGuardrailKey, setSelectedGuardrailKey] = useState<string | null>(null);
+  const [showGuardrailPicker, setShowGuardrailPicker] = useState(false);
+  const guardrailPickerRef = useRef<HTMLDivElement>(null);
+  const guardrailCatalog = useMemo(() => guardrailSummariesFromDetails(selectedAgent?.guardrail_details), [selectedAgent]);
+  useEffect(() => {
+    setSelectedGuardrailKey(null);
+    setShowGuardrailPicker(false);
+  }, [selectedAgentId]);
+  useEffect(() => {
+    if (!showGuardrailPicker) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (guardrailPickerRef.current && !guardrailPickerRef.current.contains(e.target as Node)) {
+        setShowGuardrailPicker(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showGuardrailPicker]);
+  const runtimeGuardrail: GuardrailRef | undefined = selectedGuardrailKey
+    ? guardrailOptions.slice(1).find((g) => guardrailRefKey(g) === selectedGuardrailKey)
+    : undefined;
+
   // When a session starts, immediately refresh the sessions list so the tab appears in the sidebar
   const lastSessionStartRef = useRef<typeof sessionStart>(null);
   useEffect(() => {
@@ -516,7 +542,7 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
         const capturedPending = pendingPromptRef.current;
         const capturedToolNames = toolNamesRef.current.length > 0 ? [...toolNamesRef.current] : undefined;
         const capturedHitlSegments = segmentsRef.current.filter(
-          s => s.type === "tool_use" || s.type === "approval_request" || s.type === "approval_resolved" || s.type === "elicitation_request"
+          s => s.type === "tool_use" || s.type === "approval_request" || s.type === "approval_resolved" || s.type === "elicitation_request" || s.type === "guardrail"
         );
         getSession(selectedAgentId, sessionId)
           .then((session) => {
@@ -591,9 +617,9 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
         return c && (!deployNames.includes(c.name) || c.auth_type === "api_key");
       });
       const activeConnectorIds = invokeOnlyIds.length > 0 ? invokeOnlyIds : undefined;
-      invoke(prompt, "DEFAULT", currentSessionId ?? undefined, undefined, undefined, rtModel, activeConnectorIds, linkStatus === "linked" ? true : undefined);
+      invoke(prompt, "DEFAULT", currentSessionId ?? undefined, undefined, undefined, rtModel, activeConnectorIds, linkStatus === "linked" ? true : undefined, undefined, runtimeGuardrail);
     }
-  }, [isStreaming, queuedPrompt, error, selectedModelId, selectedAgentId, agents, enabledConnectors, connectors, linkStatus]);
+  }, [isStreaming, queuedPrompt, error, selectedModelId, selectedAgentId, agents, enabledConnectors, connectors, linkStatus, runtimeGuardrail]);
 
   // Scroll to bottom on new messages or streaming updates
   useEffect(() => {
@@ -620,8 +646,8 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
       return c && (!deployNames.includes(c.name) || c.auth_type === "api_key");
     });
     const activeConnectorIds = invokeOnlyIds.length > 0 ? invokeOnlyIds : undefined;
-    await invoke(prompt, "DEFAULT", currentSessionId ?? undefined, undefined, undefined, runtimeModelId, activeConnectorIds, linkStatus === "linked" ? true : undefined);
-  }, [input, isStreaming, selectedAgentId, currentSessionId, invoke, agents, user, browserSessionId, selectedModelId, selectedAgent, enabledConnectors, connectors, linkStatus]);
+    await invoke(prompt, "DEFAULT", currentSessionId ?? undefined, undefined, undefined, runtimeModelId, activeConnectorIds, linkStatus === "linked" ? true : undefined, undefined, runtimeGuardrail);
+  }, [input, isStreaming, selectedAgentId, currentSessionId, invoke, agents, user, browserSessionId, selectedModelId, selectedAgent, enabledConnectors, connectors, linkStatus, runtimeGuardrail]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1322,6 +1348,46 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
                       {resolvedAuthorizerId && linkStatus === "linking" && (
                         <span className="text-[10px] text-muted-foreground">Linking...</span>
                       )}
+                      {guardrailOptions.length > 1 && (
+                        <div className="relative" ref={guardrailPickerRef}>
+                          <button
+                            onClick={() => setShowGuardrailPicker((v) => !v)}
+                            className="flex items-center gap-1 text-xs text-muted-foreground rounded-md border px-2 py-1 hover:text-foreground hover:border-foreground/30 cursor-pointer"
+                            title="Guardrail used for this message"
+                          >
+                            <Shield className="h-3 w-3" />
+                            <span className="max-w-[140px] truncate">
+                              {guardrailRefLabel(runtimeGuardrail ?? guardrailOptions[0]!, guardrailCatalog)}
+                            </span>
+                            <ChevronDown className="h-3 w-3" />
+                          </button>
+                          {showGuardrailPicker && (
+                            <div className="absolute bottom-7 right-0 z-50 w-60 rounded-lg border bg-background shadow-md py-1 max-h-64 overflow-y-auto">
+                              <div className="px-3 py-1 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Guardrail</div>
+                              {guardrailOptions.map((g, i) => {
+                                const key = guardrailRefKey(g);
+                                const isDefault = i === 0;
+                                const isSelected = selectedGuardrailKey ? key === selectedGuardrailKey : isDefault;
+                                return (
+                                  <button
+                                    key={key}
+                                    onClick={() => {
+                                      setSelectedGuardrailKey(isDefault ? null : key);
+                                      setShowGuardrailPicker(false);
+                                    }}
+                                    className={`w-full text-left px-3 py-1.5 text-xs transition-colors hover:bg-accent ${
+                                      isSelected ? "font-semibold text-foreground" : "text-muted-foreground"
+                                    }`}
+                                  >
+                                    {guardrailRefLabel(g, guardrailCatalog)}
+                                    {isDefault && <span className="text-[10px] opacity-60 ml-1">(default)</span>}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
                       {availableModels.length > 0 && (
                         <div className="relative" ref={modelPickerRef}>
                           <button
@@ -1501,6 +1567,8 @@ function StreamingBubble({
               // Skip render — approval status is already shown inline in the ApprovalRequestBubble
             } else if (seg.type === "elicitation_request") {
               blocks.push(<ElicitationRequestBubble key={`elicit-${i}`} data={seg.data} onRespond={onElicitationRespond} />);
+            } else if (seg.type === "guardrail") {
+              blocks.push(<GuardrailNotice key={`guardrail-${i}`} event={seg.data} />);
             } else {
               blocks.push(
                 <ReactMarkdown
@@ -1594,6 +1662,7 @@ function MessageBubble({
                 );
                 if (seg.type === "approval_request") return <ApprovalRequestBubble key={`h-approval-${i}`} data={seg.data} resolved />;
                 if (seg.type === "elicitation_request") return <ElicitationRequestBubble key={`h-elicit-${i}`} data={seg.data} resolved resolvedSummary={seg.resolvedSummary} />;
+                if (seg.type === "guardrail") return <GuardrailNotice key={`h-guardrail-${i}`} event={seg.data} />;
                 return null;
               })}
             </div>

@@ -228,6 +228,10 @@ ecs.deploy:
 			pCognitoUserPoolId=$(O_COGNITO_USER_POOL_ID) \
 			pCognitoRegion=$(P_LOOM_COGNITO_REGION) \
 			$(if $(P_LOOM_ALLOWED_ORIGINS),pAllowedOrigins=$(P_LOOM_ALLOWED_ORIGINS)) \
+			$(if $(P_GUARDRAIL_ID),pGuardrailId=$(P_GUARDRAIL_ID)) \
+			$(if $(P_GUARDRAIL_VERSION),pGuardrailVersion=$(P_GUARDRAIL_VERSION)) \
+			$(if $(P_GUARDRAIL_MODE),pGuardrailMode=$(P_GUARDRAIL_MODE)) \
+			$(if $(P_GUARDRAIL_LOCKED),pGuardrailLocked=$(P_GUARDRAIL_LOCKED)) \
 			$(if $(P_LITELLM_PROXY_BASE_URL),pLitellmProxyBaseUrl=$(P_LITELLM_PROXY_BASE_URL)) \
 			$(if $(P_LITELLM_DISCOVERY_BASE_URL),pLitellmDiscoveryBaseUrl=$(P_LITELLM_DISCOVERY_BASE_URL)) \
 			$(if $(P_LITELLM_PROXY_API_KEY_SECRET_ARN),pLitellmProxyApiKeySecretArn=$(P_LITELLM_PROXY_API_KEY_SECRET_ARN)) \

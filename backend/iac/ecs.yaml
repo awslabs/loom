@@ -59,6 +59,24 @@ Parameters:
     Type: String
     Description: Agent Registry ID (from agent-registry-control list-registries)
     Default: ""
+  pGuardrailId:
+    Type: String
+    Description: Default Bedrock guardrail ID for agents (seeds Settings -> Guardrails until a value is saved there). Leave empty to disable.
+    Default: ""
+  pGuardrailVersion:
+    Type: String
+    Description: Version of pGuardrailId (a number or DRAFT)
+    Default: "DRAFT"
+  pGuardrailMode:
+    Type: String
+    Description: Default guardrail mode — enforce (inline) or monitor (log-only ApplyGuardrail)
+    Default: "enforce"
+    AllowedValues: ["enforce", "monitor"]
+  pGuardrailLocked:
+    Type: String
+    Description: When true, agents cannot opt out of the default guardrail
+    Default: "false"
+    AllowedValues: ["true", "false"]
   pLitellmProxyBaseUrl:
     Type: String
     Description: Agent Base URL of the deployed LiteLLM proxy — what deployed agents/harnesses call at runtime (leave empty to disable). Also used by the backend for its own model discovery when pLitellmDiscoveryBaseUrl is empty.
@@ -279,7 +297,14 @@ Resources:
                 Action:
                   - bedrock:ListFoundationModels
                   - bedrock:ListInferenceProfiles
+                  # Guardrail picker (services/guardrails.list_guardrails)
+                  - bedrock:ListGuardrails
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - bedrock:GetGuardrail
+                Resource:
+                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:guardrail/*"
         - PolicyName: BedrockAgentCorePolicy
           PolicyDocument:
             Version: "2012-10-17"
@@ -582,6 +607,14 @@ Resources:
               Value: !Ref pAllowedOrigins
             - Name: LOOM_REGISTRY_ID
               Value: !Ref pRegistryId
+            - Name: LOOM_GUARDRAIL_ID
+              Value: !Ref pGuardrailId
+            - Name: LOOM_GUARDRAIL_VERSION
+              Value: !Ref pGuardrailVersion
+            - Name: LOOM_GUARDRAIL_MODE
+              Value: !Ref pGuardrailMode
+            - Name: LOOM_GUARDRAIL_LOCKED
+              Value: !Ref pGuardrailLocked
             - Name: LOOM_LITELLM_PROXY_BASE_URL
               Value: !Ref pLitellmProxyBaseUrl
             - Name: LOOM_LITELLM_DISCOVERY_BASE_URL

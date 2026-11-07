@@ -49,6 +49,176 @@ export interface AgentResponse {
   code_interpreter_status?: string | null;
   vpc_config_id: number | null;
   status_reason?: string | null;
+  /** Bedrock Guardrails (issue #17). `null` = agent predates the feature, or a registered agent. */
+  guardrail_selection: GuardrailSelection | null;
+  /** What was baked into the agent at its last deploy (null = no guardrail). */
+  guardrail: GuardrailConfig | null;
+  /** True when selection=default and the current global default differs from `guardrail`. */
+  guardrail_drift: boolean;
+  /** Which modes the support matrix allows for this agent. */
+  guardrail_supported: GuardrailSupport;
+  /** GetGuardrail summary stored at the last deploy/update (or refresh) — rendering it never calls Bedrock. */
+  guardrail_details?: GuardrailDetails | null;
+}
+
+// Bedrock Guardrails (issue #17, CONTRACT 5)
+export type GuardrailMode = "enforce" | "monitor";
+export type GuardrailStreamProcessingMode = "sync" | "async";
+export type GuardrailSelection = "default" | "custom" | "none";
+
+export interface GuardrailRef {
+  guardrail_id: string;
+  guardrail_arn?: string;
+  /** Numeric string or "DRAFT". */
+  guardrail_version: string;
+}
+
+export interface GuardrailConfig extends GuardrailRef {
+  mode: GuardrailMode;
+  stream_processing_mode: GuardrailStreamProcessingMode;
+  redact_history: boolean;
+  allowed: GuardrailRef[];
+}
+
+export interface GuardrailSupport {
+  enforce: boolean;
+  monitor: boolean;
+}
+
+/** Agent create/redeploy request field. Omitted or null = "default". */
+export interface GuardrailRequest {
+  selection: GuardrailSelection;
+  config: GuardrailConfig | null;
+}
+
+/** Per-direction action/enabled fields on a guardrail policy entry (GetGuardrail). */
+export interface GuardrailIoAction {
+  input_action: string | null;
+  output_action: string | null;
+  input_enabled: boolean;
+  output_enabled: boolean;
+}
+
+export interface GuardrailContentFilterDetail extends GuardrailIoAction {
+  type: string;
+  input_strength: string;
+  output_strength: string;
+}
+
+export interface GuardrailTopicDetail extends GuardrailIoAction {
+  name: string;
+  definition: string;
+  example_count: number;
+}
+
+export interface GuardrailTypedDetail extends GuardrailIoAction {
+  type: string;
+}
+
+export interface GuardrailRegexDetail extends GuardrailIoAction {
+  name: string;
+}
+
+export interface GuardrailGroundingDetail {
+  type: string;
+  threshold: number | null;
+  action: string;
+  enabled: boolean;
+}
+
+/**
+ * One guardrail version's policy summary. When `error` is set (not found,
+ * access denied) only guardrail_id/version/region are present.
+ */
+export interface GuardrailDetailsEntry {
+  guardrail_id: string;
+  version: string;
+  region?: string;
+  error?: string;
+  guardrail_arn?: string;
+  name?: string;
+  description?: string;
+  status?: string;
+  updated_at?: string | null;
+  blocked_input_messaging?: string;
+  blocked_outputs_messaging?: string;
+  encrypted_with_cmk?: boolean;
+  cross_region_profile?: string | null;
+  content_filters?: GuardrailContentFilterDetail[];
+  content_tier?: string | null;
+  denied_topics?: GuardrailTopicDetail[];
+  topic_tier?: string | null;
+  custom_word_count?: number;
+  managed_word_lists?: GuardrailTypedDetail[];
+  pii_entities?: GuardrailTypedDetail[];
+  regexes?: GuardrailRegexDetail[];
+  contextual_grounding?: GuardrailGroundingDetail[];
+  automated_reasoning_policy_count?: number;
+}
+
+/** AgentResponse.guardrail_details — primary first, then alternates. */
+export interface GuardrailDetails {
+  fetched_at: string;
+  guardrails: GuardrailDetailsEntry[];
+}
+
+/** GET /api/settings/guardrails entry. */
+export interface GuardrailSummary {
+  guardrail_id: string;
+  guardrail_arn: string;
+  name: string;
+  description: string;
+  status: string;
+  versions: string[];
+}
+
+export type GuardrailDefaultSource = "settings" | "environment" | "none";
+
+/** GET /api/settings/guardrail-default */
+export interface GuardrailDefault {
+  enabled: boolean;
+  locked: boolean;
+  config: GuardrailConfig | null;
+  source: GuardrailDefaultSource;
+}
+
+/** PUT /api/settings/guardrail-default body. `config` is required when `enabled`. */
+export interface GuardrailDefaultUpdateRequest {
+  enabled: boolean;
+  locked: boolean;
+  config: GuardrailConfig | null;
+}
+
+export interface GuardrailPolicyHit {
+  policy: string;
+  type?: string;
+  name?: string;
+  action?: string;
+}
+
+export type GuardrailEventSource = "INPUT" | "OUTPUT" | "UNKNOWN";
+export type GuardrailEventAction = "intervened" | "detected";
+
+/** SSE `guardrail` event payload (CONTRACT 3). Never contains matched text. */
+export interface SSEGuardrail {
+  mode: GuardrailMode;
+  source: GuardrailEventSource;
+  action: GuardrailEventAction;
+  guardrail_id: string;
+  guardrail_version: string;
+  policies: GuardrailPolicyHit[];
+}
+
+export interface GuardrailIntervention extends SSEGuardrail {
+  timestamp: string;
+  session_id: string;
+}
+
+/** GET /api/agents/{id}/guardrails/interventions */
+export interface GuardrailInterventionsResponse {
+  interventions: GuardrailIntervention[];
+  supported: boolean;
+  note: string | null;
 }
 
 export interface AgentHarnessDeployRequest {
@@ -87,6 +257,7 @@ export interface AgentHarnessDeployRequest {
   code_interpreter_region: string;
   code_interpreter_network_mode: string;
   code_interpreter_role_id: number | null;
+  guardrail?: GuardrailRequest | null;
 }
 
 export interface AgentRegisterRequest {
@@ -132,6 +303,7 @@ export interface AgentDeployRequest {
   code_interpreter_network_mode: string;
   code_interpreter_role_id: number | null;
   tags?: Record<string, string>;
+  guardrail?: GuardrailRequest | null;
 }
 
 export interface AgentDeployMeta {
@@ -242,6 +414,9 @@ export interface InvokeRequest {
   model_id?: string;
   connector_ids?: number[];
   use_linked_token?: boolean;
+  /** Runtime guardrail selection — must match the agent's primary or an `allowed` entry. */
+  guardrail_id?: string;
+  guardrail_version?: string;
 }
 
 export interface InvocationResponse {

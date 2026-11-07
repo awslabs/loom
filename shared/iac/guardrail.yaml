@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Amazon Bedrock guardrail for Loom agents (issue #17). Loom only references
+  guardrails — their policies are owned here, outside Loom, so policy changes
+  go through code review and Loom's backend never needs write access to them.
+  Deploy one stack per guardrail (e.g. per environment or use case).
+
+Parameters:
+  pGuardrailName:
+    Type: String
+    Description: Guardrail name (letters, digits, hyphens, underscores; max 50)
+    Default: loom-default
+    AllowedPattern: "^[0-9a-zA-Z-_]{1,50}$"
+  pGuardrailDescription:
+    Type: String
+    Description: Guardrail description
+    Default: Default guardrail for Loom agents
+  pBlockedInputMessage:
+    Type: String
+    Description: Message returned when the guardrail blocks a prompt
+    Default: "Sorry, I can't help with that request."
+  pBlockedOutputMessage:
+    Type: String
+    Description: Message returned when the guardrail blocks a model response
+    Default: "Sorry, I can't provide that response."
+  pDetectOnly:
+    Type: String
+    Description: >-
+      When true, every policy detects without acting (action NONE): Bedrock
+      reports what it found in the trace but never blocks or masks. This is
+      the way to observe a managed (harness) agent, which has no Loom monitor
+      mode. Custom agents can use Loom's monitor mode against an enforcing
+      guardrail instead.
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  pContentFilterStrength:
+    Type: String
+    Description: Strength for the hate, insults, sexual, violence and misconduct filters (prompts and responses)
+    Default: HIGH
+    AllowedValues: [LOW, MEDIUM, HIGH]
+  pPromptAttackStrength:
+    Type: String
+    Description: Strength for the prompt attack (jailbreak / prompt injection) filter on prompts. NONE disables it.
+    Default: HIGH
+    AllowedValues: [NONE, LOW, MEDIUM, HIGH]
+  pPiiMaskAction:
+    Type: String
+    Description: >-
+      Action for contact-style PII (email, phone, address, bank account
+      number). ANONYMIZE masks it as {EMAIL} etc.; BLOCK rejects the whole
+      prompt or response. Note that Bedrock can't mask in async streaming mode.
+    Default: ANONYMIZE
+    AllowedValues: [ANONYMIZE, BLOCK]
+  pEnableProfanityFilter:
+    Type: String
+    Description: Block the AWS-managed profanity word list
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  pEnableSampleDeniedTopic:
+    Type: String
+    Description: >-
+      Add a sample denied topic (investment advice). Denied topics are
+      use-case specific — replace the sample with your own in this template.
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  pKmsKeyArn:
+    Type: String
+    Description: Customer-managed KMS key ARN to encrypt the guardrail (leave empty for the AWS managed key)
+    Default: ""
+  pVersionDescription:
+    Type: String
+    Description: >-
+      Description of the published version. Changing this value publishes a
+      NEW numbered version from the current policy configuration; older
+      versions are retained (agents pinned to them keep working). Change the
+      policy and this value in the same deploy.
+    Default: initial
+  pTagApplication:
+    Type: String
+    Description: Application tag value
+  pTagGroup:
+    Type: String
+    Description: Group tag value
+  pTagOwner:
+    Type: String
+    Description: Owner tag value
+
+Conditions:
+  IsDetectOnly: !Equals [!Ref pDetectOnly, "true"]
+  HasProfanityFilter: !Equals [!Ref pEnableProfanityFilter, "true"]
+  HasSampleDeniedTopic: !Equals [!Ref pEnableSampleDeniedTopic, "true"]
+  HasKmsKey: !Not [!Equals [!Ref pKmsKeyArn, ""]]
+
+Resources:
+  Guardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: !Ref pGuardrailName
+      Description: !Ref pGuardrailDescription
+      BlockedInputMessaging: !Ref pBlockedInputMessage
+      BlockedOutputsMessaging: !Ref pBlockedOutputMessage
+      KmsKeyArn: !If [HasKmsKey, !Ref pKmsKeyArn, !Ref AWS::NoValue]
+      ContentPolicyConfig:
+        FiltersConfig:
+          - Type: HATE
+            InputStrength: !Ref pContentFilterStrength
+            OutputStrength: !Ref pContentFilterStrength
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+            OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+          - Type: INSULTS
+            InputStrength: !Ref pContentFilterStrength
+            OutputStrength: !Ref pContentFilterStrength
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+            OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+          - Type: SEXUAL
+            InputStrength: !Ref pContentFilterStrength
+            OutputStrength: !Ref pContentFilterStrength
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+            OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+          - Type: VIOLENCE
+            InputStrength: !Ref pContentFilterStrength
+            OutputStrength: !Ref pContentFilterStrength
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+            OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+          - Type: MISCONDUCT
+            InputStrength: !Ref pContentFilterStrength
+            OutputStrength: !Ref pContentFilterStrength
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+            OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+          # Prompt attacks only apply to prompts; Bedrock requires the
+          # output strength to be NONE for this filter.
+          - Type: PROMPT_ATTACK
+            InputStrength: !Ref pPromptAttackStrength
+            OutputStrength: NONE
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+      SensitiveInformationPolicyConfig:
+        PiiEntitiesConfig:
+          # Every entity sets InputAction/OutputAction explicitly. With only the
+          # general Action, Bedrock applies BLOCK to prompts and responses but
+          # ANONYMIZE to responses only — a masked-PII rule silently never
+          # evaluated prompts (verified with ApplyGuardrail, outputScope FULL).
+          # Never acceptable in a prompt or response — always blocked.
+          - Type: US_SOCIAL_SECURITY_NUMBER
+            Action: !If [IsDetectOnly, NONE, BLOCK]
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+            OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+            InputEnabled: true
+            OutputEnabled: true
+          - Type: CREDIT_DEBIT_CARD_NUMBER
+            Action: !If [IsDetectOnly, NONE, BLOCK]
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+            OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+            InputEnabled: true
+            OutputEnabled: true
+          - Type: CREDIT_DEBIT_CARD_CVV
+            Action: !If [IsDetectOnly, NONE, BLOCK]
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+            OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+            InputEnabled: true
+            OutputEnabled: true
+          - Type: AWS_ACCESS_KEY
+            Action: !If [IsDetectOnly, NONE, BLOCK]
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+            OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+            InputEnabled: true
+            OutputEnabled: true
+          - Type: AWS_SECRET_KEY
+            Action: !If [IsDetectOnly, NONE, BLOCK]
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+            OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+            InputEnabled: true
+            OutputEnabled: true
+          - Type: PASSWORD
+            Action: !If [IsDetectOnly, NONE, BLOCK]
+            InputAction: !If [IsDetectOnly, NONE, BLOCK]
+            OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+            InputEnabled: true
+            OutputEnabled: true
+          # Contact-style PII — masked (or blocked) per pPiiMaskAction, in both directions.
+          - Type: EMAIL
+            Action: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            InputAction: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            OutputAction: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            InputEnabled: true
+            OutputEnabled: true
+          - Type: PHONE
+            Action: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            InputAction: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            OutputAction: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            InputEnabled: true
+            OutputEnabled: true
+          - Type: ADDRESS
+            Action: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            InputAction: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            OutputAction: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            InputEnabled: true
+            OutputEnabled: true
+          - Type: US_BANK_ACCOUNT_NUMBER
+            Action: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            InputAction: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            OutputAction: !If [IsDetectOnly, NONE, !Ref pPiiMaskAction]
+            InputEnabled: true
+            OutputEnabled: true
+      WordPolicyConfig: !If
+        - HasProfanityFilter
+        - ManagedWordListsConfig:
+            - Type: PROFANITY
+              InputAction: !If [IsDetectOnly, NONE, BLOCK]
+              OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+        - !Ref AWS::NoValue
+      TopicPolicyConfig: !If
+        - HasSampleDeniedTopic
+        - TopicsConfig:
+            - Name: Investment advice
+              Type: DENY
+              Definition: >-
+                Recommendations or guidance on buying, selling or allocating
+                stocks, bonds, funds, cryptocurrency or other financial
+                investments.
+              Examples:
+                - Which stocks should I buy this year?
+                - Should I move my retirement savings into crypto?
+              InputAction: !If [IsDetectOnly, NONE, BLOCK]
+              OutputAction: !If [IsDetectOnly, NONE, BLOCK]
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: loom:application
+          Value: !Ref pTagApplication
+        - Key: loom:group
+          Value: !Ref pTagGroup
+        - Key: loom:owner
+          Value: !Ref pTagOwner
+
+  # A published, immutable snapshot of the guardrail. Every property change
+  # on this resource type forces replacement, and CloudFormation deletes a
+  # replaced resource by default — which would delete the version agents are
+  # pinned to. Retain keeps superseded versions; remove them in the Bedrock
+  # console once no agent uses them.
+  GuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      GuardrailIdentifier: !GetAtt Guardrail.GuardrailId
+      Description: !Ref pVersionDescription
+
+Outputs:
+  oGuardrailId:
+    Description: Guardrail ID (use as guardrail_id in Loom or P_GUARDRAIL_ID)
+    Value: !GetAtt Guardrail.GuardrailId
+  oGuardrailArn:
+    Description: Guardrail ARN
+    Value: !GetAtt Guardrail.GuardrailArn
+  oGuardrailVersion:
+    Description: Latest published version (use as guardrail_version in Loom or P_GUARDRAIL_VERSION)
+    Value: !GetAtt GuardrailVersion.Version

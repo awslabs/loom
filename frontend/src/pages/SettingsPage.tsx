@@ -19,6 +19,7 @@ import { listSiteSettings, updateSiteSetting, getRegistryConfig, updateRegistryC
 import { groupModels } from "@/lib/models";
 import type { ModelOption, AgentResponse } from "@/api/types";
 import { VpcConfigPanel } from "@/components/VpcConfigPanel";
+import { GuardrailDefaultSettings } from "@/components/GuardrailDefaultSettings";
 import { TaggingPage } from "@/pages/TaggingPage";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -50,9 +51,11 @@ interface SettingsPageProps {
   canEditTagging?: boolean;
   userGroups?: string[];
   agents?: AgentResponse[];
+  /** admin:write — gates editing the global default guardrail (read-only otherwise). */
+  canEditGuardrails?: boolean;
 }
 
-export function SettingsPage({ canViewTagging = false, canEditTagging = false, userGroups = [], agents = [] }: SettingsPageProps) {
+export function SettingsPage({ canViewTagging = false, canEditTagging = false, userGroups = [], agents = [], canEditGuardrails = false }: SettingsPageProps) {
   const { t, i18n } = useTranslation();
   const { timezone, setTimezone } = useTimezone();
   const { theme, setTheme } = useTheme();
@@ -697,6 +700,8 @@ export function SettingsPage({ canViewTagging = false, canEditTagging = false, u
                 </div>
               )}
             </SettingsCard>
+
+            <GuardrailDefaultSettings canEdit={canEditGuardrails} />
           </div>
         );
       })()}

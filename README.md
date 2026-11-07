@@ -102,6 +102,13 @@ Loom weaves together agents, memory, MCP servers, A2A agents, and skills in a un
 - Per-agent scoped virtual keys vended automatically from the proxy, no shared credential is ever stored on an individual agent
 - Dynamic model catalog merging curated static models with live Bedrock availability and the proxy's own reported models, so new proxy-side models appear without a Loom code change
 
+### Guardrails
+- Amazon Bedrock Guardrails for custom and managed agents, enforced by the agent runtime or AgentCore Harness itself (Loom stays off the data path, so direct runtime callers are covered too)
+- Global default guardrail (Settings or deployment parameters) with an optional lock so agents can't opt out, per-agent overrides, and per-invocation selection from an allowlist
+- Enforce mode (inline on every model call) or monitor mode (log-only `ApplyGuardrail`) for shadow-testing a guardrail before turning it on
+- Intervention badges in the invoke panel and chat, plus per-agent intervention history read from the agent's own runtime logs, with matched text never recorded
+- "Redeploy to apply" indicator for agents behind the current default
+
 ### Memory Management
 - Create and manage AgentCore Memory resources
 - Configurable strategies: semantic, summary, user preference, episodic, custom

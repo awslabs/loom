@@ -162,6 +162,8 @@ def _migrate_add_columns(eng) -> None:
         ("evaluation_runs", "batch_job_id", "VARCHAR"),
         ("evaluation_runs", "batch_job_ids", "TEXT"),
         ("agents", "user_system_prompt", "TEXT"),
+        ("agents", "guardrail_selection", "VARCHAR"),
+        ("agents", "guardrail_details", "TEXT"),
     ]
 
     is_postgres = eng.dialect.name == "postgresql"

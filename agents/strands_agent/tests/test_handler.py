@@ -99,6 +99,10 @@ class TestInvokeHandler(unittest.TestCase):
 class TestGetAgent(unittest.TestCase):
     """Tests for agent singleton initialization."""
 
+    @patch("src.handler._code_interpreter", None)
+    @patch("src.handler._approval_hook", None)
+    @patch("src.handler._default_model", None)
+    @patch("src.handler._config", None)
     @patch("src.handler._agent", None)
     @patch("src.handler.build_agent")
     @patch("src.handler.load_config")
@@ -106,15 +110,18 @@ class TestGetAgent(unittest.TestCase):
         self, mock_load_config: MagicMock, mock_build_agent: MagicMock
     ) -> None:
         mock_config = MagicMock()
+        mock_config.integrations.mcp_servers = []
         mock_load_config.return_value = mock_config
         mock_agent = MagicMock()
-        mock_build_agent.return_value = mock_agent
+        mock_build_agent.return_value = (mock_agent, MagicMock(), None)
 
         result = _get_agent()
+        again = _get_agent()
 
         mock_load_config.assert_called_once()
         mock_build_agent.assert_called_once_with(mock_config, defer_mcp=False)
-        self.assertEqual(result, mock_agent)
+        self.assertIs(result, mock_agent)
+        self.assertIs(again, mock_agent)
 
 
 if __name__ == "__main__":

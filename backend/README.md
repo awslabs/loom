@@ -67,6 +67,10 @@ Runtime configuration is sourced from `etc/environment.sh`:
 | `LOOM_LITELLM_PROXY_BASE_URL` | Default Agent Base URL for a self-hosted LiteLLM proxy (bootstrap fallback; prefer Settings → Models → LiteLLM). Leave unset to disable the LiteLLM provider. | — |
 | `LOOM_LITELLM_DISCOVERY_BASE_URL` | Default Discovery Base URL the backend itself uses for model discovery, if different from `LOOM_LITELLM_PROXY_BASE_URL` (e.g. a local SSM tunnel during dev) | — |
 | `LOOM_LITELLM_PROXY_API_KEY` | Default LiteLLM proxy master key (bootstrap fallback; a Settings-page save always overrides this) | — |
+| `LOOM_GUARDRAIL_ID` | Default Bedrock guardrail ID for agents (bootstrap fallback; a Settings → Guardrails save always overrides this). Leave unset to disable. | — |
+| `LOOM_GUARDRAIL_VERSION` | Version of the default guardrail (number or `DRAFT`) | `DRAFT` |
+| `LOOM_GUARDRAIL_MODE` | Default guardrail mode: `enforce` (inline) or `monitor` (log-only) | `enforce` |
+| `LOOM_GUARDRAIL_LOCKED` | When `true`, agents can't opt out of the default guardrail | `false` |
 
 AWS credentials use the standard boto3 credential chain (environment variables, AWS profile, instance metadata).
 
@@ -231,7 +235,7 @@ backend/
 
 ### `agents`
 
-Stores registered and deployed AgentCore Runtime agents. Uses an auto-incrementing integer PK for internal references; `arn` and `runtime_id` are stored as indexed columns for AWS lookups. Includes columns for: `source` (`register`, `deploy`, or `harness`), `deployment_status`, `execution_role_arn`, `endpoint_name`, `endpoint_arn`, `endpoint_status`, `protocol`, `network_mode`, `authorizer_config`, `credential_providers`, `deployed_at`, `tags` (JSON dict of resolved tag key-value pairs), `harness_id` (harness ID for managed agent deployments), `registry_record_id` (AWS Agent Registry record ID), and `registry_status` (registry lifecycle status). Agents are auto-registered in DRAFT status on deployment when registry is configured.
+Stores registered and deployed AgentCore Runtime agents. Uses an auto-incrementing integer PK for internal references; `arn` and `runtime_id` are stored as indexed columns for AWS lookups. Includes columns for: `source` (`register`, `deploy`, or `harness`), `deployment_status`, `execution_role_arn`, `endpoint_name`, `endpoint_arn`, `endpoint_status`, `protocol`, `network_mode`, `authorizer_config`, `credential_providers`, `deployed_at`, `tags` (JSON dict of resolved tag key-value pairs), `harness_id` (harness ID for managed agent deployments), `registry_record_id` (AWS Agent Registry record ID), `registry_status` (registry lifecycle status), and `guardrail_selection` (`default`, `custom`, or `none` — the resolved guardrail itself is the `guardrail` block of `AGENT_CONFIG_JSON`). Agents are auto-registered in DRAFT status on deployment when registry is configured.
 
 ### `agent_config_entries`
 

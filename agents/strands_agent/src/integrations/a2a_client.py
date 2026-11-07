@@ -8,7 +8,6 @@ agent can invoke during a conversation.
 
 import json as _json
 import logging
-import os
 from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
@@ -352,12 +351,15 @@ def _build_a2a_tool(config: A2AAgentConfig) -> Any:
     if config.auth and config.auth.type == "oauth2" and config.auth.credential_provider_name:
         scope_list = config.auth.scopes.split() if config.auth.scopes else []
         delegation_mode = (config.auth.delegation_mode or "m2m").lower()
-        user_access_token = os.environ.get("USER_ACCESS_TOKEN") or None
+        # Same construction as the MCP path: for OBO the user's identity is
+        # carried by the workload access token, and obo_grant_type/audience
+        # select the token exchange (TOKEN_EXCHANGE or JWT_AUTHORIZATION_GRANT).
         auth = _OAuth2Auth(
             credential_provider_name=config.auth.credential_provider_name,
             scopes=scope_list,
             delegation_mode=delegation_mode,
-            user_access_token=user_access_token if delegation_mode == "obo" else None,
+            obo_grant_type=config.auth.obo_grant_type or None,
+            audience=config.auth.audience or "",
         )
         logger.info(
             "A2A agent '%s' configured with OAuth2 auth (credential_provider=%s, scopes=%s, delegation_mode=%s)",
@@ -379,6 +381,15 @@ def _build_a2a_tool(config: A2AAgentConfig) -> Any:
             http_client=authenticated_client,
         )
     else:
+        if config.auth and config.auth.type == "oauth2":
+            # OAuth2 tokens come from an AgentCore Identity credential
+            # provider; without one the agent can only call unauthenticated,
+            # which surfaces downstream as a bare 401.
+            logger.warning(
+                "A2A agent '%s' is configured for OAuth2 but has no credential provider; "
+                "calls will be sent without authentication",
+                config.name,
+            )
         a2a_agent = A2AAgent(
             endpoint=config.endpoint_url,
             name=config.name,

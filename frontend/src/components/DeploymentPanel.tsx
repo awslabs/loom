@@ -234,6 +234,11 @@ export function DeploymentPanel({ agent }: DeploymentPanelProps) {
         <CardTitle className="text-[13.5px] font-semibold">Deployment</CardTitle>
         <StatusPill label={agent.status ?? "UNKNOWN"} variant={statusVariant(agent.status)} />
         {isCreating(agent) && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+        {agent.guardrail_drift && (
+          <span title="The global default guardrail changed since this agent was last deployed.">
+            <StatusPill label="Guardrail: redeploy to apply" variant="warning" />
+          </span>
+        )}
         {agent.deployed_at && (
           <span className="ml-auto font-mono text-[11px] text-muted-foreground">deployed {formatTimestamp(agent.deployed_at, timezone)}</span>
         )}

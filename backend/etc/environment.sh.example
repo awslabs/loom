@@ -30,6 +30,23 @@ LOOM_ALLOWED_ORIGINS=
 # Agent Registry (from bedrock-agentcore-control list-registries output)
 LOOM_REGISTRY_ID=
 
+# Bedrock Guardrails default (issue #17) — seeds the global default guardrail
+# until one is saved in Settings -> Guardrails (a Settings-page save always
+# wins). Leave P_GUARDRAIL_ID empty to disable. Typical per-environment
+# setup: monitor in dev, enforce (and locked) in prod. P_* values also feed
+# the ECS stack parameters (make ecs.deploy).
+# To use the guardrail from the shared stack (cd shared && make guardrail
+# && make outputs): P_GUARDRAIL_ID=$(O_GUARDRAIL_ID) and
+# P_GUARDRAIL_VERSION=$(O_GUARDRAIL_VERSION)
+P_GUARDRAIL_ID=
+P_GUARDRAIL_VERSION=DRAFT
+P_GUARDRAIL_MODE=monitor
+P_GUARDRAIL_LOCKED=false
+LOOM_GUARDRAIL_ID=$(P_GUARDRAIL_ID)
+LOOM_GUARDRAIL_VERSION=$(P_GUARDRAIL_VERSION)
+LOOM_GUARDRAIL_MODE=$(P_GUARDRAIL_MODE)
+LOOM_GUARDRAIL_LOCKED=$(P_GUARDRAIL_LOCKED)
+
 # Exports
 export AWS_PROFILE
 export AWS_REGION
@@ -42,6 +59,10 @@ export LOOM_COGNITO_USER_CLIENT_ID
 export LOOM_COGNITO_REGION
 export LOOM_ALLOWED_ORIGINS
 export LOOM_REGISTRY_ID
+export LOOM_GUARDRAIL_ID
+export LOOM_GUARDRAIL_VERSION
+export LOOM_GUARDRAIL_MODE
+export LOOM_GUARDRAIL_LOCKED
 
 # RDS stack configuration
 P_RDS_STACK=loom-rds

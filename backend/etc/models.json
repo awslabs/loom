@@ -85,6 +85,34 @@
     }
   },
   {
+    "model_id": "us.anthropic.claude-haiku-5-5",
+    "display_name": "Claude Haiku 5.5",
+    "group": "Anthropic",
+    "provider": "bedrock",
+    "max_tokens": 128000,
+    "input_price_per_1k_tokens": 0.001,
+    "output_price_per_1k_tokens": 0.005,
+    "pricing_as_of": "2026-11-06",
+    "launch_date": "2026-10-07",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "messages"
+      ],
+      "bedrock-mantle": [
+        "messages"
+      ]
+    },
+    "endpoint_model_ids": {
+      "bedrock-mantle": "anthropic.claude-haiku-5-5"
+    }
+  },
+  {
     "model_id": "us.anthropic.claude-opus-4-6-v1",
     "display_name": "Claude Opus 4.6",
     "group": "Anthropic",
@@ -257,6 +285,34 @@
       "bedrock-mantle": [
         "messages"
       ]
+    }
+  },
+  {
+    "model_id": "us.anthropic.claude-sonnet-5-5",
+    "display_name": "Claude Sonnet 5.5",
+    "group": "Anthropic",
+    "provider": "bedrock",
+    "max_tokens": 128000,
+    "input_price_per_1k_tokens": 0.003,
+    "output_price_per_1k_tokens": 0.015,
+    "pricing_as_of": "2026-11-06",
+    "launch_date": "2026-09-28",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "converse",
+        "invoke",
+        "messages"
+      ],
+      "bedrock-mantle": [
+        "messages"
+      ]
+    },
+    "endpoint_model_ids": {
+      "bedrock-mantle": "anthropic.claude-sonnet-5-5"
     }
   },
   {
@@ -473,6 +529,156 @@
         "converse",
         "invoke"
       ]
+    }
+  },
+  {
+    "model_id": "us.openai.gpt-6-astra",
+    "display_name": "GPT-6 Astra",
+    "group": "OpenAI",
+    "provider": "bedrock",
+    "max_tokens": 128000,
+    "input_price_per_1k_tokens": 0.01,
+    "output_price_per_1k_tokens": 0.05,
+    "pricing_as_of": "2026-11-06",
+    "launch_date": "2026-09-08",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "responses",
+        "chat_completions",
+        "converse",
+        "invoke"
+      ],
+      "bedrock-mantle": [
+        "responses",
+        "chat_completions"
+      ]
+    },
+    "endpoint_model_ids": {
+      "bedrock-mantle": "openai.gpt-6-astra"
+    }
+  },
+  {
+    "model_id": "us.openai.gpt-6-luna",
+    "display_name": "GPT-6 Luna",
+    "group": "OpenAI",
+    "provider": "bedrock",
+    "max_tokens": 128000,
+    "input_price_per_1k_tokens": 0.0001,
+    "output_price_per_1k_tokens": 0.0005,
+    "pricing_as_of": "2026-11-06",
+    "launch_date": "2026-09-22",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "responses",
+        "chat_completions",
+        "converse",
+        "invoke"
+      ],
+      "bedrock-mantle": [
+        "responses",
+        "chat_completions"
+      ]
+    },
+    "endpoint_model_ids": {
+      "bedrock-mantle": "openai.gpt-6-luna"
+    }
+  },
+  {
+    "model_id": "us.openai.gpt-6-sol",
+    "display_name": "GPT-6 Sol",
+    "group": "OpenAI",
+    "provider": "bedrock",
+    "max_tokens": 128000,
+    "input_price_per_1k_tokens": 0.002,
+    "output_price_per_1k_tokens": 0.01,
+    "pricing_as_of": "2026-11-06",
+    "launch_date": "2026-09-22",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "responses",
+        "chat_completions",
+        "converse",
+        "invoke"
+      ],
+      "bedrock-mantle": [
+        "responses",
+        "chat_completions"
+      ]
+    },
+    "endpoint_model_ids": {
+      "bedrock-mantle": "openai.gpt-6-sol"
+    }
+  },
+  {
+    "model_id": "us.openai.gpt-6.1-sol",
+    "display_name": "GPT-6.1 Sol",
+    "group": "OpenAI",
+    "provider": "bedrock",
+    "max_tokens": 131072,
+    "input_price_per_1k_tokens": 0.002,
+    "output_price_per_1k_tokens": 0.01,
+    "pricing_as_of": "2026-11-06",
+    "launch_date": "2026-09-29",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "responses",
+        "chat_completions",
+        "converse",
+        "invoke"
+      ],
+      "bedrock-mantle": [
+        "responses",
+        "chat_completions"
+      ]
+    },
+    "endpoint_model_ids": {
+      "bedrock-mantle": "openai.gpt-6.1-sol"
+    }
+  },
+  {
+    "model_id": "us.openai.gpt-6.1-terra",
+    "display_name": "GPT-6.1 Terra",
+    "group": "OpenAI",
+    "provider": "bedrock",
+    "max_tokens": 128000,
+    "input_price_per_1k_tokens": 0.001,
+    "output_price_per_1k_tokens": 0.005,
+    "pricing_as_of": "2026-11-06",
+    "launch_date": "2026-10-26",
+    "endpoints": [
+      "bedrock-runtime",
+      "bedrock-mantle"
+    ],
+    "apis": {
+      "bedrock-runtime": [
+        "responses",
+        "chat_completions",
+        "converse",
+        "invoke"
+      ],
+      "bedrock-mantle": [
+        "responses",
+        "chat_completions"
+      ]
+    },
+    "endpoint_model_ids": {
+      "bedrock-mantle": "openai.gpt-6.1-terra"
     }
   }
 ]

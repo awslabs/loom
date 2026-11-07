@@ -583,9 +583,9 @@ def _owned_credential_providers(agent: Agent, cp_names: Any) -> list[str]:
         if _owns_credential_provider(agent, cp_name):
             owned.append(cp_name)
         else:
-            logger.warning(
-                "Skipping cleanup of credential provider %r: not owned by agent %s", cp_name, agent.id,
-            )
+            # The name came from stored config, so it isn't logged (it may be
+            # attacker-influenced); the agent id is enough to investigate.
+            logger.warning("Skipping cleanup of credential provider: not owned by agent %s", agent.id)
     return owned
 
 
@@ -3657,7 +3657,7 @@ def delete_agent(
     # regardless of cleanup_aws. Only this agent's own alias.
     litellm_virtual_key_alias = config_map.get("LITELLM_VIRTUAL_KEY_ALIAS")
     if litellm_virtual_key_alias and litellm_virtual_key_alias != f"loom-agent-{agent.id}":
-        logger.warning("Skipping revoke of LiteLLM key alias %r: not owned by agent %s", litellm_virtual_key_alias, agent.id)
+        logger.warning("Skipping revoke of LiteLLM key alias: not owned by agent %s", agent.id)
         litellm_virtual_key_alias = None
     if litellm_virtual_key_alias:
         from app.services.litellm import revoke_virtual_key

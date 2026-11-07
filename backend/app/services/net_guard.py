@@ -60,6 +60,19 @@ _THIS_NETWORK_V4 = ipaddress.ip_network("0.0.0.0/8")
 # 169.254.169.254 is covered by is_link_local.
 _IMDS_V6 = ipaddress.ip_address("fd00:ec2::254")
 
+# NAT64 prefixes — the well-known 64:ff9b::/96 (RFC 6052) and the local-use
+# 64:ff9b:1::/48 (RFC 8215). A NAT64 gateway (e.g. an AWS NAT gateway with
+# DNS64) translates these to the embedded IPv4 address, so they are an IPv6
+# spelling of arbitrary IPv4 targets, including private and metadata ones.
+# Both happen to sit inside ::/8 and so are already `is_reserved` in Python,
+# but that is incidental; they are named here so the block doesn't depend on
+# it. Note 64:ff9b::/96 is `is_global`, so an `is_global` check alone would
+# let it through — which is why the explicit list stays.
+_NAT64_NETWORKS = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+)
+
 
 def _is_always_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if ip must never be reachable, regardless of guard level.
@@ -82,6 +95,8 @@ def _is_always_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) 
         return True
     if ip == _IMDS_V6:
         return True
+    if isinstance(ip, ipaddress.IPv6Address) and any(ip in net for net in _NAT64_NETWORKS):
+        return True
     return (
         ip.is_loopback
         or ip.is_link_local
@@ -92,10 +107,22 @@ def _is_always_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) 
 
 
 def _is_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Return True if ip is not a routable public address (strict/public-only mode)."""
+    """Return True if ip is not a routable public address (strict/public-only mode).
+
+    ``not is_global`` catches special-purpose ranges that are neither
+    ``is_private`` nor in the explicit list — notably 100.64.0.0/10 (RFC 6598
+    shared address space, used for carrier-grade NAT and as a VPC secondary
+    CIDR), which the previous ``is_private``-only predicate let through. The
+    explicit always-disallowed list is kept alongside it, because some ranges
+    that must stay blocked (NAT64's 64:ff9b::/96) are ``is_global``.
+
+    The permissive level (``allow_private``) deliberately still allows
+    100.64.0.0/10: it is a legitimate VPC-internal range for MCP servers and
+    A2A agents in the same way RFC 1918 is.
+    """
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
-    return ip.is_private or _is_always_disallowed_ip(ip)
+    return ip.is_private or not ip.is_global or _is_always_disallowed_ip(ip)
 
 
 def _resolve_and_validate(hostname: str, *, allow_private: bool = False) -> str:

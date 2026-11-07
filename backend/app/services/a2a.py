@@ -2,6 +2,7 @@
 import logging
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -25,14 +26,38 @@ AGENT_JSON_PATH = "/.well-known/agent.json"
 AGENT_CARD_JSON_PATH = "/.well-known/agent-card.json"
 
 
+def _url_host_and_path(base_url: str) -> tuple[str, str]:
+    """Return the lower-cased hostname and the path of a URL ("" when unparseable)."""
+    try:
+        parsed = urlparse(base_url.strip())
+    except ValueError:
+        return "", ""
+    return (parsed.hostname or "").lower(), parsed.path or ""
+
+
 def _is_agentcore_url(base_url: str) -> bool:
-    """Detect if the base URL points to an AgentCore Runtime endpoint."""
-    return "bedrock-agentcore" in base_url
+    """Detect if the base URL points to an AgentCore Runtime endpoint.
+
+    Matched on the parsed hostname (bedrock-agentcore.<region>.amazonaws.com,
+    or a subdomain of it), not as a substring of the whole URL — a substring
+    test is satisfied by putting "bedrock-agentcore" anywhere, e.g. in the path.
+    """
+    host, _ = _url_host_and_path(base_url)
+    labels = host.split(".")
+    return "bedrock-agentcore" in labels[:-3] and (host.endswith(".amazonaws.com") or host.endswith(".amazonaws.com.cn"))
 
 
 def _is_salesforce_url(base_url: str) -> bool:
-    """Detect if the base URL points to a Salesforce Agentforce endpoint."""
-    return "salesforce.com/einstein/ai-agent" in base_url
+    """Detect if the base URL points to a Salesforce Agentforce endpoint.
+
+    Requires a salesforce.com host and an /einstein/ai-agent path. This used to
+    be a substring test on the whole URL ("salesforce.com/einstein/ai-agent" in
+    base_url), which any URL could satisfy by carrying that string in its path
+    or query, selecting the Salesforce code path for an arbitrary host.
+    """
+    host, path = _url_host_and_path(base_url)
+    on_salesforce = host == "salesforce.com" or host.endswith(".salesforce.com")
+    return on_salesforce and path.startswith("/einstein/ai-agent")
 
 
 def _get_oauth2_token(agent: Any) -> str | None:

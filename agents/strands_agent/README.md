@@ -236,6 +236,32 @@ A separate CI execution role (deployed via `shared/iac/code_interpreter_role.yam
 
 **Security:** The sandbox has no access to the host filesystem or network. All code runs in an isolated environment managed by AWS.
 
+### Bedrock Guardrails
+
+The optional top-level `guardrail` config key (absent or `null` = no guardrail) is written by Loom at deploy time:
+
+```json
+"guardrail": {
+  "guardrail_id": "<guardrail-id>",
+  "guardrail_arn": "",
+  "guardrail_version": "1",
+  "mode": "enforce",
+  "stream_processing_mode": "sync",
+  "redact_history": true,
+  "source": "default",
+  "allowed": [{"guardrail_id": "<other-guardrail-id>", "guardrail_arn": "", "guardrail_version": "DRAFT"}]
+}
+```
+
+- **`enforce`** (provider `bedrock` only): the guardrail is attached to every `BedrockModel` call (`guardrail_id` = `guardrail_arn or guardrail_id`, `guardrail_trace="enabled"`, `guardrail_stream_processing_mode`, `guardrail_redact_input=True`, `guardrail_redact_output=redact_history`), so it covers every model call in the tool loop. Interventions are detected from the stream's `metadata.trace.guardrail` assessments (`inputAssessment` → `INPUT`, `outputAssessments` → `OUTPUT`), with `stop_reason == "guardrail_intervened"` as a fallback (`source: "UNKNOWN"`); each intervention is reported once. On the WebSocket path only the stop reason is available, so events there use `source: "UNKNOWN"`. Enforce on a non-Bedrock provider logs a warning and attaches nothing (the backend rejects that combination). Note that Bedrock can't mask PII in `async` stream processing mode.
+- **`monitor`** (any provider): nothing is attached inline. The agent calls `bedrock-runtime:ApplyGuardrail` (off the event loop) on the user prompt (`INPUT`) and on the final streamed response text (`OUTPUT`). Content is never changed; an event is emitted only when the result is `GUARDRAIL_INTERVENED`. Failures are logged as warnings and never break the stream.
+
+**Per-invocation override:** the payload may carry `"guardrail": {"guardrail_id": "...", "guardrail_version": "..."}`. The agent accepts it only if it matches the primary or an `allowed` entry (mode and other settings always come from the primary); otherwise it returns `Error: Requested guardrail is not allowed for this agent.` without calling the model. The same applies to the WebSocket `prompt` message, which gets `{"type": "error", ...}` on rejection.
+
+**Events and logs:** every intervention/detection is streamed as `{"guardrail": {"mode", "source", "action", "guardrail_id", "guardrail_version", "policies"}}` (WebSocket: `{"type": "guardrail", "content": {...}}`) and written to stdout as one JSON line with `"loom_event": "guardrail_intervention"`, which Loom queries with CloudWatch Logs Insights. `policies` lists only the policy, type/name and action — the trace `match` field (which holds the original matched text/PII) and regex patterns are always dropped, and prompt/response text is never logged.
+
+**IAM:** the agent execution role needs `bedrock:ApplyGuardrail` on the guardrail ARNs (`arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail/*` in `shared/iac/role.yaml`). This is required for enforce mode too, not only for the standalone API. The guardrail must be in the same region as the model.
+
 ### Observability (OTEL)
 
 The agent emits OpenTelemetry traces and metrics via the AWS Distro for OpenTelemetry (ADOT).

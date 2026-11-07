@@ -1142,6 +1142,9 @@ Parses OTEL (OpenTelemetry) log records from CloudWatch:
 Handles agent artifact build and runtime lifecycle:
 
 - Builds agent artifacts by cross-compiling pip dependencies for ARM64 (`manylinux2014_aarch64`).
+  - **Every pin must have a wheel for that platform.** The install uses `--only-binary=:all:`, so a dependency that publishes only newer `manylinux_2_28` wheels can't be installed, and the build fails. litellm ≥1.93 is one such dependency, so both agents' `requirements.in` cap it at `<1.93`.
+  - **Don't edit `requirements.txt` directly.** Bumps that bypass `make lock` (`uv pip compile ... --python-platform aarch64-manylinux2014 --only-binary :all:`) can break this, as a Dependabot `requirements.txt` edit did. Re-lock instead.
+  - **Failures report pip's own error.** The build raises pip's `ERROR:` lines and records them in `agents.status_reason`, instead of a bare "non-zero exit status 1".
 - Creates, updates, and deletes AgentCore runtimes and endpoints.
 - `create_runtime()` and `update_runtime()` always set `platformVersion="V2"` in the boto3 call params, so every runtime Loom creates or updates lands on AgentCore Runtime v2 (snapshot-restore cold starts, paged memory) with no caller-supplied flag. Requires `boto3>=1.43.95` — earlier versions' `bedrock-agentcore-control` service model doesn't expose `platformVersion` on `CreateAgentRuntime`/`UpdateAgentRuntime`.
 - `update_runtime()` accepts optional `description`, `env_vars`, `role_arn`, `authorizer_config`, and `region` parameters. Description updates are propagated from the `PATCH /api/agents/{id}` endpoint.
@@ -1786,6 +1789,7 @@ All approval events are recorded in `approval_logs` table: `request_id`, `sessio
 | `approval_request` | Agent paused — awaiting user decision. Contains `request_id`, `tool_name`, `tool_input_summary`, `timeout_seconds`. |
 | `approval_resolved` | Decision made. Contains `request_id`, `status` (approved/rejected/timeout), `decided_by`, `reason`. |
 | `elicitation_request` | MCP server requesting structured input. Contains `elicitation_id`, `server_name`, `schema`, `message`. |
+| `guardrail` | Bedrock guardrail intervened (enforce) or detected (monitor). Contains `mode`, `source` (INPUT/OUTPUT/UNKNOWN), `action` (intervened/detected), `guardrail_id`, `guardrail_version`, `policies[]` (`policy`, `type`/`name`, `action` — never matched text). See § 17. |
 
 ---
 
@@ -2031,3 +2035,124 @@ Deploying and exercising this feature end-to-end also surfaced (and required fix
 - **CloudWatch Logs delivery pipeline:** `logs:PutDeliveryDestination`/`PutDeliverySource`/`CreateDelivery` (+ matching `Delete*`) and `logs:DescribeDeliveries` (list-only, no resource-level scoping), used by `services/observability.py` to route AgentCore Runtime and Code Interpreter vended logs into `/aws/vendedlogs/bedrock-agentcore/*`.
 - **Live Bedrock discovery:** `bedrock:ListFoundationModels`/`ListInferenceProfiles` (list-only), used by `model_catalog.py`'s live Bedrock availability/catalog fetch.
 - A dedicated `LogsKmsKey` (customer-managed, rotation enabled) now encrypts the backend's own ECS CloudWatch log group.
+
+---
+
+## 17. Bedrock Guardrails (issue #17)
+
+### Overview
+
+Loom is the **control plane only**. It's never in the guardrail data path. Enforcement happens where the model call happens:
+- custom agents enforce in their own AgentCore runtime against Bedrock,
+- managed agents are enforced by the AgentCore Harness itself,
+- so callers that invoke a runtime directly, not through Loom, are covered too.
+
+Loom resolves each agent's effective guardrail **at deploy time** and bakes it in:
+- custom agents: the `guardrail` block of `AGENT_CONFIG_JSON`,
+- harness agents: `bedrockModelConfig.additionalParams.guardrailConfig`, as described in the AgentCore harness guide.
+
+Loom also relays agent-reported events and reads intervention history from runtime logs.
+
+Block, mask and detect-only (`NONE`) behavior is configured **per policy inside the guardrail in Bedrock**. Loom only adds two modes:
+- `enforce`: the guardrail is attached inline to every model call.
+- `monitor`: the agent calls `ApplyGuardrail` on the prompt and the final response. It only logs and emits the result and never changes content. This lets you shadow-test a strict guardrail before turning it on.
+
+### Support matrix (`services/guardrails.supported_modes`)
+
+| Agent | enforce | monitor |
+|---|---|---|
+| Custom (Strands/ADK), provider `bedrock` | yes (native `guardrailConfig`) | yes |
+| Custom, non-Bedrock provider | no (no Bedrock call to attach to) | yes |
+| Harness, provider `bedrock` (`converse_stream`) | yes (`additionalParams.guardrailConfig`) | no (no hooks; use a detect-mode guardrail) |
+| Harness, provider `litellm`; registered agents | no | no |
+
+A request that violates the matrix fails with **422** before any record or AWS resource is created.
+
+### Configuration levels
+
+1. **Global default.** Stored in the `guardrail_default` site setting (JSON `{enabled, locked, config}`):
+   - Read with `GET /api/settings/guardrail-default` (`agent:read`) and written with `PUT` (`admin:write`).
+   - If nothing has been saved, it falls back to the CFN-seeded env vars `LOOM_GUARDRAIL_ID`, `LOOM_GUARDRAIL_VERSION` (default `DRAFT`), `LOOM_GUARDRAIL_MODE` (default `enforce`) and `LOOM_GUARDRAIL_LOCKED`. The response's `source` field reports `settings`, `environment` or `none`.
+   - A saved Settings value always wins, even a saved "disabled".
+   - **Locked** means agents can't choose `none`. While the default is in enforce mode, they also can't choose a custom `monitor` config.
+   - If an agent type can't run a locked default (e.g. a monitor default on a harness agent), that agent is rejected rather than silently left unguarded. An unsupported default that isn't locked is simply not applied.
+2. **Per agent.** `guardrail: {selection: "default" | "custom" | "none", config}` on `POST /api/agents` (`deploy`/`harness`), `PUT /{id}/redeploy-deploy` and `PUT /{id}/redeploy-harness`.
+   - The selection is stored in `agents.guardrail_selection`.
+   - The resolved block lives in `AGENT_CONFIG_JSON` (what the runtime enforces).
+   - Config fields: `guardrail_id` (ID or ARN), `guardrail_arn`, `guardrail_version`, `mode`, `stream_processing_mode` (`sync`/`async`; Bedrock can't mask in async), `redact_history`, and `allowed` (up to 10 alternate guardrails selectable at invoke time).
+3. **Per invocation.** `guardrail_id` and `guardrail_version` on `POST /{id}/invoke` and on the WebSocket prompt message.
+   - The selection must be the agent's primary guardrail or one in `allowed` (otherwise **400**). It can never disable the guardrail or change its mode.
+   - Custom agents receive it as `payload.guardrail` and **re-validate it in the runtime**, because direct callers can send any payload.
+   - Harness agents: Loom sends it as a `model` override with the alternate's `guardrailConfig`.
+
+**Drift.** `AgentResponse.guardrail_drift` is true when an inheriting agent's baked-in guardrail differs from the current default. The UI shows "Redeploy to apply". Changing the default never mutates deployed agents.
+
+`AgentResponse` also includes `guardrail_selection`, `guardrail` (the baked-in block) and `guardrail_supported` (`{enforce, monitor}`).
+
+### Harness model-override caveat
+
+An `InvokeHarness` `model` override **replaces** the harness's whole model config for that call. So whenever Loom sends `model`, for a runtime model selection or a guardrail selection, it includes `additionalParams.guardrailConfig` again. Before this change, a runtime model override would silently drop a create-time guardrail.
+
+Anyone who can call `InvokeHarness` directly can send their own model config. Harness enforcement is only as strong as that IAM permission.
+
+### Events and history
+
+- **Stream.** Agents emit `{"guardrail": {...}}`. For harness agents, the backend emits it when the harness stream's `stopReason` is `guardrail_intervened`, with policies summarized from `metadata.trace.guardrail` if present. Loom relays it as the SSE `guardrail` event, or the WebSocket `{"type": "guardrail", "content": {...}}`, after `sanitize_event()` whitelists the fields.
+- **History.** For every event, custom agents write one single-line JSON record containing `"loom_event": "guardrail_intervention"` to stdout, i.e. the runtime log group.
+  - `GET /api/agents/{id}/guardrails/interventions?session_id=&hours=24&limit=100` (`agent:read` plus group access) reads these with Logs Insights over `/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT`.
+  - `hours` is capped at 14 days and `limit` at 500.
+  - The session ID is sanitized into the query and re-checked on parse.
+  - Harness agents return `supported: false` with a note, since the harness doesn't write these records.
+- **PII safety.** Bedrock's trace `match` field contains the *original* PII value. `summarize_assessment()` and `sanitize_event()` keep only `policy`, `type`/`name` and `action`. Prompt and response text, `match`, regex patterns and any other field are dropped before anything is forwarded or parsed.
+
+### Guardrail policy details (snapshotted at deploy/update time)
+
+The agent page shows what the agent's guardrail does, but **reading the page never calls Bedrock**.
+- **When it's read:** `_resolve_guardrail_or_422` calls `GetGuardrail` (one call per guardrail version: the primary plus each `allowed` alternate) when an agent is deployed or updated through any of the four create/redeploy paths.
+- **Where it's stored:** `snapshot_guardrail_details()` writes a summary to `agents.guardrail_details` (JSON `{fetched_at, guardrails: [primary, *alternates]}`). `AgentResponse.guardrail_details` returns the stored value.
+- **Why:** a per-page-load lookup would mean a `GetGuardrail` per agent view, and the earlier name lookup used `ListGuardrails`, which needs one extra call per guardrail to list versions. Bedrock control-plane APIs have low per-account request limits.
+- **What's stored:** name, description, status, region, the blocked messages, and each policy's per-direction action and enabled flag:
+  - content filters with strengths
+  - denied topics with definitions and example *counts*
+  - PII entities
+  - regex *names*
+  - managed word lists and a custom-word *count*
+  - contextual grounding thresholds
+  - the automated-reasoning policy count
+  - cross-region profile and whether a customer-managed KMS key is used
+
+  Custom words, regex patterns and the KMS key ARN aren't copied.
+- **Deploy-time validation:** a `ResourceNotFoundException`/`ValidationException` (wrong ID or version, or the guardrail isn't in that region) fails the request with **422** before anything is created. This closes the earlier gap where a bad guardrail ID only failed at invoke time. Any other failure (access denied, throttling, network) never blocks a deploy; the entry records an `error` instead. The region comes from the guardrail ARN when there is one, otherwise the agent's region.
+- **Refresh:** `POST /api/agents/{id}/guardrails/refresh` (`agent:write`) re-reads the details for the agent's baked-in guardrail(s), e.g. after editing a `DRAFT`. It never changes what the agent enforces. A guardrail that has since been deleted is recorded as an error entry rather than failing the request.
+- **Frontend:** the agent, invoke and chat views take guardrail names from this snapshot (`guardrailSummariesFromDetails`) rather than `GET /api/settings/guardrails`. Only the Settings card and the deploy wizard, which need a picker, list the account's guardrails.
+
+### Guardrail picker
+
+`GET /api/settings/guardrails` (`agent:read`) uses `ListGuardrails` (every guardrail, then each guardrail's versions) to return `{guardrail_id, guardrail_arn, name, description, status, versions}`, with versions ordered `DRAFT` first, then newest first. It returns 502 if Bedrock is unreachable.
+
+### Guardrail definitions live outside Loom
+
+Loom references guardrails, but never creates or edits them:
+- **Ownership:** guardrail policy is a compliance artifact that usually has a different owner and needs change review.
+- **Separation of duties:** Loom write access (`Create`/`UpdateGuardrail`) would let any Loom admin, or a compromised backend, weaken the policy that constrains agents.
+- **API surface:** the policy API is large and keeps growing.
+- **Versions are long-lived:** agents pin a version, and deleting or replacing one from a UI could break them.
+
+`shared/iac/guardrail.yaml` (`make guardrail` in `shared/`) is the provided way to manage them as code:
+- content filters, prompt-attack detection, PII block/mask, profanity, and an optional sample denied topic
+- a detect-only switch
+- a published `AWS::Bedrock::GuardrailVersion` with `DeletionPolicy`/`UpdateReplacePolicy: Retain`. A version change forces replacement, and without `Retain` CloudFormation would delete the version agents are pinned to.
+
+The stack outputs feed `O_GUARDRAIL_ID`/`O_GUARDRAIL_VERSION` via `make outputs`.
+
+### IAM / IaC
+
+- `shared/iac/role.yaml` (agent execution role): `bedrock:ApplyGuardrail` on `guardrail/*` in `pAgentCoreRegions`/account. This is required for inline `guardrailConfig` as well as for `ApplyGuardrail`. Harness execution roles need the same grant.
+- `backend/iac/ecs.yaml` (task role): `bedrock:ListGuardrails` (no resource-level scoping) and `bedrock:GetGuardrail` on `guardrail/*`. New parameters `pGuardrailId`, `pGuardrailVersion`, `pGuardrailMode` and `pGuardrailLocked` seed the `LOOM_GUARDRAIL_*` env fallback (set via `P_GUARDRAIL_*` in `etc/environment.sh`). Logs Insights access to runtime log groups already exists (Phase 40).
+
+### Known limitations
+
+- The PII filter doesn't evaluate tool call arguments, tool results or tool definitions (a Bedrock limitation).
+- Monitor mode evaluates only the user prompt and final response, not intermediate tool-loop model calls.
+- Harness agents have no persisted intervention history, only the live stream event.
+- A new default applies only when an agent is next deployed.

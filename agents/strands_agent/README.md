@@ -189,7 +189,7 @@ MCP (Model Context Protocol) tool servers are dynamically loaded from configurat
 
 Agent-to-agent (A2A) communication uses the Strands SDK `A2AAgent` class. Each enabled A2A agent in the configuration is wrapped as a `@tool` function that the orchestrating agent can invoke during conversation.
 
-**`_AuthenticatedA2AAgent`** — Subclass of `A2AAgent` for OAuth2-protected A2A endpoints. Injects OAuth2 Bearer tokens via the AgentCore Identity service M2M flow (using the workload token from `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`). Handles:
+**`_AuthenticatedA2AAgent`** — Subclass of `A2AAgent` for OAuth2-protected A2A endpoints. Injects OAuth2 Bearer tokens from the AgentCore Identity service using the same `_OAuth2Auth` handler as MCP servers: M2M by default, or on-behalf-of (`delegation_mode: obo`) with the configured `obo_grant_type` and `audience`. An A2A agent configured for OAuth2 without a `credential_provider_name` logs a warning and is called unauthenticated. Handles:
 
 - **Agent Card fetching** with authentication, backfilling required fields that older agent cards may omit, and overriding the card's internal URL with the external AgentCore Runtime endpoint.
 - **Message sending** with capability-aware method selection. Checks `agent_card.capabilities.streaming` — uses `message/stream` (SSE) only when streaming is supported, otherwise goes directly to `message/send`. Falls back from `message/stream` to `message/send` when the server returns "Method not found".

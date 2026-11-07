@@ -1817,7 +1817,7 @@ The invocation endpoint scans `AGENT_CONFIG_JSON` integrations for `delegation_m
 
 ### 14.4 Runtime Token Exchange (Agent)
 
-The `_OAuth2Auth` handler in `agents/strands_agent/src/integrations/mcp_client.py`:
+The `_OAuth2Auth` handler in `agents/strands_agent/src/integrations/mcp_client.py` (shared by MCP servers and A2A agents, both built with `delegation_mode`, `obo_grant_type` and `audience` from their `auth` config):
 1. Calls `acps.get_workload_access_token_for_jwt(workloadName, userToken)` to get an OBO workload token.
 2. Calls `acps.get_resource_oauth2_token(..., oauth2Flow="ON_BEHALF_OF_TOKEN_EXCHANGE")` to get the downstream token.
 3. Caches by `(credential_provider_name, user_sub)` with TTL from `expiresIn`.

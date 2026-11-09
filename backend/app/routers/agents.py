@@ -381,6 +381,48 @@ def _get_current_model_id(agent: Agent) -> str | None:
     return None
 
 
+def _assignable_model_ids(db: Session) -> set[str]:
+    """Model IDs that may be assigned to an agent right now: in the merged
+    catalog (static + live) and, when an admin has narrowed the list in
+    Settings → Models, also enabled there (an empty enabled list means every
+    catalog model is enabled). Mirrors what GET /models offers the picker."""
+    from app.routers.settings import get_enabled_model_ids
+    catalog_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
+    enabled = get_enabled_model_ids(db)
+    return catalog_ids & set(enabled) if enabled else catalog_ids
+
+
+def _current_model_ids(agent: Agent) -> set[str]:
+    """The agent's assigned models (allowed list plus default) — grandfathered on redeploy."""
+    current = set(agent.get_allowed_model_ids())
+    default = _get_current_model_id(agent)
+    if default:
+        current.add(default)
+    return current
+
+
+def _require_enabled_models(model_ids: list[str | None], db: Session, *, keep: set[str] | None = None) -> None:
+    """Reject a deploy/redeploy that assigns a model an admin has disabled.
+
+    Only applies once an admin has narrowed the enabled list: with no list
+    set, deploys keep accepting any model ID (including ones outside the
+    curated catalog). IDs in ``keep`` (the agent's current models) are
+    grandfathered so a redeploy isn't blocked by a model disabled after the
+    agent was created — those surface as deprecated_model_ids instead.
+    """
+    from app.routers.settings import get_enabled_model_ids
+    enabled = get_enabled_model_ids(db)
+    if not enabled:
+        return
+    allowed = set(enabled) | (keep or set())
+    rejected = sorted({m for m in model_ids if m and m not in allowed})
+    if rejected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Models not enabled in Settings → Models: {', '.join(rejected)}",
+        )
+
+
 def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     """Build an AgentResponse from an Agent ORM object."""
     model_id = None
@@ -478,12 +520,13 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     if not allowed_models and model_id:
         allowed_models = [model_id]
 
-    # Flag model IDs no longer in the current catalog (dropped by a
-    # models.json refresh, #64 follow-up) so the UI can surface "this agent
-    # needs to be updated" without blocking the agent itself — grandfathered
-    # models keep working, they're just no longer assignable to new agents
-    # (see the matching PATCH /{agent_id} validation below).
-    valid_model_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
+    # Flag model IDs that are no longer assignable — dropped from the catalog
+    # by a models.json refresh (#64 follow-up) or disabled by an admin in
+    # Settings → Models — so the UI can surface "this agent needs to be
+    # updated" without blocking the agent itself. Grandfathered models keep
+    # working, they're just no longer assignable to new agents (see the
+    # matching PATCH /{agent_id} and deploy validation).
+    valid_model_ids = _assignable_model_ids(db)
     candidate_ids = list(allowed_models)
     if model_id and model_id not in candidate_ids:
         candidate_ids.append(model_id)
@@ -1230,6 +1273,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Field 'model_id' is required when source is 'deploy'"
         )
+    _require_enabled_models([request.model_id, *(request.allowed_model_ids or [])], db)
     provider = (request.provider or "bedrock").lower()
     if provider not in SUPPORTED_PROVIDER_IDS:
         raise HTTPException(
@@ -2373,6 +2417,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Field 'model_id' is required when source is 'harness'"
         )
+    _require_enabled_models([request.model_id, *(request.allowed_model_ids or [])], db)
     if not request.role_arn:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -4091,6 +4136,7 @@ def redeploy_deploy_agent(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only deploy-type agents can be updated via this endpoint",
         )
+    _require_enabled_models([request.model_id, *(request.allowed_model_ids or [])], db, keep=_current_model_ids(agent))
     guardrail_selection, guardrail_block, guardrail_details = _resolve_guardrail_or_422(request, "deploy", request.provider, db)
 
     if not agent.runtime_id:
@@ -4287,6 +4333,7 @@ def redeploy_harness_agent(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only harness agents can be updated via this endpoint",
         )
+    _require_enabled_models([request.model_id, *(request.allowed_model_ids or [])], db, keep=_current_model_ids(agent))
     guardrail_selection, guardrail_block, guardrail_details = _resolve_guardrail_or_422(request, "harness", request.provider, db)
 
     if not agent.harness_id:
@@ -4835,7 +4882,7 @@ def patch_agent(
             except Exception:
                 logger.warning("Failed to propagate description to AgentCore for agent %s", agent_id, exc_info=True)
     if "model_id" in request.model_fields_set and request.model_id is not None:
-        valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
+        valid_ids = _assignable_model_ids(db)
         # Grandfather the agent's current model in — a model dropped from
         # the catalog by a models.json refresh stays assignable to agents
         # that already have it (it still works; it's just no longer
@@ -4857,7 +4904,7 @@ def patch_agent(
                     pass
                 break
     if "allowed_model_ids" in request.model_fields_set and request.allowed_model_ids is not None:
-        valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
+        valid_ids = _assignable_model_ids(db)
         # Same grandfathering as model_id above: an already-assigned model
         # can be kept (or dropped) even if it's no longer in the catalog;
         # only *adding* a model not in either set is rejected.

@@ -1363,7 +1363,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                   <span className="shrink-0 font-mono text-[9.5px] tracking-wide text-primary">DEFAULT</span>
                   <SearchableSelect
                     className="min-w-0 flex-1"
-                    options={sortedProviderModels.map((m) => ({ value: m.model_id, label: m.display_name, group: m.group }))}
+                    options={sortedProviderModels.filter((m) => !isEmbeddingModel(m)).map((m) => ({ value: m.model_id, label: m.display_name, group: m.group }))}
                     value={modelId}
                     onValueChange={setModelId}
                     placeholder="Select default model..."

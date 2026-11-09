@@ -30,8 +30,11 @@ import {
   guardrailAvailability,
   guardrailFromManifest,
   guardrailRefLabel,
+  guardrailSelectionOptions,
   guardrailToManifest,
+  hasUsableDefault,
   inheritWarning,
+  initialGuardrailSelection,
   isModeSupported,
   preferredMode,
   validateGuardrailChoice,
@@ -279,6 +282,15 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
     listLoading: guardrailListLoading,
     guardrailDefault,
   } = useGuardrailCatalog({ enabled: mode === "deploy" });
+  // Whether the guardrail choice came from the user, an existing agent or a
+  // manifest. Only an untouched new-agent form gets its starting choice
+  // adjusted to what the global default actually provides.
+  const guardrailSelectionTouched = useRef(false);
+  useEffect(() => {
+    if (guardrailSelectionTouched.current) return;
+    const initial = initialGuardrailSelection(guardrailDefault);
+    if (initial) setGuardrailSelection(initial);
+  }, [guardrailDefault]);
 
   // Discovery data
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -442,6 +454,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
     let cancelled = false;
     void agentsApi.getAgent(exportAgentId).then((agent) => {
       if (cancelled) return;
+      guardrailSelectionTouched.current = true;
       setGuardrailSelection(agent.guardrail_selection ?? "default");
       setGuardrailConfig(agent.guardrail ? { ...agent.guardrail, allowed: agent.guardrail.allowed ?? [] } : emptyGuardrailConfig());
     }).catch(() => {});
@@ -579,6 +592,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
   // Guardrail support matrix + validation (mirrors the backend's 422 rules).
   const guardrailAvail = guardrailAvailability(deploymentType, selectedProvider);
   const guardrailDefaultLocked = !!guardrailDefault?.enabled && !!guardrailDefault.locked;
+  const guardrailOptions = guardrailSelectionOptions(guardrailDefault, guardrailSelection);
   const guardrailError = validateGuardrailChoice(guardrailSelection, guardrailConfig, guardrailAvail, guardrailDefault);
   const guardrailInheritWarning = guardrailSelection === "default" ? inheritWarning(guardrailAvail, guardrailDefault) : null;
   const handleGuardrailSelectionChange = (next: GuardrailSelection) => {
@@ -587,6 +601,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       const base = guardrailDefault?.config ? { ...guardrailDefault.config, allowed: [] } : emptyGuardrailConfig();
       setGuardrailConfig({ ...base, mode: isModeSupported(guardrailAvail, base.mode) ? base.mode : preferredMode(guardrailAvail) });
     }
+    guardrailSelectionTouched.current = true;
     setGuardrailSelection(next);
   };
 
@@ -599,6 +614,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
       // Absent `guardrail` = inherit the default (manifests from before #17).
       const parsedGuardrail = guardrailFromManifest(parsed.guardrail);
       if (!parsedGuardrail.ok) return parsedGuardrail.error;
+      guardrailSelectionTouched.current = true;
       setGuardrailSelection(parsedGuardrail.selection);
       if (parsedGuardrail.config) setGuardrailConfig(parsedGuardrail.config);
       if (parsed.deployment_type === "custom" || parsed.deployment_type === "managed") {
@@ -883,7 +899,8 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
     setCodeInterpreterRegion("us-east-1");
     setCodeInterpreterNetworkMode("SANDBOX");
     setCodeInterpreterRoleId("");
-    setGuardrailSelection("default");
+    guardrailSelectionTouched.current = false;
+    setGuardrailSelection(initialGuardrailSelection(guardrailDefault) ?? "default");
     setGuardrailConfig(emptyGuardrailConfig());
     setStep(0);
     setImportApplied(false);
@@ -1363,7 +1380,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                   <span className="shrink-0 font-mono text-[9.5px] tracking-wide text-primary">DEFAULT</span>
                   <SearchableSelect
                     className="min-w-0 flex-1"
-                    options={sortedProviderModels.map((m) => ({ value: m.model_id, label: m.display_name, group: m.group }))}
+                    options={sortedProviderModels.filter((m) => !isEmbeddingModel(m)).map((m) => ({ value: m.model_id, label: m.display_name, group: m.group }))}
                     value={modelId}
                     onValueChange={setModelId}
                     placeholder="Select default model..."
@@ -1492,14 +1509,19 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                     <div className="ml-auto">
                       <SegmentedToggle<GuardrailSelection>
                         options={[
-                          { value: "default", label: "Inherit default" },
-                          { value: "custom", label: "Custom" },
                           {
-                            value: "none",
+                            value: "default",
+                            label: "Inherit default",
+                            disabled: guardrailOptions.inheritDisabled,
+                            title: guardrailOptions.inheritTitle,
+                          },
+                          { value: "custom", label: "Custom" },
+                          ...(guardrailOptions.showNone ? [{
+                            value: "none" as const,
                             label: "None",
                             disabled: guardrailDefaultLocked,
                             title: guardrailDefaultLocked ? "The global default guardrail is locked, so agents can't opt out." : undefined,
-                          },
+                          }] : []),
                         ]}
                         value={guardrailSelection}
                         onChange={handleGuardrailSelectionChange}
@@ -1517,7 +1539,7 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                         {guardrailDefault?.enabled && guardrailDefault.config ? (
                           <GuardrailConfigSummary config={guardrailDefault.config} guardrails={guardrails} />
                         ) : (
-                          <p className="text-[12px] text-muted-foreground">No default guardrail is set, so this agent deploys without one. If an administrator sets a default later, redeploy to apply it.</p>
+                          <p className="text-[12px] text-muted-foreground">No default guardrail is configured, so this agent deploys without one for now. It stays set to inherit: if an administrator sets a default later, redeploy to apply it.</p>
                         )}
                         <div className="flex flex-wrap gap-3 font-mono text-[10.5px] text-muted-foreground">
                           {guardrailDefaultLocked && <span>locked by an administrator</span>}
@@ -1528,7 +1550,16 @@ export function AgentRegistrationForm({ mode, onRegister, onDeploy, onDeployHarn
                     )}
 
                     {guardrailSelection === "none" && (
-                      <p className="text-[12px] text-muted-foreground">This agent deploys without a guardrail, even if a default is set.</p>
+                      hasUsableDefault(guardrailDefault) ? (
+                        <p className="text-[12px] text-muted-foreground">This agent opts out of the default guardrail and deploys without one.</p>
+                      ) : (
+                        <p className="text-[12px] text-muted-foreground">
+                          This agent deploys without a guardrail. No default guardrail is configured;{" "}
+                          {hasScope("admin:write")
+                            ? "set one in Settings → Models → Guardrails to make it available to inherit."
+                            : "an administrator can set one in Settings → Models → Guardrails."}
+                        </p>
+                      )
                     )}
 
                     {guardrailSelection === "custom" && (

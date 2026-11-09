@@ -424,6 +424,8 @@ export interface InvocationResponse {
   session_id: string;
   invocation_id: string;
   request_id: string | null;
+  /** Model that served this call (runtime override or the agent default); null for turns recorded before it was tracked. */
+  model_id: string | null;
   client_invoke_time: number | null;
   client_done_time: number | null;
   agent_start_time: number | null;

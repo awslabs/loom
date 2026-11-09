@@ -177,6 +177,48 @@ function defaultIsLocked(def: GuardrailDefault | null | undefined): boolean {
   return !!def && def.enabled && def.locked;
 }
 
+/** True when inheriting the global default would actually attach a guardrail. */
+export function hasUsableDefault(def: GuardrailDefault | null | undefined): boolean {
+  return !!def && def.enabled && !!def.config;
+}
+
+export interface GuardrailSelectionOptions {
+  /** "Inherit default" can't be chosen: no default is configured. */
+  inheritDisabled: boolean;
+  inheritTitle?: string;
+  /** "None" is offered: hidden under a locked default, since agents can't opt out. */
+  showNone: boolean;
+}
+
+/**
+ * Which selection options the wizard offers. `def` is null while the default
+ * is loading or if it couldn't be read; that's treated as unknown, so nothing
+ * is disabled. The current selection always stays visible, so editing an
+ * agent saved as "inherit" (or "none" before a lock) doesn't hide its value.
+ */
+export function guardrailSelectionOptions(
+  def: GuardrailDefault | null | undefined,
+  current: GuardrailSelection,
+): GuardrailSelectionOptions {
+  const noDefault = !!def && !hasUsableDefault(def);
+  return {
+    inheritDisabled: noDefault && current !== "default",
+    inheritTitle: noDefault ? "No default guardrail is configured" : undefined,
+    showNone: !defaultIsLocked(def) || current === "none",
+  };
+}
+
+/**
+ * Starting selection for a brand-new agent once the default has loaded:
+ * inherit when a default exists, otherwise an explicit "none" so the wizard
+ * doesn't suggest an inherited guardrail that isn't there. Returns null while
+ * the default is unknown (leave the selection alone).
+ */
+export function initialGuardrailSelection(def: GuardrailDefault | null | undefined): GuardrailSelection | null {
+  if (!def) return null;
+  return hasUsableDefault(def) ? "default" : "none";
+}
+
 /**
  * Blocking validation for the wizard's guardrail section. Returns a message
  * when the choice would be rejected (422) by the backend, else null.

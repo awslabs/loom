@@ -138,6 +138,7 @@ class InvocationResponse(BaseModel):
     session_id: str
     invocation_id: str
     request_id: str | None = None
+    model_id: str | None = None
     client_invoke_time: float | None
     client_done_time: float | None
     agent_start_time: float | None
@@ -581,6 +582,7 @@ async def invoke_agent_stream(
     if runtime_model_id:
         logger.info("Runtime model override: %s (default: %s)", runtime_model_id, agent_model_id)
         agent_model_id = runtime_model_id
+    invocation.model_id = agent_model_id
 
     runtime_id = agent.runtime_id
     qualifier = session.qualifier
@@ -1091,6 +1093,7 @@ async def invoke_harness_agent_stream(
 
     if runtime_model_id:
         agent_model_id = runtime_model_id
+    invocation.model_id = agent_model_id
 
     # Guardrails (issue #17): an InvokeHarness `model` override replaces the
     # harness's whole model config for this call, so whenever Loom sends one

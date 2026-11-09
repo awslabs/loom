@@ -115,6 +115,16 @@ Resources:
               # type, so it matched nothing. The real resource lives under
               # "token-vault/default/", which is the form the backend builds
               # when it hands an apiKeyArn to a runtime.
+              #
+              # AgentCore authorizes these calls against every resource in the
+              # request, not just the provider: the token vault and the
+              # *calling workload identity* too. With only the provider ARNs
+              # listed, GetResourceOauth2Token is denied on
+              # workload-identity-directory/default/workload-identity/<runtime>
+              # and every OAuth MCP / A2A integration fails to attach. The
+              # vault and directory containers grant nothing on their own (IAM
+              # needs every resource allowed), and the workload identity is
+              # scoped to this role's runtimes, named like its log groups.
               - Effect: Allow
                 Action:
                   - bedrock-agentcore:GetApiKeyCredential
@@ -123,6 +133,10 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:token-vault/default/oauth2credentialprovider/loom-${pAgentName}-*"
                   - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:token-vault/default/apikeycredentialprovider/loom-${pAgentName}-*"
+                  - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:token-vault/default"
+                  - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:workload-identity-directory/default"
+                  - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:workload-identity-directory/default/workload-identity/${pAgentName}*"
+                  - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:workload-identity-directory/default/workload-identity/harness_${pAgentName}*"
         - PolicyName: secretsmanager
           PolicyDocument:
             Version: "2012-10-17"

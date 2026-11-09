@@ -255,6 +255,9 @@ export function InvokePanel({
   const promptKey = `loom:invokePrompt:${agentId}`;
   const [prompt, setPrompt] = useState(() => sessionStorage.getItem(promptKey) ?? "");
   const [lastPrompt, setLastPrompt] = useState<string | null>(null);
+  // Model the live turn was sent with, captured at send time so changing the
+  // picker afterwards doesn't relabel a turn that already ran.
+  const [lastModelId, setLastModelId] = useState<string | null>(null);
   const [showAllSessions, setShowAllSessions] = useState(false);
 
   useEffect(() => {
@@ -527,7 +530,7 @@ export function InvokePanel({
 
   useEffect(() => {
     setSelectedSession(NEW_SESSION);
-    setLastPrompt(null);
+    setLastPrompt(null); setLastModelId(null);
     userPickedRef.current = false;
   }, [agentId]);
 
@@ -572,6 +575,7 @@ export function InvokePanel({
       ? guardrailOptions.find((g) => guardrailRefKey(g) === selectedGuardrailKey)
       : undefined;
     setLastPrompt(trimmed);
+    setLastModelId(selectedModel || modelId || null);
     // Clear the box once sent (like ChatPage) — the prompt stays visible in
     // the user bubble, and clearing also drops the persisted draft.
     setPrompt("");
@@ -595,9 +599,11 @@ export function InvokePanel({
   const oboWarning = hasObo && !userTokenAvailable;
 
   const groupedModels = groupModels(filteredModels);
-  const currentModelName = selectedModel
-    ? (filteredModels.find((m) => m.model_id === selectedModel)?.display_name ?? selectedModel)
-    : (filteredModels.find((m) => m.model_id === modelId)?.display_name ?? modelId ?? "");
+  // Resolve against the full model list, not just this agent's allowed set,
+  // so past turns on a since-removed model still show a readable name.
+  const modelName = (id: string | null | undefined): string | undefined =>
+    id ? (modelOptions.find((m) => m.model_id === id)?.display_name ?? id) : undefined;
+  const liveModelName = modelName(lastModelId ?? selectedModel ?? modelId);
 
   // ---- transcript assembly -------------------------------------------------
   const activeSessionId = sessionStart?.session_id ?? (selectedSession !== NEW_SESSION ? selectedSession : null);
@@ -674,7 +680,7 @@ export function InvokePanel({
                     <UserBubble text={inv.prompt_text} timestamp={inv.created_at ? formatTimestamp(inv.created_at, timezone) : undefined} currentUserId={activeSessionRecord?.user_id ?? undefined} />
                   )}
                   <div className="flex max-w-[760px] flex-col gap-2">
-                    <AgentAttribution agentName={agentName} />
+                    <AgentAttribution agentName={agentName} modelLabel={modelName(inv.model_id)} />
                     <div className="text-[13.5px] leading-[1.65] text-pretty">
                       {inv.status === "error" ? (
                         <span className="text-destructive">{inv.error_message ?? "This invocation failed."}</span>
@@ -693,7 +699,7 @@ export function InvokePanel({
                 <div className="flex flex-col gap-5">
                   {lastPrompt && <UserBubble text={lastPrompt} timestamp="just now" currentUserId={currentUserId} />}
                   <div className="flex max-w-[760px] flex-col gap-2">
-                    <AgentAttribution agentName={agentName} modelLabel={currentModelName || undefined} />
+                    <AgentAttribution agentName={agentName} modelLabel={liveModelName} />
                     <div className="text-[13.5px] leading-[1.65] text-pretty">
                       <LiveTurnBody agentId={agentId} segments={segments} isStreaming={isStreaming} />
                     </div>
@@ -1019,8 +1025,8 @@ export function InvokePanel({
                     key={s.session_id}
                     role="button"
                     tabIndex={0}
-                    onClick={() => { userPickedRef.current = true; setSelectedSession(s.session_id); setLastPrompt(null); }}
-                    onKeyDown={(e) => { if (e.key === "Enter") { userPickedRef.current = true; setSelectedSession(s.session_id); setLastPrompt(null); } }}
+                    onClick={() => { userPickedRef.current = true; setSelectedSession(s.session_id); setLastPrompt(null); setLastModelId(null); }}
+                    onKeyDown={(e) => { if (e.key === "Enter") { userPickedRef.current = true; setSelectedSession(s.session_id); setLastPrompt(null); setLastModelId(null); } }}
                     className={`flex cursor-pointer flex-col gap-1 rounded-md border px-2.5 py-2 text-left transition-colors ${isSelected ? "border-primary/30 bg-primary/[0.05]" : "hover:bg-accent/50"}`}
                   >
                     <div className="flex items-center gap-1.5">

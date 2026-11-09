@@ -45,6 +45,19 @@ make run
 
 See the [root README](../README.md) for the full local development guide, deployment workflow, and environment configuration.
 
+### Calling the API as a real user (Okta / Entra ID)
+
+To call the API from the command line or test scripts as a signed-in user of the active external IdP:
+
+```bash
+make auth.login NAME=okta-admin            # opens the IdP sign-in page (MFA applies)
+curl -H "Authorization: Bearer $(cat ../tmp/.tokens/okta-admin.jwt)" http://localhost:8000/api/auth/me
+```
+
+`scripts/loom_login.py` reads the active IdP's settings from `/api/auth/config`, signs in with Authorization Code + PKCE using `prompt=login` (so each run can use a different test persona), and exchanges the code the same way the UI does: through `/api/auth/token` for confidential clients, or directly with the IdP for public clients. Only the access token is saved, to `tmp/.tokens/<NAME>.jwt` (mode `0600`, gitignored), and it's never printed. The refresh token is discarded, so sign in again when the token expires.
+
+One-time setup: register `http://localhost:8765/oauth/callback` (or your `LOOM_LOGIN_PORT`) as a redirect URI on the existing Loom app registration. The path matches the UI's, so if `http://localhost:5173/oauth/callback` is already registered, `make auth.login PORT=5173` reuses it with no IdP change, as long as the Vite dev server isn't running on that port. In Okta, add it to the app's sign-in redirect URIs. In Entra ID, add it under a **Mobile and desktop applications** platform; an SPA-platform redirect can't be redeemed outside a browser. Delete `tmp/.tokens/` to discard saved tokens.
+
 ## Configuration
 
 Runtime configuration is sourced from `etc/environment.sh`:

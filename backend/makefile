@@ -13,6 +13,15 @@ run:
 run.debug:
 	source .venv/bin/activate && LOG_LEVEL=DEBUG uvicorn app.main:app --reload --port $${LOOM_BACKEND_PORT:-8000} --log-level debug
 
+# CLI sign-in to Loom's active Okta / Entra ID IdP (browser + PKCE). Saves only
+# the access token to tmp/.tokens/<NAME>.jwt (mode 0600, gitignored) and never
+# prints it. Register http://localhost:8765/oauth/callback as a redirect URI on
+# the IdP app first, or pass PORT=5173 to reuse the UI's local redirect URI
+# while the Vite dev server is stopped. See scripts/loom_login.py.
+#   make auth.login [NAME=okta-admin] [PORT=8765] [LOOM_URL=http://localhost:8000]
+auth.login:
+	source .venv/bin/activate && python scripts/loom_login.py $(if $(NAME),--name $(NAME)) $(if $(PORT),--port $(PORT)) $(if $(LOOM_URL),--loom-url $(LOOM_URL))
+
 # Setup and migration
 migrate: migrate-db fix-sequences
 

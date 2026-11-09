@@ -103,6 +103,7 @@ def _migrate_add_columns(eng) -> None:
         ("invocations", "ltm_cost", "REAL"),
         ("invocations", "cost_source", "VARCHAR"),
         ("invocations", "request_id", "VARCHAR"),
+        ("invocations", "model_id", "VARCHAR"),
         ("invocation_sessions", "user_id", "VARCHAR"),
         ("invocation_sessions", "hidden_at", "DATETIME"),
         ("agents", "description", "TEXT"),

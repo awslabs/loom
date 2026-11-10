@@ -118,7 +118,7 @@ P_LOOM_ARTIFACT_BUCKET=$(LOOM_ARTIFACT_BUCKET)
 # aws/secretsmanager key), also set the KMS key ARN below so the ECS task
 # execution role can decrypt it when pulling the secret at container start.
 P_LITELLM_PROXY_BASE_URL=<https://litellm-proxy-internal-endpoint>
-P_LITELLM_DISCOVERY_BASE_URL=<http://localhost:4000 (local dev only)>
+P_LITELLM_DISCOVERY_BASE_URL=<optional; defaults to P_LITELLM_PROXY_BASE_URL. Loopback/localhost is refused by net_guard>
 P_LITELLM_PROXY_API_KEY_SECRET_ARN=<arn:aws:secretsmanager:region:account:secret:name>
 P_LITELLM_PROXY_API_KEY_SECRET_KMS_KEY_ARN=<arn:aws:kms:region:account:key/key-id (leave empty if default key)>
 

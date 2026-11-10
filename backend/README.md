@@ -78,7 +78,7 @@ Runtime configuration is sourced from `etc/environment.sh`:
 | `LOOM_ALLOWED_ORIGINS` | Comma-separated additional CORS origins for deployed environments | — |
 | `LOOM_REGISTRY_ID` | AWS Agent Registry ID (bootstrap fallback; prefer Settings page configuration) | — |
 | `LOOM_LITELLM_PROXY_BASE_URL` | Default Agent Base URL for a self-hosted LiteLLM proxy (bootstrap fallback; prefer Settings → Models → LiteLLM). Leave unset to disable the LiteLLM provider. | — |
-| `LOOM_LITELLM_DISCOVERY_BASE_URL` | Default Discovery Base URL the backend itself uses for model discovery, if different from `LOOM_LITELLM_PROXY_BASE_URL` (e.g. a local SSM tunnel during dev) | — |
+| `LOOM_LITELLM_DISCOVERY_BASE_URL` | Default Discovery Base URL the backend itself uses for model discovery, if different from `LOOM_LITELLM_PROXY_BASE_URL`. Must be reachable at an address `net_guard` allows: loopback (e.g. a `localhost` SSM tunnel), link-local and metadata addresses are refused | — |
 | `LOOM_LITELLM_PROXY_API_KEY` | Default LiteLLM proxy master key (bootstrap fallback; a Settings-page save always overrides this) | — |
 | `LOOM_GUARDRAIL_ID` | Default Bedrock guardrail ID for agents (bootstrap fallback; a Settings → Guardrails save always overrides this). Leave unset to disable. | — |
 | `LOOM_GUARDRAIL_VERSION` | Version of the default guardrail (number or `DRAFT`) | `DRAFT` |

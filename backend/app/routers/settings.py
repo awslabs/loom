@@ -447,10 +447,38 @@ def update_litellm_proxy_config(
     user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> LitellmProxyConfigResponse:
-    """Update the LiteLLM proxy configuration. Omitting master_key leaves the stored key untouched."""
-    from app.services.litellm import MASTER_KEY_SECRET_NAME, has_master_key, is_enabled
+    """Update the LiteLLM proxy configuration. Omitting master_key leaves the stored key untouched.
+
+    Both URLs are validated before anything is written: the backend sends the
+    master key to them, so each must be a bare scheme://host[:port][/path] that
+    passes net_guard's connection-target check. Empty values are allowed (an
+    empty Discovery Base URL means "reuse the Agent Base URL").
+    """
+    from app.services.litellm import (
+        MASTER_KEY_SECRET_NAME,
+        has_master_key,
+        is_enabled,
+        validate_proxy_base_url,
+    )
     from app.services.model_catalog import clear_litellm_cache
+    from app.services.net_guard import SSRFBlockedError
     from app.services.secrets import store_secret
+
+    request.base_url = request.base_url.strip()
+    request.discovery_base_url = request.discovery_base_url.strip()
+    for label, url in (
+        ("Agent Base URL", request.base_url),
+        ("Discovery Base URL", request.discovery_base_url),
+    ):
+        if not url:
+            continue
+        try:
+            validate_proxy_base_url(url)
+        except SSRFBlockedError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"{label} is not allowed: {e}",
+            ) from e
 
     for key, value in (
         ("litellm_enabled", "true" if request.enabled else "false"),

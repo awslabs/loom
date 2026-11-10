@@ -551,7 +551,7 @@ export function SettingsPage({ canViewTagging = false, canEditTagging = false, u
                                 <Input
                                   type="text"
                                   className="h-8 text-xs font-mono"
-                                  placeholder={litellmBaseUrl || "http://localhost:4000"}
+                                  placeholder={litellmBaseUrl || "http://litellm.internal:4000"}
                                   value={litellmDiscoveryBaseUrl}
                                   onChange={(e) => setLitellmDiscoveryBaseUrl(e.target.value)}
                                 />

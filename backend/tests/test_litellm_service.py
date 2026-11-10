@@ -102,7 +102,7 @@ class TestGetLitellmProxyConfig(unittest.TestCase):
 
 
 class TestVendVirtualKey(unittest.TestCase):
-    @patch("httpx.post")
+    @patch("app.services.net_guard.guarded_post")
     @patch("app.services.secrets.get_secret")
     @patch("app.services.litellm._setting")
     def test_success_returns_key(self, mock_setting, mock_get_secret, mock_post):
@@ -127,7 +127,7 @@ class TestVendVirtualKey(unittest.TestCase):
         with patch.dict("os.environ", {"LOOM_LITELLM_PROXY_BASE_URL": ""}):
             self.assertIsNone(vend_virtual_key(1, "agent", ["gpt-4o"], MagicMock()))
 
-    @patch("httpx.post")
+    @patch("app.services.net_guard.guarded_post")
     @patch("app.services.secrets.get_secret")
     @patch("app.services.litellm._setting")
     def test_request_failure_returns_none(self, mock_setting, mock_get_secret, mock_post):
@@ -137,7 +137,7 @@ class TestVendVirtualKey(unittest.TestCase):
 
         self.assertIsNone(vend_virtual_key(1, "agent", ["gpt-4o"], MagicMock()))
 
-    @patch("httpx.post")
+    @patch("app.services.net_guard.guarded_post")
     @patch("app.services.secrets.get_secret")
     @patch("app.services.litellm._setting")
     def test_missing_key_field_returns_none(self, mock_setting, mock_get_secret, mock_post):
@@ -151,7 +151,7 @@ class TestVendVirtualKey(unittest.TestCase):
 
 
 class TestRevokeVirtualKey(unittest.TestCase):
-    @patch("httpx.post")
+    @patch("app.services.net_guard.guarded_post")
     @patch("app.services.secrets.get_secret")
     @patch("app.services.litellm._setting")
     def test_success_posts_key_delete(self, mock_setting, mock_get_secret, mock_post):
@@ -171,7 +171,7 @@ class TestRevokeVirtualKey(unittest.TestCase):
         with patch.dict("os.environ", {"LOOM_LITELLM_PROXY_BASE_URL": ""}):
             revoke_virtual_key("loom-agent-1", MagicMock())  # should not raise
 
-    @patch("httpx.post")
+    @patch("app.services.net_guard.guarded_post")
     @patch("app.services.secrets.get_secret")
     @patch("app.services.litellm._setting")
     def test_request_failure_does_not_raise(self, mock_setting, mock_get_secret, mock_post):
@@ -181,7 +181,7 @@ class TestRevokeVirtualKey(unittest.TestCase):
 
         revoke_virtual_key("loom-agent-1", MagicMock())  # should not raise
 
-    @patch("httpx.post")
+    @patch("app.services.net_guard.guarded_post")
     @patch("app.services.secrets.get_secret")
     @patch("app.services.litellm._setting")
     def test_404_treated_as_nothing_to_revoke_not_a_failure(self, mock_setting, mock_get_secret, mock_post):

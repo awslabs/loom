@@ -261,7 +261,7 @@ class TestFetchLitellmProxyCatalog(unittest.TestCase):
     app.services.litellm.get_litellm_proxy_config (Settings-page override,
     falling back to env vars), not directly from os.environ."""
 
-    @patch("httpx.get")
+    @patch("app.services.net_guard.guarded_get")
     @patch("app.services.litellm.get_litellm_proxy_config")
     def test_success_reshapes_model_info_response(self, mock_config, mock_get):
         mock_config.return_value = ("http://litellm.internal:4000", "sk-test")
@@ -289,20 +289,21 @@ class TestFetchLitellmProxyCatalog(unittest.TestCase):
             "http://litellm.internal:4000/model/info",
             headers={"Authorization": "Bearer sk-test"},
             timeout=5.0,
+            follow_redirects=False,
         )
 
     @patch("app.services.litellm.get_litellm_proxy_config", return_value=None)
     def test_unconfigured_disables_fetch(self, mock_config):
         self.assertIsNone(_fetch_litellm_proxy_catalog())
 
-    @patch("httpx.get")
+    @patch("app.services.net_guard.guarded_get")
     @patch("app.services.litellm.get_litellm_proxy_config")
     def test_network_failure_returns_none(self, mock_config, mock_get):
         mock_config.return_value = ("http://litellm.internal:4000", "sk-test")
         mock_get.side_effect = Exception("timeout")
         self.assertIsNone(_fetch_litellm_proxy_catalog())
 
-    @patch("httpx.get")
+    @patch("app.services.net_guard.guarded_get")
     @patch("app.services.litellm.get_litellm_proxy_config")
     def test_non_dict_response_returns_none(self, mock_config, mock_get):
         mock_config.return_value = ("http://litellm.internal:4000", "sk-test")
@@ -313,7 +314,7 @@ class TestFetchLitellmProxyCatalog(unittest.TestCase):
 
 
 class TestFetchLitellmCatalog(unittest.TestCase):
-    @patch("httpx.get")
+    @patch("app.services.net_guard.safe_get")
     def test_success_returns_raw_catalog(self, mock_get):
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -331,7 +332,7 @@ class TestFetchLitellmCatalog(unittest.TestCase):
         self.assertIn("anthropic.claude-sonnet-4-6", result)
         self.assertEqual(result["anthropic.claude-sonnet-4-6"]["max_tokens"], 16384)
 
-    @patch("httpx.get")
+    @patch("app.services.net_guard.safe_get")
     def test_network_failure_returns_none(self, mock_get):
         mock_get.side_effect = Exception("timeout")
         self.assertIsNone(_fetch_litellm_catalog())
@@ -340,7 +341,7 @@ class TestFetchLitellmCatalog(unittest.TestCase):
     def test_empty_url_disables_fetch(self):
         self.assertIsNone(_fetch_litellm_catalog())
 
-    @patch("httpx.get")
+    @patch("app.services.net_guard.safe_get")
     def test_non_dict_response_returns_none(self, mock_get):
         mock_response = MagicMock()
         mock_response.json.return_value = ["not", "a", "dict"]

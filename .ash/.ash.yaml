@@ -29,6 +29,15 @@ global_settings:
     - path: backend/tests/test_rds.py
       rule_id: SECRET-BASIC-AUTH-CREDENTIALS
       reason: Example connection string used to exercise URL-parsing logic in a unit test, not a real credential.
+    - path: backend/tests/test_litellm_ssrf.py
+      rule_id: SECRET-BASIC-AUTH-CREDENTIALS
+      reason: Fake user:pw@ proxy URL asserting that base URLs carrying userinfo are refused, not a real credential.
+    - path: backend/tests/test_litellm_ssrf.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Placeholder master key ("sk-master") for a faked LiteLLM proxy env var, not a real secret value.
+    - path: backend/tests/test_settings_litellm_proxy.py
+      rule_id: SECRET-BASIC-AUTH-CREDENTIALS
+      reason: Fake user:pass@ proxy URL asserting that saving a base URL carrying userinfo returns 422, not a real credential.
     - path: agents/strands_agent/README.md
       rule_id: SECRET-SECRET-KEYWORD
       reason: Example Secrets Manager ARN in documentation, not a real secret value.

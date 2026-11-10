@@ -166,6 +166,21 @@ def _validate_url(url: str, *, require_https: bool, allow_private: bool) -> tupl
     return parsed, validated_ip
 
 
+def validate_connection_url(url: str) -> None:
+    """Check a connection-sink URL at the permissive level without fetching it.
+
+    For validating a URL when it is saved, so a bad target is rejected up
+    front instead of only failing at request time. Applies exactly the checks
+    ``guarded_get``/``guarded_post`` apply before connecting (scheme, hostname,
+    resolved address), so a URL that passes here is one the guarded calls will
+    attempt. It is not a substitute for them: DNS can change between the save
+    and the request, so the request-time check is the one that counts.
+
+    Raises SSRFBlockedError if the URL is not an allowed target.
+    """
+    _validate_url(url, require_https=False, allow_private=True)
+
+
 def _build_pinned_request(
     method: str,
     parsed: urllib.parse.ParseResult,

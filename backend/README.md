@@ -45,6 +45,19 @@ make run
 
 See the [root README](../README.md) for the full local development guide, deployment workflow, and environment configuration.
 
+### Calling the API as a real user (Okta / Entra ID)
+
+To call the API from the command line or test scripts as a signed-in user of the active external IdP:
+
+```bash
+make auth.login NAME=okta-admin            # opens the IdP sign-in page (MFA applies)
+curl -H "Authorization: Bearer $(cat ../tmp/.tokens/okta-admin.jwt)" http://localhost:8000/api/auth/me
+```
+
+`scripts/loom_login.py` reads the active IdP's settings from `/api/auth/config`, signs in with Authorization Code + PKCE using `prompt=login` (so each run can use a different test persona), and exchanges the code the same way the UI does: through `/api/auth/token` for confidential clients, or directly with the IdP for public clients. Only the access token is saved, to `tmp/.tokens/<NAME>.jwt` (mode `0600`, gitignored), and it's never printed. The refresh token is discarded, so sign in again when the token expires.
+
+One-time setup: register `http://localhost:8765/oauth/callback` (or your `LOOM_LOGIN_PORT`) as a redirect URI on the existing Loom app registration. The path matches the UI's, so if `http://localhost:5173/oauth/callback` is already registered, `make auth.login PORT=5173` reuses it with no IdP change, as long as the Vite dev server isn't running on that port. In Okta, add it to the app's sign-in redirect URIs. In Entra ID, add it under a **Mobile and desktop applications** platform; an SPA-platform redirect can't be redeemed outside a browser. Delete `tmp/.tokens/` to discard saved tokens.
+
 ## Configuration
 
 Runtime configuration is sourced from `etc/environment.sh`:
@@ -65,8 +78,12 @@ Runtime configuration is sourced from `etc/environment.sh`:
 | `LOOM_ALLOWED_ORIGINS` | Comma-separated additional CORS origins for deployed environments | — |
 | `LOOM_REGISTRY_ID` | AWS Agent Registry ID (bootstrap fallback; prefer Settings page configuration) | — |
 | `LOOM_LITELLM_PROXY_BASE_URL` | Default Agent Base URL for a self-hosted LiteLLM proxy (bootstrap fallback; prefer Settings → Models → LiteLLM). Leave unset to disable the LiteLLM provider. | — |
-| `LOOM_LITELLM_DISCOVERY_BASE_URL` | Default Discovery Base URL the backend itself uses for model discovery, if different from `LOOM_LITELLM_PROXY_BASE_URL` (e.g. a local SSM tunnel during dev) | — |
+| `LOOM_LITELLM_DISCOVERY_BASE_URL` | Default Discovery Base URL the backend itself uses for model discovery, if different from `LOOM_LITELLM_PROXY_BASE_URL`. Must be reachable at an address `net_guard` allows: loopback (e.g. a `localhost` SSM tunnel), link-local and metadata addresses are refused | — |
 | `LOOM_LITELLM_PROXY_API_KEY` | Default LiteLLM proxy master key (bootstrap fallback; a Settings-page save always overrides this) | — |
+| `LOOM_GUARDRAIL_ID` | Default Bedrock guardrail ID for agents (bootstrap fallback; a Settings → Guardrails save always overrides this). Leave unset to disable. | — |
+| `LOOM_GUARDRAIL_VERSION` | Version of the default guardrail (number or `DRAFT`) | `DRAFT` |
+| `LOOM_GUARDRAIL_MODE` | Default guardrail mode: `enforce` (inline) or `monitor` (log-only) | `enforce` |
+| `LOOM_GUARDRAIL_LOCKED` | When `true`, agents can't opt out of the default guardrail | `false` |
 
 AWS credentials use the standard boto3 credential chain (environment variables, AWS profile, instance metadata).
 
@@ -231,7 +248,7 @@ backend/
 
 ### `agents`
 
-Stores registered and deployed AgentCore Runtime agents. Uses an auto-incrementing integer PK for internal references; `arn` and `runtime_id` are stored as indexed columns for AWS lookups. Includes columns for: `source` (`register`, `deploy`, or `harness`), `deployment_status`, `execution_role_arn`, `endpoint_name`, `endpoint_arn`, `endpoint_status`, `protocol`, `network_mode`, `authorizer_config`, `credential_providers`, `deployed_at`, `tags` (JSON dict of resolved tag key-value pairs), `harness_id` (harness ID for managed agent deployments), `registry_record_id` (AWS Agent Registry record ID), and `registry_status` (registry lifecycle status). Agents are auto-registered in DRAFT status on deployment when registry is configured.
+Stores registered and deployed AgentCore Runtime agents. Uses an auto-incrementing integer PK for internal references; `arn` and `runtime_id` are stored as indexed columns for AWS lookups. Includes columns for: `source` (`register`, `deploy`, or `harness`), `deployment_status`, `execution_role_arn`, `endpoint_name`, `endpoint_arn`, `endpoint_status`, `protocol`, `network_mode`, `authorizer_config`, `credential_providers`, `deployed_at`, `tags` (JSON dict of resolved tag key-value pairs), `harness_id` (harness ID for managed agent deployments), `registry_record_id` (AWS Agent Registry record ID), `registry_status` (registry lifecycle status), and `guardrail_selection` (`default`, `custom`, or `none` — the resolved guardrail itself is the `guardrail` block of `AGENT_CONFIG_JSON`). Agents are auto-registered in DRAFT status on deployment when registry is configured.
 
 ### `agent_config_entries`
 

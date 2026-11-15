@@ -21,6 +21,7 @@ from google.adk.tools.base_tool import BaseTool
 from src.config import AgentConfig
 from src.integrations.a2a_client import create_a2a_tools
 from src.integrations.approval import ApprovalPolicyMatcher, apply_confirmation_to_tools
+from src.integrations.guardrails import GuardrailTraceClient, enforce_applies
 from src.integrations.code_interpreter import AgentCoreCodeInterpreterTools, build_code_interpreter_tools
 from src.integrations.mcp_client import build_toolsets
 from src.integrations.memory import MemoryPlugin
@@ -42,9 +43,41 @@ def build_model(config: AgentConfig) -> str | BaseLlm:
     routes through ``LiteLlm``.
     """
     provider = config.provider or "bedrock"
+    guardrail = config.guardrail
+
+    if guardrail is not None and guardrail.mode == "enforce" and not enforce_applies(guardrail, provider):
+        # The backend rejects this combination at deploy time; be defensive.
+        logger.warning(
+            "Guardrail %s is in enforce mode but provider '%s' is not bedrock; "
+            "the guardrail will NOT be attached to model calls",
+            guardrail.guardrail_id, provider,
+        )
 
     if provider == "bedrock":
         region = os.environ.get("AWS_REGION", "us-east-1")
+        if guardrail is not None and enforce_applies(guardrail, provider):
+            # LiteLLM's Bedrock Converse transformation forwards
+            # ``guardrailConfig`` as the Converse request's guardrailConfig
+            # (and wraps the latest user turn in guardContent). The custom
+            # llm_client records the returned guardrail trace / finish reason,
+            # which ADK's LiteLlm would otherwise drop.
+            guardrail_config: dict[str, str] = {
+                "guardrailIdentifier": guardrail.identifier,
+                "guardrailVersion": guardrail.guardrail_version,
+                "trace": "enabled",
+            }
+            if guardrail.stream_processing_mode == "async":
+                guardrail_config["streamProcessingMode"] = "async"
+            logger.info(
+                "Attaching guardrail %s version %s to LiteLlm (stream_processing_mode=%s)",
+                guardrail.guardrail_id, guardrail.guardrail_version, guardrail.stream_processing_mode,
+            )
+            return LiteLlm(
+                model=f"bedrock/{config.model_id}",
+                aws_region_name=region,
+                guardrailConfig=guardrail_config,
+                llm_client=GuardrailTraceClient(),
+            )
         return LiteLlm(model=f"bedrock/{config.model_id}", aws_region_name=region)
 
     if provider not in ("openai", "anthropic", "litellm"):

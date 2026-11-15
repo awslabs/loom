@@ -239,7 +239,7 @@ def create_a2a_agent(
         last_fetched_at=datetime.utcnow(),
     )
     # loom:group is what authorization is keyed on, so require it at creation.
-    agent.set_tags(require_group_tag(request.tags, "A2A agent"))
+    agent.set_tags(require_group_tag(request.tags, "A2A agent", user=user))
     db.add(agent)
     db.flush()
 
@@ -297,7 +297,7 @@ def update_a2a_agent(
     # The column is resource_tags and holds JSON, so tags goes through
     # set_tags rather than setattr; loom:group stays required.
     if "tags" in update_data:
-        agent.set_tags(require_group_tag(update_data.pop("tags"), "A2A agent"))
+        agent.set_tags(require_group_tag(update_data.pop("tags"), "A2A agent", user=user))
     for field, value in update_data.items():
         setattr(agent, field, value)
 

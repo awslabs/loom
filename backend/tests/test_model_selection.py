@@ -266,6 +266,34 @@ class TestModelSelection(unittest.TestCase):
         # Should not be 400 (may be 500 from AWS call)
         self.assertNotEqual(response.status_code, 400)
 
+    def _invoke_and_read_model(self, body: dict) -> str | None:
+        """Run a full (mocked) invoke stream and return the recorded invocation.model_id."""
+        from app.models.invocation import Invocation
+        agent = self._create_agent_with_models(
+            allowed_models=["us.anthropic.claude-sonnet-4-6", "us.anthropic.claude-haiku-4-5-20251001-v1:0"])
+        agent.set_available_qualifiers(["DEFAULT"])
+        self.session.commit()
+        with patch("app.routers.invocations.invoke_agent", return_value=iter([{"type": "text", "content": "hi"}])), \
+             patch("app.routers.invocations.count_input_tokens", return_value=1), \
+             patch("app.routers.invocations.count_output_tokens", return_value=1):
+            resp = self.client.post(f"/api/agents/{agent.id}/invoke", json={"prompt": "Hello", **body})
+            self.assertEqual(resp.status_code, 200, resp.text)
+            self.assertIn("hi", resp.text)
+        self.session.expire_all()
+        return self.session.query(Invocation).one().model_id
+
+    def test_invocation_records_default_model(self):
+        self.assertEqual(self._invoke_and_read_model({}), "us.anthropic.claude-sonnet-4-6")
+
+    def test_invocation_records_runtime_model_override(self):
+        self.assertEqual(self._invoke_and_read_model({"model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0"}),
+                         "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+
+    def test_invocation_to_dict_includes_model_id(self):
+        from app.models.invocation import Invocation
+        self.assertIsNone(Invocation(session_id="s", invocation_id="i").to_dict()["model_id"])
+        self.assertEqual(Invocation(session_id="s", invocation_id="i", model_id="m").to_dict()["model_id"], "m")
+
 
 if __name__ == "__main__":
     unittest.main()

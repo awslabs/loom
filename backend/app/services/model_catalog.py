@@ -276,12 +276,16 @@ def _fetch_litellm_proxy_catalog(timeout: float = 5.0) -> dict[str, dict[str, An
     base_url, api_key = config
 
     try:
-        import httpx
+        from app.services import net_guard
+        from app.services.litellm import proxy_endpoint
 
-        response = httpx.get(
-            f"{base_url.rstrip('/')}/model/info",
+        # Permissive guard (the proxy is typically VPC-internal), no
+        # redirects: the request carries the master key.
+        response = net_guard.guarded_get(
+            proxy_endpoint(base_url, "/model/info"),
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=timeout,
+            follow_redirects=False,
         )
         response.raise_for_status()
         raw = response.json()
@@ -318,9 +322,11 @@ def _fetch_litellm_catalog(timeout: float = 5.0) -> dict[str, dict[str, Any]] | 
         return None
 
     try:
-        import httpx
+        from app.services import net_guard
 
-        response = httpx.get(url, timeout=timeout)
+        # Strict guard: the pricing catalog is a public HTTPS document, so
+        # there is no reason for this fetch to reach a private address.
+        response = net_guard.safe_get(url, timeout=timeout)
         response.raise_for_status()
         raw = response.json()
     except Exception:

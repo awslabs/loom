@@ -90,6 +90,23 @@ class SecretWriteError(RuntimeError):
     """A secret could not be written. Message is scrubbed of the value."""
 
 
+def put_secret_value(secret_id: str, secret_value: str, region: str) -> str:
+    """Overwrite the value of an existing secret, identified by its ARN or name.
+
+    For updating a secret Loom already owns via the ARN it stored, instead of
+    re-deriving a path from a mutable display name (store_secret is
+    create-or-overwrite by name, so a derived path can land on another
+    resource's secret). Returns the secret ARN.
+    """
+    import boto3
+
+    client = boto3.client("secretsmanager", region_name=region)
+    response = client.put_secret_value(SecretId=secret_id, SecretString=secret_value)
+    _cache.pop(secret_id, None)
+    logger.info("Updated an existing %s secret", _kind(secret_id))
+    return response["ARN"]
+
+
 def _write_secret(client, name: str, secret_value: str, description: str) -> str:
     try:
         response = client.create_secret(

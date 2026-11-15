@@ -12,6 +12,7 @@ import type {
   SSEApprovalResolved,
   SSEElicitationRequest,
   SSETokenInfo,
+  SSEGuardrail,
 } from "./types";
 
 export function listSessions(agentId: number, userId?: string): Promise<SessionResponse[]> {
@@ -54,6 +55,7 @@ export interface StreamCallbacks {
   onApprovalResolved?: (data: SSEApprovalResolved) => void;
   onElicitationRequest?: (data: SSEElicitationRequest) => void;
   onTokenInfo?: (data: SSETokenInfo) => void;
+  onGuardrail?: (data: SSEGuardrail) => void;
 }
 
 export async function invokeAgentStream(
@@ -168,6 +170,9 @@ export async function invokeAgentStream(
             case "token_info":
               callbacks.onTokenInfo?.(parsed as SSETokenInfo);
               break;
+            case "guardrail":
+              callbacks.onGuardrail?.(parsed as SSEGuardrail);
+              break;
           }
         } catch {
           // Skip malformed JSON
@@ -190,6 +195,7 @@ export interface WsInvokeCallbacks {
   onText?: (text: string) => void;
   onToolUse?: (data: SSEToolUse) => void;
   onElicitation?: (data: { id: string; message: string }) => void;
+  onGuardrail?: (data: SSEGuardrail) => void;
   onResult?: (content: string) => void;
   onError?: (message: string) => void;
   onClose?: () => void;
@@ -222,6 +228,8 @@ export function invokeAgentWs(
       session_id: request.session_id,
       model_id: request.model_id,
       connector_ids: request.connector_ids,
+      guardrail_id: request.guardrail_id,
+      guardrail_version: request.guardrail_version,
     }));
   };
 
@@ -240,6 +248,10 @@ export function invokeAgentWs(
           break;
         case "elicitation":
           callbacks.onElicitation?.(data);
+          break;
+        case "guardrail":
+          // Same inner object as the SSE `guardrail` event's data.
+          if (data.content && typeof data.content === "object") callbacks.onGuardrail?.(data.content as SSEGuardrail);
           break;
         case "result":
           callbacks.onResult?.(data.content);

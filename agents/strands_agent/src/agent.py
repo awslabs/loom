@@ -15,6 +15,7 @@ from strands_tools.code_interpreter import AgentCoreCodeInterpreter
 
 from src.config import AgentConfig, MCPServerConfig
 from src.integrations.approval import ApprovalHook
+from src.integrations.guardrails import enforce_applies
 from src.integrations.mcp_client import build_mcp_clients, create_mcp_clients, has_oauth2_servers, _install_logging_callback, TokenInfoHook
 from src.integrations.a2a_client import create_a2a_clients
 from src.integrations.memory import MemoryHook
@@ -32,13 +33,37 @@ def _build_model(config: AgentConfig) -> Model:
     Secrets Manager via ``config.api_key_secret_arn``.
     """
     provider = config.provider or "bedrock"
+    guardrail = config.guardrail
+
+    if guardrail is not None and guardrail.mode == "enforce" and not enforce_applies(guardrail, provider):
+        # The backend rejects this combination at deploy time; be defensive.
+        logger.warning(
+            "Guardrail %s is in enforce mode but provider '%s' is not bedrock; "
+            "the guardrail will NOT be attached to model calls",
+            guardrail.guardrail_id, provider,
+        )
 
     if provider == "bedrock":
-        return BedrockModel(
-            model_id=config.model_id,
-            max_tokens=config.max_tokens,
-            streaming=True,
-        )
+        model_kwargs: dict = {
+            "model_id": config.model_id,
+            "max_tokens": config.max_tokens,
+            "streaming": True,
+        }
+        if guardrail is not None and enforce_applies(guardrail, provider):
+            model_kwargs.update(
+                guardrail_id=guardrail.identifier,
+                guardrail_version=guardrail.guardrail_version,
+                guardrail_trace="enabled",
+                guardrail_stream_processing_mode=guardrail.stream_processing_mode,
+                guardrail_redact_input=True,
+                guardrail_redact_output=guardrail.redact_history,
+            )
+            logger.info(
+                "Attaching guardrail %s version %s to BedrockModel (stream_processing_mode=%s redact_history=%s)",
+                guardrail.guardrail_id, guardrail.guardrail_version,
+                guardrail.stream_processing_mode, guardrail.redact_history,
+            )
+        return BedrockModel(**model_kwargs)
 
     if provider not in ("openai", "anthropic", "litellm"):
         raise ValueError(f"Unsupported model provider: '{provider}'")

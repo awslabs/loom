@@ -67,6 +67,8 @@ import { recordPageView, sendBeaconPageView, trackAction } from "./api/audit";
 //     this is also a no-op for current groups)
 //   - Catalog > Registry section: visible iff registry:read; editable iff
 //     registry:write (unchanged from the standalone Registry page's gate)
+//   - Settings > Models > Guardrails card: visible to anyone on Settings;
+//     editable iff admin:write (PUT /api/settings/guardrail-default's scope)
 type Persona = "catalog" | "security" | "builder" | "memory" | "integrations" | "skills" | "settings" | "admin";
 
 const USER_GROUPS: Record<string, string[]> = {
@@ -835,6 +837,7 @@ function AppContent() {
             <SettingsPage
               canViewTagging={effectiveHasScope("tagging:read")}
               canEditTagging={effectiveHasScope("tagging:write")}
+              canEditGuardrails={effectiveHasScope("admin:write")}
               userGroups={user?.groups || []}
               agents={agents}
             />

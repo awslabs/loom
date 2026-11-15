@@ -250,12 +250,20 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, deleteS
                 {agent.deprecated_model_ids.length > 0 && (
                   <span
                     className="w-fit shrink-0"
-                    title={`No longer in the model catalog — update the agent's model: ${agent.deprecated_model_ids.join(", ")}`}
+                    title="Removed from the model catalog or disabled in Settings → Models. The agent keeps working; update its models to clear this."
                   >
                     <StatusPill label={`DEPRECATED MODEL${agent.deprecated_model_ids.length > 1 ? "S" : ""}`} variant="warning" className="w-fit" />
                   </span>
                 )}
               </div>
+            </div>
+          )}
+          {agent.deprecated_model_ids.length > 0 && (
+            <div className="col-span-2 flex flex-col gap-0.5">
+              <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground/80 uppercase">Deprecated models</span>
+              <span className="font-mono text-[11.5px] break-all text-amber-700 dark:text-amber-400">
+                {agent.deprecated_model_ids.join(", ")}
+              </span>
             </div>
           )}
         </div>

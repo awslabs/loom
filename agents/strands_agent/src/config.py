@@ -80,6 +80,41 @@ class IntegrationsConfig:
 
 
 @dataclass
+class GuardrailRef:
+    """A Bedrock guardrail an invocation may select (an ``allowed`` entry)."""
+
+    guardrail_id: str
+    guardrail_version: str
+    guardrail_arn: str = ""
+
+
+@dataclass
+class GuardrailConfig:
+    """Bedrock Guardrails configuration (the ``guardrail`` config key).
+
+    ``mode`` is ``enforce`` (guardrail attached to every Bedrock model call)
+    or ``monitor`` (``ApplyGuardrail`` on input and final output, log-only).
+    ``stream_processing_mode`` and ``redact_history`` only apply to enforce.
+    ``allowed`` lists alternate guardrails a single invocation may pick; the
+    mode and other settings always come from this (primary) entry.
+    """
+
+    guardrail_id: str
+    guardrail_version: str
+    guardrail_arn: str = ""
+    mode: str = "enforce"
+    stream_processing_mode: str = "sync"
+    redact_history: bool = True
+    source: str = ""
+    allowed: list[GuardrailRef] = field(default_factory=list)
+
+    @property
+    def identifier(self) -> str:
+        """Identifier to send to Bedrock: the ARN when known, else the ID."""
+        return self.guardrail_arn or self.guardrail_id
+
+
+@dataclass
 class AgentConfig:
     """Top-level agent configuration."""
 
@@ -90,6 +125,53 @@ class AgentConfig:
     base_url: str = ""
     api_key_secret_arn: str = ""
     integrations: IntegrationsConfig = field(default_factory=IntegrationsConfig)
+    guardrail: Optional[GuardrailConfig] = None
+
+
+_GUARDRAIL_MODES = ("enforce", "monitor")
+_GUARDRAIL_STREAM_MODES = ("sync", "async")
+
+
+def _parse_guardrail(data: Optional[dict]) -> Optional[GuardrailConfig]:
+    """Parse the optional ``guardrail`` block. Absent or null means no guardrail.
+
+    A present-but-invalid block raises ``ValueError`` rather than being
+    dropped, so a malformed config fails closed instead of silently running
+    the agent without its guardrail.
+    """
+    if not data:
+        return None
+    if not isinstance(data, dict):
+        raise ValueError("'guardrail' must be an object")
+    guardrail_id = str(data.get("guardrail_id") or "").strip()
+    if not guardrail_id:
+        raise ValueError("'guardrail' must include 'guardrail_id'")
+    mode = str(data.get("mode") or "enforce").lower()
+    if mode not in _GUARDRAIL_MODES:
+        raise ValueError(f"Unsupported guardrail mode: '{mode}'")
+    stream_mode = str(data.get("stream_processing_mode") or "sync").lower()
+    if stream_mode not in _GUARDRAIL_STREAM_MODES:
+        raise ValueError(f"Unsupported guardrail stream_processing_mode: '{stream_mode}'")
+    redact_history = data.get("redact_history")
+    allowed = [
+        GuardrailRef(
+            guardrail_id=str(entry["guardrail_id"]),
+            guardrail_version=str(entry.get("guardrail_version") or "DRAFT"),
+            guardrail_arn=str(entry.get("guardrail_arn") or ""),
+        )
+        for entry in (data.get("allowed") or [])
+        if isinstance(entry, dict) and entry.get("guardrail_id")
+    ]
+    return GuardrailConfig(
+        guardrail_id=guardrail_id,
+        guardrail_version=str(data.get("guardrail_version") or "DRAFT"),
+        guardrail_arn=str(data.get("guardrail_arn") or ""),
+        mode=mode,
+        stream_processing_mode=stream_mode,
+        redact_history=True if redact_history is None else bool(redact_history),
+        source=str(data.get("source") or ""),
+        allowed=allowed,
+    )
 
 
 def _parse_auth(data: Optional[dict]) -> Optional[AuthConfig]:
@@ -189,6 +271,7 @@ def _parse_config(data: dict) -> AgentConfig:
         base_url=data.get("base_url", ""),
         api_key_secret_arn=data.get("api_key_secret_arn", ""),
         integrations=_parse_integrations(data.get("integrations")),
+        guardrail=_parse_guardrail(data.get("guardrail")),
     )
 
 

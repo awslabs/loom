@@ -24,3 +24,7 @@ O_RDS_PROXY_ENDPOINT=<oConnectEndpoint>
 O_RDS_PORT=5432
 # loom-ec2: oInstanceId
 O_EC2_INSTANCE_ID=<oInstanceId>
+# loom-guardrail: oGuardrailId, oGuardrailArn, oGuardrailVersion
+O_GUARDRAIL_ID=<oGuardrailId>
+O_GUARDRAIL_ARN=<oGuardrailArn>
+O_GUARDRAIL_VERSION=<oGuardrailVersion>

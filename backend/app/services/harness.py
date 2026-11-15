@@ -17,8 +17,16 @@ def _build_model_config(
     max_tokens: int | None = None,
     litellm_api_key_arn: str | None = None,
     litellm_api_base: str | None = None,
+    additional_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the `model` field for CreateHarness/UpdateHarness/InvokeHarness.
+
+    `additional_params` (Bedrock only) carries `guardrailConfig` for Bedrock
+    Guardrails — the harness passes it to Bedrock with every model request
+    when the API format is converse_stream (the default, which Loom uses).
+    Note that an InvokeHarness `model` override replaces the harness's model
+    config for that call, so callers must pass the guardrail again whenever
+    they send `model`.
 
     Bedrock (the default) uses `bedrockModelConfig`. LiteLLM uses
     `liteLlmModelConfig` — `apiKeyArn` points at an AgentCore Identity API
@@ -40,6 +48,8 @@ def _build_model_config(
     cfg = {"modelId": model_id}
     if max_tokens is not None:
         cfg["maxTokens"] = max_tokens
+    if additional_params:
+        cfg["additionalParams"] = additional_params
     return {"bedrockModelConfig": cfg}
 
 
@@ -65,6 +75,7 @@ def create_harness(
     provider: str = "bedrock",
     litellm_api_key_arn: str | None = None,
     litellm_api_base: str | None = None,
+    additional_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create a new AgentCore Harness (managed agent loop).
 
@@ -77,7 +88,7 @@ def create_harness(
     params: dict[str, Any] = {
         "harnessName": name,
         "executionRoleArn": execution_role_arn,
-        "model": _build_model_config(provider, model_id, max_tokens, litellm_api_key_arn, litellm_api_base),
+        "model": _build_model_config(provider, model_id, max_tokens, litellm_api_key_arn, litellm_api_base, additional_params),
         "systemPrompt": [{"text": system_prompt}],
     }
 
@@ -158,6 +169,7 @@ def update_harness(
     provider: str = "bedrock",
     litellm_api_key_arn: str | None = None,
     litellm_api_base: str | None = None,
+    additional_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Update an existing AgentCore Harness."""
     import boto3
@@ -169,7 +181,7 @@ def update_harness(
     if execution_role_arn:
         params["executionRoleArn"] = execution_role_arn
     if model_id:
-        params["model"] = _build_model_config(provider, model_id, max_tokens, litellm_api_key_arn, litellm_api_base)
+        params["model"] = _build_model_config(provider, model_id, max_tokens, litellm_api_key_arn, litellm_api_base, additional_params)
     if system_prompt is not None:
         params["systemPrompt"] = [{"text": system_prompt}]
     if tools is not None:
@@ -243,8 +255,16 @@ def invoke_harness_stream(
     provider: str = "bedrock",
     litellm_api_key_arn: str | None = None,
     litellm_api_base: str | None = None,
+    additional_params: dict[str, Any] | None = None,
+    guardrail_ref: dict[str, str] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """Invoke a harness and yield translated SSE events.
+
+    ``additional_params`` must carry the agent's guardrailConfig whenever a
+    ``model`` override is sent, because the override replaces the harness's
+    model config for this call. ``guardrail_ref`` ({guardrail_id,
+    guardrail_version}) labels the ``guardrail`` event yielded when the
+    stream stops with ``guardrail_intervened``.
 
     Translates the Converse API-style streaming response into the same event
     format used by invoke_agent (text chunks, tool_use, metadata) so the
@@ -281,7 +301,12 @@ def invoke_harness_stream(
     }
 
     if model_id:
-        params["model"] = _build_model_config(provider, model_id, litellm_api_key_arn=litellm_api_key_arn, litellm_api_base=litellm_api_base)
+        params["model"] = _build_model_config(
+            provider, model_id,
+            litellm_api_key_arn=litellm_api_key_arn,
+            litellm_api_base=litellm_api_base,
+            additional_params=additional_params,
+        )
     if system_prompt:
         params["systemPrompt"] = [{"text": system_prompt}]
     if tools:
@@ -317,6 +342,7 @@ def invoke_harness_stream(
     current_tool_use_id: str | None = None
     current_tool_input_chunks: list[str] = []
     stop_reason: str | None = None
+    guardrail_trace: dict[str, Any] | None = None
 
     for event in stream:
         logger.debug("Harness raw event: %s", event)
@@ -357,6 +383,27 @@ def invoke_harness_stream(
             usage = meta.get("usage", {})
             total_input_tokens += usage.get("inputTokens", 0)
             total_output_tokens += usage.get("outputTokens", 0)
+            trace_guardrail = (meta.get("trace") or {}).get("guardrail")
+            if isinstance(trace_guardrail, dict):
+                guardrail_trace = trace_guardrail
+
+    if stop_reason == "guardrail_intervened":
+        from app.services.guardrails import summarize_trace
+
+        source, policies = summarize_trace(guardrail_trace)
+        ref = guardrail_ref or {}
+        logger.info("Harness guardrail intervened: source=%s policies=%d", source, len(policies))
+        yield {
+            "type": "structured",
+            "content": {"guardrail": {
+                "mode": "enforce",
+                "source": source,
+                "action": "intervened",
+                "guardrail_id": ref.get("guardrail_id", ""),
+                "guardrail_version": ref.get("guardrail_version", ""),
+                "policies": policies,
+            }},
+        }
 
     if total_input_tokens > 0 or total_output_tokens > 0:
         yield {

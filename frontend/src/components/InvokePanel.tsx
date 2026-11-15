@@ -26,7 +26,9 @@ import { fetchModels, fetchLitellmModels } from "@/api/agents";
 import { listConnectors, setUserApiKey, deleteUserApiKey } from "@/api/mcp";
 import { sendElicitationResponse, type StreamSegment } from "@/hooks/useInvoke";
 import { groupModels } from "@/lib/models";
-import type { SessionResponse, AuthorizerCredential, ModelOption, ConnectorInfo, SSESessionStart, SSESessionEnd } from "@/api/types";
+import { GuardrailNotice } from "@/components/GuardrailControls";
+import { guardrailRefKey, guardrailRefLabel, guardrailSummariesFromDetails, invokableGuardrails } from "@/lib/guardrails";
+import type { SessionResponse, AuthorizerCredential, ModelOption, ConnectorInfo, SSESessionStart, SSESessionEnd, GuardrailConfig, GuardrailDetails, GuardrailRef } from "@/api/types";
 
 const NEW_SESSION = "__new__";
 const USER_TOKEN = "__user__";
@@ -58,7 +60,11 @@ interface InvokePanelProps {
   sessionEnd: SSESessionEnd | null;
   error: string | null;
   rawError: string | null;
-  onInvoke: (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean) => void;
+  /** The agent's baked guardrail; a selector is shown when it has `allowed` alternates. */
+  guardrail?: GuardrailConfig | null;
+  /** Stored GetGuardrail snapshot — labels guardrails without a ListGuardrails call. */
+  guardrailDetails?: GuardrailDetails | null;
+  onInvoke: (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean, guardrail?: GuardrailRef) => void;
   onCancel: () => void;
   onOpenSessionDetail?: (sessionId: string) => void;
 }
@@ -144,6 +150,9 @@ function LiveTurnBody({ agentId, segments, isStreaming }: { agentId: number; seg
     } else if (seg.type === "elicitation_request") {
       flushTools();
       blocks.push(<ElicitationRequestBubble key={`elicit-${i}`} data={seg.data} onRespond={(id, action, content) => sendElicitationResponse(agentId, id, action, content)} />);
+    } else if (seg.type === "guardrail") {
+      flushTools();
+      blocks.push(<GuardrailNotice key={`guardrail-${i}`} event={seg.data} />);
     } else {
       flushTools();
       blocks.push(<MarkdownBlock key={i} text={seg.content} />);
@@ -240,12 +249,15 @@ function EmptyState({ agentName, onSeed }: { agentName: string; onSeed: (text: s
 export function InvokePanel({
   agentId, agentName, qualifiers, sessions, isStreaming, modelId, allowedModelIds = [], memoryNames = [], mcpNames = [],
   authorizerName, authorizerId, authorizerPoolId, authorizerDiscoveryUrl, isExternalIdp, loginIssuerUrl, currentUserId,
-  streamedText, segments, sessionStart, sessionEnd, error, rawError, onInvoke, onCancel, onOpenSessionDetail,
+  streamedText, segments, sessionStart, sessionEnd, error, rawError, guardrail, guardrailDetails, onInvoke, onCancel, onOpenSessionDetail,
 }: InvokePanelProps) {
   const { timezone } = useTimezone();
   const promptKey = `loom:invokePrompt:${agentId}`;
   const [prompt, setPrompt] = useState(() => sessionStorage.getItem(promptKey) ?? "");
   const [lastPrompt, setLastPrompt] = useState<string | null>(null);
+  // Model the live turn was sent with, captured at send time so changing the
+  // picker afterwards doesn't relabel a turn that already ran.
+  const [lastModelId, setLastModelId] = useState<string | null>(null);
   const [showAllSessions, setShowAllSessions] = useState(false);
 
   useEffect(() => {
@@ -266,6 +278,13 @@ export function InvokePanel({
   const [resolvedAuthorizerId, setResolvedAuthorizerId] = useState<number | undefined>(authorizerId);
   const [selectedModel, setSelectedModel] = useState(modelId ?? "");
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+
+  // Runtime guardrail selection (primary + `allowed` alternates). Empty key = the agent's primary.
+  const guardrailOptions = invokableGuardrails(guardrail);
+  const primaryGuardrailKey = guardrailOptions[0] ? guardrailRefKey(guardrailOptions[0]) : "";
+  const [selectedGuardrailKey, setSelectedGuardrailKey] = useState(primaryGuardrailKey);
+  useEffect(() => { setSelectedGuardrailKey(primaryGuardrailKey); }, [primaryGuardrailKey, agentId]);
+  const guardrailCatalog = guardrailSummariesFromDetails(guardrailDetails);
 
   // Connector state
   const connectorStorageKey = `loom:enabledConnectors:${agentId}:${currentUserId ?? "anonymous"}`;
@@ -511,7 +530,7 @@ export function InvokePanel({
 
   useEffect(() => {
     setSelectedSession(NEW_SESSION);
-    setLastPrompt(null);
+    setLastPrompt(null); setLastModelId(null);
     userPickedRef.current = false;
   }, [agentId]);
 
@@ -552,8 +571,15 @@ export function InvokePanel({
     });
     const activeConnectorIds = invokeOnlyIds.length > 0 ? invokeOnlyIds : undefined;
     const useLinkedToken = selectedCredential === LINKED_TOKEN ? true : undefined;
+    const runtimeGuardrail = selectedGuardrailKey && selectedGuardrailKey !== primaryGuardrailKey
+      ? guardrailOptions.find((g) => guardrailRefKey(g) === selectedGuardrailKey)
+      : undefined;
     setLastPrompt(trimmed);
-    onInvoke(trimmed, qualifier, sessionId, credentialId, token, runtimeModelId, activeConnectorIds, useLinkedToken);
+    setLastModelId(selectedModel || modelId || null);
+    // Clear the box once sent (like ChatPage) — the prompt stays visible in
+    // the user bubble, and clearing also drops the persisted draft.
+    setPrompt("");
+    onInvoke(trimmed, qualifier, sessionId, credentialId, token, runtimeModelId, activeConnectorIds, useLinkedToken, runtimeGuardrail);
   };
 
   const handleQualifierChange = (value: string) => {
@@ -573,9 +599,11 @@ export function InvokePanel({
   const oboWarning = hasObo && !userTokenAvailable;
 
   const groupedModels = groupModels(filteredModels);
-  const currentModelName = selectedModel
-    ? (filteredModels.find((m) => m.model_id === selectedModel)?.display_name ?? selectedModel)
-    : (filteredModels.find((m) => m.model_id === modelId)?.display_name ?? modelId ?? "");
+  // Resolve against the full model list, not just this agent's allowed set,
+  // so past turns on a since-removed model still show a readable name.
+  const modelName = (id: string | null | undefined): string | undefined =>
+    id ? (modelOptions.find((m) => m.model_id === id)?.display_name ?? id) : undefined;
+  const liveModelName = modelName(lastModelId ?? selectedModel ?? modelId);
 
   // ---- transcript assembly -------------------------------------------------
   const activeSessionId = sessionStart?.session_id ?? (selectedSession !== NEW_SESSION ? selectedSession : null);
@@ -652,7 +680,7 @@ export function InvokePanel({
                     <UserBubble text={inv.prompt_text} timestamp={inv.created_at ? formatTimestamp(inv.created_at, timezone) : undefined} currentUserId={activeSessionRecord?.user_id ?? undefined} />
                   )}
                   <div className="flex max-w-[760px] flex-col gap-2">
-                    <AgentAttribution agentName={agentName} />
+                    <AgentAttribution agentName={agentName} modelLabel={modelName(inv.model_id)} />
                     <div className="text-[13.5px] leading-[1.65] text-pretty">
                       {inv.status === "error" ? (
                         <span className="text-destructive">{inv.error_message ?? "This invocation failed."}</span>
@@ -671,7 +699,7 @@ export function InvokePanel({
                 <div className="flex flex-col gap-5">
                   {lastPrompt && <UserBubble text={lastPrompt} timestamp="just now" currentUserId={currentUserId} />}
                   <div className="flex max-w-[760px] flex-col gap-2">
-                    <AgentAttribution agentName={agentName} modelLabel={currentModelName || undefined} />
+                    <AgentAttribution agentName={agentName} modelLabel={liveModelName} />
                     <div className="text-[13.5px] leading-[1.65] text-pretty">
                       <LiveTurnBody agentId={agentId} segments={segments} isStreaming={isStreaming} />
                     </div>
@@ -892,6 +920,25 @@ export function InvokePanel({
               </div>
             )}
 
+            {guardrailOptions.length > 1 && (
+              <div className="flex flex-col gap-1.5">
+                <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Guardrail</span>
+                <Select value={selectedGuardrailKey} onValueChange={setSelectedGuardrailKey}>
+                  <SelectTrigger size="sm" className="w-full text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {guardrailOptions.map((g, i) => (
+                      <SelectItem key={guardrailRefKey(g)} value={guardrailRefKey(g)}>
+                        {guardrailRefLabel(g, guardrailCatalog)}{i === 0 ? " (default)" : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {guardrail && <span className="text-[10.5px] text-muted-foreground">Mode: {guardrail.mode}</span>}
+              </div>
+            )}
+
             <div className="flex flex-col gap-1.5">
               <div className="flex items-center gap-1.5">
                 <span className="font-mono text-[9.5px] tracking-wide text-muted-foreground uppercase">Credential</span>
@@ -992,8 +1039,8 @@ export function InvokePanel({
                     key={s.session_id}
                     role="button"
                     tabIndex={0}
-                    onClick={() => { userPickedRef.current = true; setSelectedSession(s.session_id); setLastPrompt(null); }}
-                    onKeyDown={(e) => { if (e.key === "Enter") { userPickedRef.current = true; setSelectedSession(s.session_id); setLastPrompt(null); } }}
+                    onClick={() => { userPickedRef.current = true; setSelectedSession(s.session_id); setLastPrompt(null); setLastModelId(null); }}
+                    onKeyDown={(e) => { if (e.key === "Enter") { userPickedRef.current = true; setSelectedSession(s.session_id); setLastPrompt(null); setLastModelId(null); } }}
                     className={`flex cursor-pointer flex-col gap-1 rounded-md border px-2.5 py-2 text-left transition-colors ${isSelected ? "border-primary/30 bg-primary/[0.05]" : "hover:bg-accent/50"}`}
                   >
                     <div className="flex items-center gap-1.5">

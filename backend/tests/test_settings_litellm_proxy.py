@@ -1,4 +1,5 @@
 """Tests for /api/settings/litellm-proxy endpoints."""
+import socket
 import unittest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
@@ -9,6 +10,20 @@ from sqlalchemy.pool import StaticPool
 from app.main import app
 from app.db import Base, get_db
 from app.dependencies.auth import get_current_user
+
+
+# Fake DNS so URL validation never touches the network. Hosts not listed
+# resolve to a private VPC address, which the permissive guard allows.
+_FAKE_DNS = {
+    "localhost": "127.0.0.1",
+    "metadata.internal": "169.254.169.254",
+    "ecs-creds.internal": "169.254.170.2",
+}
+
+
+def _fake_getaddrinfo(host, *args, **kwargs):
+    ip = _FAKE_DNS.get(host, host if host[0].isdigit() else "10.0.0.5")
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
 
 
 def _admin_user():
@@ -43,6 +58,9 @@ class TestLitellmProxySettingsEndpoints(unittest.TestCase):
         app.dependency_overrides[get_db] = override_get_db
         app.dependency_overrides[get_current_user] = _admin_user
         self.client = TestClient(app)
+        dns = patch("socket.getaddrinfo", side_effect=_fake_getaddrinfo)
+        dns.start()
+        self.addCleanup(dns.stop)
 
     def tearDown(self):
         app.dependency_overrides.pop(get_current_user, None)
@@ -71,7 +89,7 @@ class TestLitellmProxySettingsEndpoints(unittest.TestCase):
                 json={
                     "enabled": True,
                     "base_url": "https://proxy.example.com",
-                    "discovery_base_url": "http://localhost:4000",
+                    "discovery_base_url": "http://litellm.internal:4000",
                     "master_key": "sk-master",
                 },
             )
@@ -80,7 +98,7 @@ class TestLitellmProxySettingsEndpoints(unittest.TestCase):
         data = response.json()
         self.assertTrue(data["enabled"])
         self.assertEqual(data["base_url"], "https://proxy.example.com")
-        self.assertEqual(data["discovery_base_url"], "http://localhost:4000")
+        self.assertEqual(data["discovery_base_url"], "http://litellm.internal:4000")
         self.assertTrue(data["has_master_key"])
         mock_store_secret.assert_called_once()
         call_kwargs = mock_store_secret.call_args.kwargs
@@ -94,7 +112,7 @@ class TestLitellmProxySettingsEndpoints(unittest.TestCase):
         enabled_row = self.session.query(SiteSetting).filter(SiteSetting.key == "litellm_enabled").first()
         self.assertEqual(enabled_row.value, "true")
         discovery_row = self.session.query(SiteSetting).filter(SiteSetting.key == "litellm_discovery_base_url").first()
-        self.assertEqual(discovery_row.value, "http://localhost:4000")
+        self.assertEqual(discovery_row.value, "http://litellm.internal:4000")
 
     @patch("app.services.secrets.store_secret")
     def test_update_without_master_key_does_not_write_secret(self, mock_store_secret):
@@ -128,6 +146,69 @@ class TestLitellmProxySettingsEndpoints(unittest.TestCase):
         from app.services.litellm import get_litellm_proxy_config
         with patch.dict("os.environ", {"LOOM_LITELLM_PROXY_BASE_URL": ""}):
             self.assertIsNone(get_litellm_proxy_config(self.session))
+
+    @patch("app.services.secrets.store_secret")
+    def test_rejects_disallowed_urls_without_writing_anything(self, mock_store_secret):
+        """A URL the backend would send the master key to must be a bare
+        scheme://host[:port][/path] that passes net_guard. A rejected save
+        writes no setting row and no secret."""
+        cases = [
+            # Targets net_guard refuses at every level.
+            "http://localhost:4000",
+            "http://127.0.0.1:4000",
+            "http://metadata.internal",
+            "http://ecs-creds.internal/v2/credentials",
+            "http://169.254.169.254",
+            "http://0.0.0.1:4000",
+            # Shapes that would neutralize the appended endpoint path or smuggle
+            # credentials/another host.
+            "http://litellm.internal:4000/admin?",
+            "http://litellm.internal:4000/admin?x=",
+            "http://litellm.internal:4000/admin#",
+            "http://user:pass@litellm.internal:4000",
+            "http://litellm.internal\\@evil.example",
+            "http://litellm.internal:4000/a;b",
+            "http://litellm.internal :4000",
+            # Schemes and missing hosts.
+            "ftp://litellm.internal",
+            "file:///etc/passwd",
+            "litellm.internal:4000",
+            "http://",
+        ]
+        from app.models.site_setting import SiteSetting
+        for field in ("base_url", "discovery_base_url"):
+            for url in cases:
+                body = {"enabled": True, "base_url": "https://proxy.example.com", "master_key": "sk-master"}
+                body[field] = url
+                with self.subTest(field=field, url=url):
+                    response = self.client.put("/api/settings/litellm-proxy", json=body)
+                    self.assertEqual(response.status_code, 422, response.text)
+                    self.assertIn("is not allowed", response.json()["detail"])
+        self.assertEqual(self.session.query(SiteSetting).count(), 0)
+        mock_store_secret.assert_not_called()
+
+    @patch("app.services.secrets.get_secret", return_value="sk-master")
+    @patch("app.services.secrets.store_secret")
+    def test_accepts_vpc_internal_and_public_urls(self, mock_store_secret, mock_get_secret):
+        for url in (
+            "http://litellm.internal:4000",
+            "https://proxy.example.com/litellm/",
+            "http://10.1.2.3:4000",
+            "http://100.64.0.10:4000",
+        ):
+            with self.subTest(url=url):
+                response = self.client.put(
+                    "/api/settings/litellm-proxy",
+                    json={"enabled": True, "base_url": url, "discovery_base_url": url},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+
+    def test_empty_urls_are_allowed(self):
+        response = self.client.put(
+            "/api/settings/litellm-proxy",
+            json={"enabled": False, "base_url": "", "discovery_base_url": ""},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
 
 
 if __name__ == "__main__":

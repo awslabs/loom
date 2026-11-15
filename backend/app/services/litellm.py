@@ -36,13 +36,26 @@ startup; a Settings-page save always wins after that:
      Used only when no agent_base_url has ever been saved via Settings;
      considered "enabled" automatically once LOOM_LITELLM_PROXY_BASE_URL is
      set, since there's no separate toggle for the env-var tier.
+
+Outbound calls: every request the backend makes to the proxy goes through
+net_guard's permissive guard (private/VPC addresses allowed; loopback,
+link-local, cloud metadata, reserved and multicast refused, with the connection
+pinned to the validated address). Redirects are not followed, since each call
+carries the master key and a redirect would forward it to the next host. Base
+URLs must be a bare scheme://host[:port][/path], checked when saved and again
+before every request (which also covers the env-var tier). A query string or
+fragment would turn the appended endpoint path into inert text and let the URL
+aim the master-key request at any path on the host.
 """
 
 import logging
 import os
+import urllib.parse
 from typing import Any
 
 from sqlalchemy.orm import Session
+
+from app.services import net_guard
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +65,45 @@ AGENT_BASE_URL_SETTING_KEY = "litellm_proxy_base_url"
 DISCOVERY_BASE_URL_SETTING_KEY = "litellm_discovery_base_url"
 
 _DEFAULT_REGION = os.getenv("AWS_REGION", "us-east-1")
+
+
+def check_proxy_base_url_shape(url: str) -> None:
+    """Reject a proxy base URL that is anything other than scheme://host[:port][/path].
+
+    A shape check only, with no DNS lookup. Request-time callers pair it with
+    a net_guard guarded call, and validate_proxy_base_url pairs it with
+    net_guard.validate_connection_url at save time.
+
+    Raises net_guard.SSRFBlockedError on a disallowed URL.
+    """
+    if any(ch in url for ch in "?#\\") or any(ch.isspace() or ord(ch) < 0x20 for ch in url):
+        raise net_guard.SSRFBlockedError(
+            "LiteLLM base URL must not contain a query string, fragment, backslash or whitespace"
+        )
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise net_guard.SSRFBlockedError("LiteLLM base URL must use http or https")
+    if not parsed.hostname:
+        raise net_guard.SSRFBlockedError("LiteLLM base URL has no hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise net_guard.SSRFBlockedError("LiteLLM base URL must not contain credentials")
+    if parsed.params:
+        raise net_guard.SSRFBlockedError("LiteLLM base URL must not contain path parameters")
+
+
+def validate_proxy_base_url(url: str) -> None:
+    """Save-time check for a proxy base URL: shape, then net_guard's target check.
+
+    Raises net_guard.SSRFBlockedError if the URL is not allowed.
+    """
+    check_proxy_base_url_shape(url)
+    net_guard.validate_connection_url(url)
+
+
+def proxy_endpoint(base_url: str, path: str) -> str:
+    """Join a proxy base URL and an endpoint path, after checking the base URL's shape."""
+    check_proxy_base_url_shape(base_url)
+    return f"{base_url.rstrip('/')}{path}"
 
 
 def _setting(db: Session, key: str) -> str:
@@ -172,10 +224,8 @@ def vend_virtual_key(
     # duplicate aliases with a 400) — clear it first so vending is idempotent.
     revoke_virtual_key(key_alias, db, timeout=timeout)
     try:
-        import httpx
-
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/key/generate",
+        response = net_guard.guarded_post(
+            proxy_endpoint(base_url, "/key/generate"),
             headers={"Authorization": f"Bearer {master_key}"},
             json={
                 "models": allowed_model_ids,
@@ -183,6 +233,7 @@ def vend_virtual_key(
                 "metadata": {"loom_agent_id": agent_id, "loom_agent_name": agent_name},
             },
             timeout=timeout,
+            follow_redirects=False,
         )
         response.raise_for_status()
         data: dict[str, Any] = response.json()
@@ -212,13 +263,12 @@ def revoke_virtual_key(key_alias: str, db: Session, timeout: float = 10.0) -> No
     base_url, master_key = config
 
     try:
-        import httpx
-
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/key/delete",
+        response = net_guard.guarded_post(
+            proxy_endpoint(base_url, "/key/delete"),
             headers={"Authorization": f"Bearer {master_key}"},
             json={"key_aliases": [key_alias]},
             timeout=timeout,
+            follow_redirects=False,
         )
         if response.status_code == 404:
             # Expected on a first deploy — there's no prior key under this

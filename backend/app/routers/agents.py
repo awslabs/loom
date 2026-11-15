@@ -81,6 +81,16 @@ from app.services.harness import (
     delete_harness as delete_harness_api,
 )
 from app.services.secrets import store_secret, get_secret, delete_secret
+from app.services.guardrails import (
+    GuardrailError,
+    GuardrailSelection,
+    compute_drift,
+    guardrail_block_from_config_json,
+    harness_additional_params,
+    resolve_agent_guardrail,
+    snapshot_guardrail_details,
+    supported_modes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +209,8 @@ class AgentCreateRequest(BaseModel):
     harness_tools: list[dict[str, Any]] | None = Field(None, description="Harness tool configurations")
     harness_max_iterations: int | None = Field(None, description="Max agent loop iterations (default: 75)")
     harness_max_tokens: int | None = Field(None, description="Max tokens for model output")
+    # Guardrail selection (issue #17) — omitted means inherit the global default
+    guardrail: GuardrailSelection | None = Field(None, description="Bedrock guardrail selection: inherit the default, custom, or none")
 
 
 class AgentResponse(BaseModel):
@@ -245,6 +257,15 @@ class AgentResponse(BaseModel):
     code_interpreter_id: str | None = None
     code_interpreter_status: str | None = None
     status_reason: str | None = None
+    # Guardrails (issue #17): `guardrail` is what was baked into the agent at
+    # its last deploy; drift means an inheriting agent is behind the default.
+    guardrail_selection: str | None = None
+    guardrail: dict[str, Any] | None = None
+    guardrail_drift: bool = False
+    # GetGuardrail summary captured at the last deploy/update (or refresh):
+    # {"fetched_at", "guardrails": [primary, *alternates]}
+    guardrail_details: dict[str, Any] | None = None
+    guardrail_supported: dict[str, bool] = Field(default_factory=lambda: {"enforce": False, "monitor": False})
 
 
 class ConfigEntryResponse(BaseModel):
@@ -360,6 +381,48 @@ def _get_current_model_id(agent: Agent) -> str | None:
     return None
 
 
+def _assignable_model_ids(db: Session) -> set[str]:
+    """Model IDs that may be assigned to an agent right now: in the merged
+    catalog (static + live) and, when an admin has narrowed the list in
+    Settings → Models, also enabled there (an empty enabled list means every
+    catalog model is enabled). Mirrors what GET /models offers the picker."""
+    from app.routers.settings import get_enabled_model_ids
+    catalog_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
+    enabled = get_enabled_model_ids(db)
+    return catalog_ids & set(enabled) if enabled else catalog_ids
+
+
+def _current_model_ids(agent: Agent) -> set[str]:
+    """The agent's assigned models (allowed list plus default) — grandfathered on redeploy."""
+    current = set(agent.get_allowed_model_ids())
+    default = _get_current_model_id(agent)
+    if default:
+        current.add(default)
+    return current
+
+
+def _require_enabled_models(model_ids: list[str | None], db: Session, *, keep: set[str] | None = None) -> None:
+    """Reject a deploy/redeploy that assigns a model an admin has disabled.
+
+    Only applies once an admin has narrowed the enabled list: with no list
+    set, deploys keep accepting any model ID (including ones outside the
+    curated catalog). IDs in ``keep`` (the agent's current models) are
+    grandfathered so a redeploy isn't blocked by a model disabled after the
+    agent was created — those surface as deprecated_model_ids instead.
+    """
+    from app.routers.settings import get_enabled_model_ids
+    enabled = get_enabled_model_ids(db)
+    if not enabled:
+        return
+    allowed = set(enabled) | (keep or set())
+    rejected = sorted({m for m in model_ids if m and m not in allowed})
+    if rejected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Models not enabled in Settings → Models: {', '.join(rejected)}",
+        )
+
+
 def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     """Build an AgentResponse from an Agent ORM object."""
     model_id = None
@@ -457,12 +520,13 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     if not allowed_models and model_id:
         allowed_models = [model_id]
 
-    # Flag model IDs no longer in the current catalog (dropped by a
-    # models.json refresh, #64 follow-up) so the UI can surface "this agent
-    # needs to be updated" without blocking the agent itself — grandfathered
-    # models keep working, they're just no longer assignable to new agents
-    # (see the matching PATCH /{agent_id} validation below).
-    valid_model_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
+    # Flag model IDs that are no longer assignable — dropped from the catalog
+    # by a models.json refresh (#64 follow-up) or disabled by an admin in
+    # Settings → Models — so the UI can surface "this agent needs to be
+    # updated" without blocking the agent itself. Grandfathered models keep
+    # working, they're just no longer assignable to new agents (see the
+    # matching PATCH /{agent_id} and deploy validation).
+    valid_model_ids = _assignable_model_ids(db)
     candidate_ids = list(allowed_models)
     if model_id and model_id not in candidate_ids:
         candidate_ids.append(model_id)
@@ -481,6 +545,14 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
         a2a_names=a2a_names,
         code_interpreter_status=None,
     )
+    guardrail_block = guardrail_block_from_config_json(
+        next((e.value for e in agent.config_entries if e.key == "AGENT_CONFIG_JSON"), None)
+    )
+    result.guardrail_selection = agent.guardrail_selection
+    result.guardrail = guardrail_block
+    result.guardrail_details = agent.get_guardrail_details() if guardrail_block else None
+    result.guardrail_supported = supported_modes(agent.source, provider)
+    result.guardrail_drift = compute_drift(db, agent.guardrail_selection, guardrail_block, agent.source, provider)
     if inv_count > 0 and grand_total > 0:
         result.cost_summary = {
             "total_input_tokens": total_input,
@@ -494,6 +566,103 @@ def _agent_response(agent: Agent, db: Session) -> AgentResponse:
     else:
         result.cost_summary = None
     return result
+
+
+# Config keys Loom itself writes and later trusts: secret ARNs and the LiteLLM
+# key alias drive force-deletes/revocations on agent delete, and
+# AGENT_CONFIG_JSON carries the credential-provider names deleted on
+# redeploy/delete plus the baked guardrail. None of them may be set through
+# the generic config API, or an agent:write holder could point their own
+# agent's cleanup at another group's resources.
+_LOOM_MANAGED_CONFIG_KEYS = frozenset({
+    "AGENT_CONFIG_JSON",
+    "COGNITO_CLIENT_ID",
+    "COGNITO_CLIENT_SECRET_ARN",
+    "LLM_PROVIDER_API_KEY_SECRET_ARN",
+    "LITELLM_VIRTUAL_KEY_ALIAS",
+})
+
+
+def _is_loom_managed_config_key(key: str) -> bool:
+    """True for a config key the generic config API must not write."""
+    upper = key.strip().upper()
+    return upper in _LOOM_MANAGED_CONFIG_KEYS or upper.endswith("_SECRET_ARN")
+
+
+def _owns_agent_secret(agent: Agent, secret_ref: str | None) -> bool:
+    """True when a secret name/ARN is in this agent's own Secrets Manager namespace.
+
+    Defense in depth for the force-delete on agent deletion: whatever the
+    stored config says, only loom/agents/{agent_id}/... is ever deleted.
+    """
+    if not secret_ref:
+        return False
+    name = secret_ref.split(":secret:", 1)[1] if ":secret:" in secret_ref else secret_ref
+    return name.startswith(f"loom/agents/{agent.id}/")
+
+
+def _owns_credential_provider(agent: Agent, cp_name: str | None) -> bool:
+    """True when a credential provider name is one Loom generated for this agent.
+
+    Names are ``loom-<agent name>-<agent id>-{mcp,a2a}-<target>`` or
+    ``...-litellm-key`` (see credential_provider_name), so the id makes them
+    unforgeable for another agent. Providers named under the pre-id scheme are
+    no longer cleaned up automatically; that leaks a provider rather than
+    deleting someone else's.
+    """
+    if not cp_name:
+        return False
+    prefix = credential_provider_name(agent.id, agent.name, "")
+    if not cp_name.startswith(prefix):
+        return False
+    rest = cp_name[len(prefix):]
+    return rest == "litellm-key" or rest.startswith(("mcp-", "a2a-"))
+
+
+def _owned_credential_providers(agent: Agent, cp_names: Any) -> list[str]:
+    """Filter cleanup targets to this agent's own providers, logging any refused."""
+    owned: list[str] = []
+    for cp_name in cp_names:
+        if _owns_credential_provider(agent, cp_name):
+            owned.append(cp_name)
+        else:
+            # The name came from stored config, so it isn't logged (it may be
+            # attacker-influenced); the agent id is enough to investigate.
+            logger.warning("Skipping cleanup of credential provider: not owned by agent %s", agent.id)
+    return owned
+
+
+def _redeploy_tags(tags: dict[str, str] | None, user: UserInfo) -> dict[str, str] | None:
+    """Tags for a redeploy: unchanged when omitted, otherwise group-checked like a create.
+
+    Omitting tags keeps the agent's current ones (the caller already passed
+    the group check on the existing agent). Supplying them must not move the
+    agent into a group the caller doesn't belong to.
+    """
+    if not tags:
+        return tags
+    return require_group_tag(tags, "agent", user=user)
+
+
+def _resolve_guardrail_or_422(
+    request: AgentCreateRequest, source: str, provider: str | None, db: Session,
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve the agent's guardrail block and snapshot its policy details.
+
+    The GetGuardrail read happens here, at deploy/update time, so a wrong
+    guardrail ID or version fails the request with 422 before anything is
+    created, and the agent page can render the stored details without
+    calling Bedrock on every load.
+
+    Returns:
+        (selection, block, details) — details is None when no guardrail applies.
+    """
+    try:
+        selection, block = resolve_agent_guardrail(db, request.guardrail, source, provider)
+        details = snapshot_guardrail_details(block, os.getenv("AWS_REGION", DEFAULT_REGION), strict=True)
+    except GuardrailError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return selection, block, details
 
 
 def _resolve_tags(
@@ -1104,12 +1273,14 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Field 'model_id' is required when source is 'deploy'"
         )
+    _require_enabled_models([request.model_id, *(request.allowed_model_ids or [])], db)
     provider = (request.provider or "bedrock").lower()
     if provider not in SUPPORTED_PROVIDER_IDS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported provider '{provider}'. Must be one of: {sorted(SUPPORTED_PROVIDER_IDS)}"
         )
+    guardrail_selection, guardrail_block, guardrail_details = _resolve_guardrail_or_422(request, "deploy", provider, db)
     if provider == "litellm":
         from app.services.litellm import get_agent_base_url
         if not get_agent_base_url(db) and not os.getenv("LOOM_LITELLM_PROXY_BASE_URL"):
@@ -1140,7 +1311,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
 
     # Resolve tags from tag policies + user-supplied profile values
     # loom:group is what authorization is keyed on, so require it at creation.
-    resolved_tags, tag_policy_dicts = _resolve_tags(db, require_group_tag(request.tags, "agent"))
+    resolved_tags, tag_policy_dicts = _resolve_tags(db, require_group_tag(request.tags, "agent", user=user))
 
     # Model config (system prompt is built after the agent record exists, so
     # any attached skills' content can be folded in via their Integration rows)
@@ -1304,6 +1475,8 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
         source="deploy",
         deployment_status="initializing",
         user_system_prompt=_user_system_prompt(request),
+        guardrail_selection=guardrail_selection,
+        guardrail_details=json.dumps(guardrail_details) if guardrail_details else None,
         protocol=request.protocol,
         network_mode=request.network_mode,
         agent_framework=request.agent_framework,
@@ -1397,6 +1570,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
         model_max_tokens=model_max_tokens,
         region=region,
         account_id=account_id,
+        guardrail_block=guardrail_block,
     )
 
     return response_data
@@ -1414,6 +1588,7 @@ def _deploy_agent_background(
     model_max_tokens: int,
     region: str,
     account_id: str,
+    guardrail_block: dict[str, Any] | None = None,
 ) -> None:
     """Background task that performs the actual deployment steps.
 
@@ -1627,6 +1802,7 @@ def _deploy_agent_background(
         except Exception as e:
             agent.deployment_status = "failed"
             agent.status = "FAILED"
+            agent.status_reason = f"Artifact build failed: {e}"[:1000]
             db.commit()
             if ci_future is not None:
                 ci_future.cancel()
@@ -1715,6 +1891,7 @@ def _deploy_agent_background(
             "base_url": agent_base_url,
             "api_key_secret_arn": api_key_secret_arn,
             "integrations": integrations_config,
+            "guardrail": guardrail_block,
         })
         env_vars = {
             "AGENT_CONFIG_JSON": config_json,
@@ -1911,6 +2088,7 @@ def _update_deploy_agent_background(
     old_cp_names: set[str],
     region: str,
     account_id: str,
+    guardrail_block: dict[str, Any] | None = None,
 ) -> None:
     """Background task that updates an existing deploy-type agent runtime in-place.
 
@@ -1993,7 +2171,7 @@ def _update_deploy_agent_background(
                 entry["supports_elicitation"] = "true"
             mcp_server_configs.append(entry)
 
-        removed_cps = old_cp_names - new_cp_names
+        removed_cps = _owned_credential_providers(agent, sorted(old_cp_names - new_cp_names))
         for cp_name in removed_cps:
             try:
                 delete_credential_provider(cp_name, region)
@@ -2084,6 +2262,7 @@ def _update_deploy_agent_background(
         except Exception as e:
             agent.deployment_status = "failed"
             agent.status = "FAILED"
+            agent.status_reason = f"Artifact build failed: {e}"[:1000]
             db.commit()
             logger.error("Failed to build artifact for agent %s: %s", agent.id, e)
             return
@@ -2093,6 +2272,7 @@ def _update_deploy_agent_background(
             "model_id": request.model_id,
             "max_tokens": model_max_tokens,
             "integrations": integrations_config,
+            "guardrail": guardrail_block,
         })
         env_vars = {
             "AGENT_CONFIG_JSON": config_json,
@@ -2237,6 +2417,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Field 'model_id' is required when source is 'harness'"
         )
+    _require_enabled_models([request.model_id, *(request.allowed_model_ids or [])], db)
     if not request.role_arn:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2248,6 +2429,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported provider '{harness_provider}'. Must be one of: {sorted(SUPPORTED_PROVIDER_IDS)}"
         )
+    guardrail_selection, guardrail_block, guardrail_details = _resolve_guardrail_or_422(request, "harness", harness_provider, db)
     if harness_provider == "litellm":
         from app.services.litellm import get_agent_base_url
         if not get_agent_base_url(db) and not os.getenv("LOOM_LITELLM_PROXY_BASE_URL"):
@@ -2291,7 +2473,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
     region = os.getenv("AWS_REGION", DEFAULT_REGION)
     account_id = os.getenv("AWS_ACCOUNT_ID", "")
 
-    resolved_tags, _ = _resolve_tags(db, require_group_tag(request.tags, "agent"))
+    resolved_tags, _ = _resolve_tags(db, require_group_tag(request.tags, "agent", user=user))
 
     # Validate skill record IDs — must resolve to an APPROVED SKILL record
     _validate_skill_ids(request.skill_ids)
@@ -2431,6 +2613,8 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
         source="harness",
         deployment_status="initializing",
         user_system_prompt=_user_system_prompt(request),
+        guardrail_selection=guardrail_selection,
+        guardrail_details=json.dumps(guardrail_details) if guardrail_details else None,
         execution_role_arn=request.role_arn,
         protocol="HTTP",
         network_mode=request.network_mode,
@@ -2488,6 +2672,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
         ci_config=harness_ci_config,
         provider=harness_provider,
         base_url=request.base_url,
+        guardrail_block=guardrail_block,
     )
 
     return response_data
@@ -2525,6 +2710,7 @@ def _deploy_harness_background(
     ci_config: dict[str, Any] | None = None,
     provider: str = "bedrock",
     base_url: str | None = None,
+    guardrail_block: dict[str, Any] | None = None,
 ) -> None:
     """Background task that creates credential providers and the harness in AWS."""
     db = SessionLocal()
@@ -2768,6 +2954,7 @@ def _deploy_harness_background(
                 "a2a_agents": [],
                 "memory": {"enabled": len(memory_configs) > 0, "resources": memory_configs},
             },
+            "guardrail": guardrail_block,
         })
 
         # Store config entry
@@ -2815,6 +3002,7 @@ def _deploy_harness_background(
             provider=provider,
             litellm_api_key_arn=litellm_cp_arn,
             litellm_api_base=base_url,
+            additional_params=harness_additional_params(guardrail_block),
         )
 
         harness_id = response.get("harnessId", "")
@@ -2905,6 +3093,7 @@ def _update_harness_background(
     base_url: str | None = None,
     litellm_cp_name: str | None = None,
     litellm_cp_arn: str | None = None,
+    guardrail_block: dict[str, Any] | None = None,
 ) -> None:
     """Background task that updates an existing harness via UpdateHarness API."""
     db = SessionLocal()
@@ -2971,7 +3160,7 @@ def _update_harness_background(
         harness_tools.extend(extra_harness_tools)
 
         # Delete old credential providers no longer needed
-        removed_cps = old_cp_names - new_cp_names
+        removed_cps = _owned_credential_providers(agent, sorted(old_cp_names - new_cp_names))
         for cp_name in removed_cps:
             try:
                 from app.services.deployment import delete_oauth2_credential_provider
@@ -3073,6 +3262,7 @@ def _update_harness_background(
                 "a2a_agents": [],
                 "memory": {"enabled": len(memory_configs) > 0, "resources": memory_configs},
             },
+            "guardrail": guardrail_block,
         })
 
         db.add(ConfigEntry(
@@ -3104,6 +3294,7 @@ def _update_harness_background(
             provider=provider,
             litellm_api_key_arn=litellm_cp_arn,
             litellm_api_base=base_url,
+            additional_params=harness_additional_params(guardrail_block),
         )
 
         harness_status = response.get("status", "UPDATING")
@@ -3501,10 +3692,18 @@ def delete_agent(
             litellm_cp_name = agent_config.get("litellm_api_key_credential_provider_name") or None
         except (json.JSONDecodeError, TypeError):
             pass
+    # Only ever clean up this agent's own resources, whatever the stored
+    # config names (see _owns_credential_provider / _owns_agent_secret).
+    cp_names = _owned_credential_providers(agent, cp_names)
+    if litellm_cp_name and not _owned_credential_providers(agent, [litellm_cp_name]):
+        litellm_cp_name = None
 
     # Virtual key lives in the external LiteLLM proxy, not AWS — revoke it
-    # regardless of cleanup_aws.
+    # regardless of cleanup_aws. Only this agent's own alias.
     litellm_virtual_key_alias = config_map.get("LITELLM_VIRTUAL_KEY_ALIAS")
+    if litellm_virtual_key_alias and litellm_virtual_key_alias != f"loom-agent-{agent.id}":
+        logger.warning("Skipping revoke of LiteLLM key alias: not owned by agent %s", agent.id)
+        litellm_virtual_key_alias = None
     if litellm_virtual_key_alias:
         from app.services.litellm import revoke_virtual_key
         revoke_virtual_key(litellm_virtual_key_alias, db)
@@ -3513,8 +3712,10 @@ def delete_agent(
     if not cleanup_aws or not agent.runtime_id:
         # Clean up Cognito client secret from Secrets Manager
         secret_arn = config_map.get("COGNITO_CLIENT_SECRET_ARN")
-        if secret_arn:
+        if _owns_agent_secret(agent, secret_arn):
             delete_secret(secret_arn, agent.region)
+        elif secret_arn:
+            logger.warning("Skipping delete of secret not owned by agent %s", agent.id)
 
         result = _agent_response(agent, db)
         # Delete invocations before sessions to avoid FK constraint violations
@@ -3549,6 +3750,9 @@ def delete_agent(
     _endpoint_name = agent.endpoint_name
     _region = agent.region
     _secret_arn = config_map.get("COGNITO_CLIENT_SECRET_ARN")
+    if _secret_arn and not _owns_agent_secret(agent, _secret_arn):
+        logger.warning("Skipping delete of secret not owned by agent %s", agent.id)
+        _secret_arn = None
     _ci_id = agent.code_interpreter_id
     _ci_region = None
     if _ci_id:
@@ -3932,6 +4136,8 @@ def redeploy_deploy_agent(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only deploy-type agents can be updated via this endpoint",
         )
+    _require_enabled_models([request.model_id, *(request.allowed_model_ids or [])], db, keep=_current_model_ids(agent))
+    guardrail_selection, guardrail_block, guardrail_details = _resolve_guardrail_or_422(request, "deploy", request.provider, db)
 
     if not agent.runtime_id:
         raise HTTPException(
@@ -4069,7 +4275,7 @@ def redeploy_deploy_agent(
 
     # A resource with no loom:group is unreachable for anyone but a super-admin
     # (check_resource_group_access fails closed), so refuse to create one.
-    resolved_tags, tag_policy_dicts = _resolve_tags(db, request.tags)
+    resolved_tags, tag_policy_dicts = _resolve_tags(db, _redeploy_tags(request.tags, user))
     _validate_skill_ids(request.skill_ids)
     _sync_attached_skills(agent.id, request.skill_ids, db)
     skill_prompt_text = _get_attached_skill_prompt_text(agent.id, db)
@@ -4080,6 +4286,8 @@ def redeploy_deploy_agent(
         4096,
     )
 
+    agent.guardrail_selection = guardrail_selection
+    agent.set_guardrail_details(guardrail_details)
     agent.status = "UPDATING"
     agent.deployment_status = "updating"
     db.commit()
@@ -4099,6 +4307,7 @@ def redeploy_deploy_agent(
         old_cp_names=old_cp_names,
         region=region,
         account_id=account_id,
+        guardrail_block=guardrail_block,
     )
 
     return _agent_response(agent, db)
@@ -4124,6 +4333,8 @@ def redeploy_harness_agent(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only harness agents can be updated via this endpoint",
         )
+    _require_enabled_models([request.model_id, *(request.allowed_model_ids or [])], db, keep=_current_model_ids(agent))
+    guardrail_selection, guardrail_block, guardrail_details = _resolve_guardrail_or_422(request, "harness", request.provider, db)
 
     if not agent.harness_id:
         raise HTTPException(
@@ -4160,7 +4371,7 @@ def redeploy_harness_agent(
         db.commit()
 
     # Update agent fields
-    resolved_tags, _ = _resolve_tags(db, request.tags)
+    resolved_tags, _ = _resolve_tags(db, _redeploy_tags(request.tags, user))
     _validate_skill_ids(request.skill_ids)
     _sync_attached_skills(agent.id, request.skill_ids, db)
     skill_prompt_text = _get_attached_skill_prompt_text(agent.id, db)
@@ -4247,6 +4458,8 @@ def redeploy_harness_agent(
             "allowed_scopes": jwt.get("allowedScopes", []),
         })
 
+    agent.guardrail_selection = guardrail_selection
+    agent.set_guardrail_details(guardrail_details)
     db.commit()
     db.refresh(agent)
 
@@ -4363,9 +4576,92 @@ def redeploy_harness_agent(
         base_url=litellm_base_url,
         litellm_cp_name=litellm_cp_name,
         litellm_cp_arn=litellm_cp_arn,
+        guardrail_block=guardrail_block,
     )
 
     return _agent_response(agent, db)
+
+
+@router.post("/{agent_id}/guardrails/refresh", response_model=AgentResponse)
+def refresh_guardrail_details(
+    agent_id: int,
+    user: UserInfo = Depends(require_scopes("agent:write")),
+    db: Session = Depends(get_db),
+) -> AgentResponse:
+    """Re-read the agent's guardrail details from Bedrock (issue #17).
+
+    Details are normally captured at deploy/update time. DRAFT versions are
+    mutable, so this lets a builder pick up policy edits without a redeploy.
+    It never changes what the agent enforces — only the stored description.
+    A guardrail that no longer exists is recorded as an error entry.
+    """
+    agent = get_agent_or_404(agent_id, db, user)
+    block = guardrail_block_from_config_json(
+        next((e.value for e in agent.config_entries if e.key == "AGENT_CONFIG_JSON"), None)
+    )
+    if not block:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This agent has no guardrail configured",
+        )
+    agent.set_guardrail_details(snapshot_guardrail_details(block, agent.region, strict=False))
+    db.commit()
+    db.refresh(agent)
+    return _agent_response(agent, db)
+
+
+class GuardrailInterventionsResponse(BaseModel):
+    """Guardrail intervention history for an agent (read from its runtime logs)."""
+    interventions: list[dict[str, Any]] = []
+    supported: bool = True
+    note: str | None = None
+
+
+@router.get("/{agent_id}/guardrails/interventions", response_model=GuardrailInterventionsResponse)
+def get_guardrail_interventions(
+    agent_id: int,
+    session_id: str | None = None,
+    hours: int = 24,
+    limit: int = 100,
+    user: UserInfo = Depends(require_scopes("agent:read")),
+    db: Session = Depends(get_db),
+) -> GuardrailInterventionsResponse:
+    """List guardrail interventions the agent runtime logged (issue #17).
+
+    Custom agents write one `guardrail_intervention` JSON line per event to
+    their runtime log group, which covers every caller — including ones that
+    invoke the AgentCore runtime directly rather than through Loom.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    from app.services.guardrails import query_interventions
+
+    agent = get_agent_or_404(agent_id, db, user)
+    if agent.source == "harness":
+        return GuardrailInterventionsResponse(
+            supported=False,
+            note="Managed (harness) agents don't write intervention records; interventions are "
+                 "shown live in the invoke stream only.",
+        )
+    if agent.source != "deploy" or not agent.runtime_id:
+        return GuardrailInterventionsResponse(
+            supported=False,
+            note="Guardrails are only managed by Loom for agents it deploys.",
+        )
+    hours = max(1, min(hours, 24 * 14))
+    limit = max(1, min(limit, 500))
+    try:
+        records = query_interventions(
+            derive_log_group(agent.runtime_id, "DEFAULT"), agent.region,
+            session_id=session_id, hours=hours, limit=limit,
+        )
+    except (ClientError, BotoCoreError) as exc:
+        logger.warning("Guardrail intervention query failed for agent %s: %s", agent_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Unable to query guardrail interventions: {exc}",
+        ) from exc
+    return GuardrailInterventionsResponse(interventions=records)
 
 
 @router.get("/{agent_id}/config", response_model=list[ConfigEntryResponse])
@@ -4432,6 +4728,20 @@ def export_agent(agent_id: int, user: UserInfo = Depends(require_scopes("admin:w
             data["api_key"] = get_secret(api_key_secret_arn, agent.region)
         except Exception:
             logger.warning("Failed to retrieve provider API key secret for agent %s", agent_id, exc_info=True)
+
+    # Guardrail selection (issue #17), in the same shape the manifest import
+    # and create/redeploy requests take. Omitted = inherit the global default.
+    if agent.guardrail_selection == "none":
+        data["guardrail"] = {"selection": "none"}
+    elif agent.guardrail_selection == "custom":
+        block = agent_config.get("guardrail")
+        if isinstance(block, dict):
+            data["guardrail"] = {"selection": "custom", "config": {
+                k: block[k] for k in (
+                    "guardrail_id", "guardrail_arn", "guardrail_version", "mode",
+                    "stream_processing_mode", "redact_history", "allowed",
+                ) if k in block
+            }}
 
     if agent.network_mode and agent.network_mode != "PUBLIC":
         vpc_block: dict[str, Any] = {"mode": agent.network_mode}
@@ -4572,7 +4882,7 @@ def patch_agent(
             except Exception:
                 logger.warning("Failed to propagate description to AgentCore for agent %s", agent_id, exc_info=True)
     if "model_id" in request.model_fields_set and request.model_id is not None:
-        valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
+        valid_ids = _assignable_model_ids(db)
         # Grandfather the agent's current model in — a model dropped from
         # the catalog by a models.json refresh stays assignable to agents
         # that already have it (it still works; it's just no longer
@@ -4594,7 +4904,7 @@ def patch_agent(
                     pass
                 break
     if "allowed_model_ids" in request.model_fields_set and request.allowed_model_ids is not None:
-        valid_ids = {m["model_id"] for m in get_merged_models(DEFAULT_REGION)}
+        valid_ids = _assignable_model_ids(db)
         # Same grandfathering as model_id above: an already-assigned model
         # can be kept (or dropped) even if it's no longer in the catalog;
         # only *adding* a model not in either set is rejected.
@@ -4672,8 +4982,22 @@ def update_agent_config(
     user: UserInfo = Depends(require_scopes("agent:write")),
     db: Session = Depends(get_db),
 ) -> list[ConfigEntryResponse]:
-    """Update configuration entries for an agent. Adds new keys and updates existing ones."""
+    """Update configuration entries for an agent. Adds new keys and updates existing ones.
+
+    Keys Loom manages itself (secret ARNs, AGENT_CONFIG_JSON, the LiteLLM key
+    alias) and entries already marked secret are refused with 422.
+    """
     get_agent_or_404(agent_id, db, user)
+
+    secret_keys = {
+        e.key for e in db.query(ConfigEntry).filter(ConfigEntry.agent_id == agent_id, ConfigEntry.is_secret == True)  # noqa: E712
+    }
+    refused = sorted(k for k in request.config if _is_loom_managed_config_key(k) or k in secret_keys)
+    if refused:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"These config keys are managed by Loom and can't be set directly: {', '.join(refused)}",
+        )
 
     for key, value in request.config.items():
         existing = db.query(ConfigEntry).filter(

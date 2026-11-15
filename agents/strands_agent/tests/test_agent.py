@@ -11,7 +11,14 @@ from src.config import (
     MemoryConfig,
 )
 from src.agent import build_agent, _build_model
+from src.integrations.approval import ApprovalHook
+from src.integrations.mcp_client import TokenInfoHook
+from src.integrations.memory import MemoryHook
 from src.telemetry import TelemetryHook
+
+# build_agent always installs these, in this order: HITL approvals, OBO token
+# info capture, and telemetry. MemoryHook is added only when memory is enabled.
+_ALWAYS_ON_HOOKS = (ApprovalHook, TokenInfoHook, TelemetryHook)
 
 
 class TestBuildAgent(unittest.TestCase):
@@ -50,13 +57,11 @@ class TestBuildAgent(unittest.TestCase):
         call_kwargs = mock_agent_cls.call_args[1]
         self.assertEqual(call_kwargs["system_prompt"], "Test prompt")
         self.assertEqual(call_kwargs["tools"], [])
-        # TelemetryHook is always added
-        self.assertEqual(len(call_kwargs["hooks"]), 1)
-        self.assertIsInstance(call_kwargs["hooks"][0], TelemetryHook)
+        self.assertEqual([type(h) for h in call_kwargs["hooks"]], list(_ALWAYS_ON_HOOKS))
 
     @patch("src.agent.Agent")
     @patch("src.agent.BedrockModel")
-    @patch("src.agent.create_mcp_clients")
+    @patch("src.agent.build_mcp_clients")
     def test_agent_with_mcp_tools(
         self,
         mock_mcp: MagicMock,
@@ -78,7 +83,7 @@ class TestBuildAgent(unittest.TestCase):
 
     @patch("src.agent.Agent")
     @patch("src.agent.BedrockModel")
-    @patch("src.agent.create_mcp_clients")
+    @patch("src.agent.build_mcp_clients")
     def test_disabled_mcp_not_loaded(
         self,
         mock_mcp: MagicMock,
@@ -121,9 +126,8 @@ class TestBuildAgent(unittest.TestCase):
         build_agent(config)
 
         call_kwargs = mock_agent_cls.call_args[1]
-        # Only TelemetryHook, no MemoryHook
-        self.assertEqual(len(call_kwargs["hooks"]), 1)
-        self.assertIsInstance(call_kwargs["hooks"][0], TelemetryHook)
+        self.assertEqual([type(h) for h in call_kwargs["hooks"]], list(_ALWAYS_ON_HOOKS))
+        self.assertFalse(any(isinstance(h, MemoryHook) for h in call_kwargs["hooks"]))
 
     @patch("src.agent.Agent")
     @patch("src.agent.BedrockModel")

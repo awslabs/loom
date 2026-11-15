@@ -20,6 +20,8 @@ not need any changes):
   resume path (``interruptResponse``) can look the pending call back up
   directly instead of needing a separate id-mapping table.
 - Plain string error text — same ``"\\n\\nError: ..."`` formatting Strands uses.
+- ``{"guardrail": {...}}`` — a Bedrock Guardrails intervention (enforce) or
+  detection (monitor), see ``integrations/guardrails.py``.
 
 Known parity gap: MCP elicitation (Strands' ``ctx.elicit()``/``{"elicitation": ...}``
 event, Method 3/4 in the HITL reference implementations) and the
@@ -54,8 +56,18 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from src.agent import build_agent, build_model
-from src.config import AgentConfig, load_config
+from src.config import AgentConfig, GuardrailConfig, load_config
 from src.integrations.code_interpreter import AgentCoreCodeInterpreterTools
+from src.integrations.guardrails import (
+    GUARDRAIL_NOT_ALLOWED_MESSAGE,
+    GUARDRAIL_NOT_ALLOWED_TEXT,
+    GuardrailSession,
+    drain_trace_records,
+    guardrail_cache_key,
+    resolve_invocation_guardrail,
+    start_trace_capture,
+    stop_trace_capture,
+)
 
 # Configure the root Python logger so all modules emit to stdout where
 # AgentCore Runtime captures them for CloudWatch — same as Strands' handler.
@@ -80,7 +92,11 @@ _plugins: list[BasePlugin] = []
 _code_interpreter: Optional[AgentCoreCodeInterpreterTools] = None
 _session_service = InMemorySessionService()
 _runner: Optional[Runner] = None
-_model_cache: dict[tuple[str, str, str], Any] = {}  # keyed by (provider, model_id, base_url)
+_default_model: Optional[Any] = None
+# keyed by (provider, model_id, base_url, inline-guardrail key) so a
+# per-invocation guardrail override gets its own model and runtime model
+# overrides keep the guardrail.
+_model_cache: dict[tuple[Any, ...], Any] = {}
 _approval_matcher: Optional[Any] = None
 
 
@@ -102,10 +118,11 @@ def _prewarm_code_interpreter(ci: AgentCoreCodeInterpreterTools) -> None:
 
 async def _get_runner() -> Runner:
     """Get or initialize the singleton agent/Runner instance."""
-    global _agent, _config, _plugins, _code_interpreter, _runner, _approval_matcher
+    global _agent, _config, _plugins, _code_interpreter, _runner, _approval_matcher, _default_model
     if _runner is None:
         _config = load_config()
         _agent, _plugins, _code_interpreter, _approval_matcher = await build_agent(_config)
+        _default_model = _agent.model
         if _code_interpreter is not None:
             t = threading.Thread(target=_prewarm_code_interpreter, args=(_code_interpreter,), daemon=True)
             t.start()
@@ -184,21 +201,33 @@ def _find_pending_confirmation_call(session, interrupt_id: str):
     return None
 
 
-def _resolve_model_for_invocation(runtime_model_id: Optional[str]):
-    """Return a cached model instance for a runtime model-id override, or
-    None to keep the agent's default model — mirrors Strands' per-invocation
-    model-override caching.
+def _resolve_model_for_invocation(
+    runtime_model_id: Optional[str], guardrail: Optional[GuardrailConfig] = None
+):
+    """Return a cached model instance for a runtime model-id and/or guardrail
+    override, or None to use the agent's default model — mirrors Strands'
+    per-invocation model-override caching. The cached model is built with
+    the effective guardrail, so model overrides keep the guardrail.
     """
-    if not runtime_model_id or _config is None:
+    if _config is None:
         return None
-    cache_key = (_config.provider, runtime_model_id, _config.base_url)
+    if not runtime_model_id and guardrail == _config.guardrail:
+        return None
+    model_id = runtime_model_id or _config.model_id
+    cache_key = (_config.provider, model_id, _config.base_url, guardrail_cache_key(guardrail, _config.provider))
     if cache_key not in _model_cache:
-        _model_cache[cache_key] = build_model(dataclasses.replace(_config, model_id=runtime_model_id))
+        _model_cache[cache_key] = build_model(dataclasses.replace(_config, model_id=model_id, guardrail=guardrail))
         logger.info(
-            "Created cached model for runtime override: provider=%s model_id=%s",
-            _config.provider, runtime_model_id,
+            "Created cached model for runtime override: provider=%s model_id=%s guardrail=%s",
+            _config.provider, model_id, guardrail.guardrail_id if guardrail else None,
         )
     return _model_cache[cache_key]
+
+
+def _is_safety_stop(event: Any) -> bool:
+    """True when an ADK event reports a SAFETY finish (LiteLLM ``content_filter``)."""
+    safety = types.FinishReason.SAFETY
+    return getattr(event, "error_code", None) == safety or getattr(event, "finish_reason", None) == safety
 
 
 async def _run_turn(
@@ -206,17 +235,43 @@ async def _run_turn(
     actor_id: str,
     content: Optional[types.Content],
     runtime_model_id: Optional[str] = None,
+    guardrail_request: Any = None,
 ) -> AsyncGenerator[Any, None]:
     """Run one turn of the agent against the given session, yielding events
     in the same shapes Strands' handler yields (text tokens, tool_use dicts,
-    interrupt dicts, or an error string).
+    interrupt dicts, guardrail dicts, or an error string).
+
+    ``guardrail_request`` is the payload's optional ``guardrail`` override
+    (Contract 2). It is validated here, after the config is loaded, and a
+    rejected request yields the error text without calling the model.
     """
     runner = await _get_runner()
+
+    configured_guardrail = _config.guardrail if _config is not None else None
+    guardrail, guardrail_ok = resolve_invocation_guardrail(configured_guardrail, guardrail_request)
+    if not guardrail_ok:
+        logger.warning("Rejected payload guardrail override (not the primary or an allowed guardrail)")
+        yield GUARDRAIL_NOT_ALLOWED_MESSAGE
+        return
+
     session = await _get_or_create_session(session_id, actor_id)
 
-    override_model = _resolve_model_for_invocation(runtime_model_id)
-    if override_model is not None and _agent is not None:
-        _agent.model = override_model
+    override_model = _resolve_model_for_invocation(runtime_model_id, guardrail)
+    if _agent is not None:
+        if override_model is not None:
+            _agent.model = override_model
+        elif _default_model is not None:
+            # Restore the default so a previous invocation's override doesn't stick.
+            _agent.model = _default_model
+
+    provider = _config.provider if _config is not None else "bedrock"
+    guardrail_session = GuardrailSession.create(guardrail, provider, session_id)
+    capture_token = None
+    safety_stop = False
+    if guardrail_session:
+        guardrail_session.start_input(_extract_text(content))
+        if guardrail_session.is_enforce:
+            capture_token = start_trace_capture()
 
     run_config = RunConfig(streaming_mode=StreamingMode.SSE)
     saw_any_partial = False
@@ -228,10 +283,21 @@ async def _run_turn(
             new_message=content,
             run_config=run_config,
         ):
+            if guardrail_session:
+                for g_event in guardrail_session.poll() + guardrail_session.observe_model_calls(drain_trace_records()):
+                    yield g_event
+
             if event.error_message:
-                logger.warning("Agent event error session_id=%s: %s", session_id, event.error_message)
-                yield f"\n\nError: {event.error_message}"
-                continue
+                if guardrail_session and guardrail_session.is_enforce and _is_safety_stop(event):
+                    # Guardrail intervention (LiteLLM maps guardrail_intervened
+                    # to content_filter -> SAFETY): reported as a guardrail
+                    # event, and the guardrail's blocked message is surfaced
+                    # as text below instead of an error.
+                    safety_stop = True
+                else:
+                    logger.warning("Agent event error session_id=%s: %s", session_id, event.error_message)
+                    yield f"\n\nError: {event.error_message}"
+                    continue
 
             confirmation = _extract_confirmation_request(event.content)
             if confirmation:
@@ -246,22 +312,36 @@ async def _run_turn(
                 continue
 
             text = _extract_text(event.content)
-            if text and event.partial:
-                yield text
-            elif text and not event.partial and not saw_any_partial:
-                # Some model backends (e.g. non-streaming providers routed
-                # through LiteLlm) never emit partial=True deltas at all —
-                # only a single complete event. Yield it in that case so
-                # text isn't silently dropped; once any partial delta has
-                # been seen this turn, the final aggregated event is assumed
-                # to duplicate that text and is not re-yielded.
+            if text and (event.partial or not saw_any_partial):
+                # Non-partial text is only yielded when no partial deltas
+                # were seen: some model backends (e.g. non-streaming
+                # providers routed through LiteLlm) never emit partial=True
+                # deltas at all — only a single complete event. Yield it in
+                # that case so text isn't silently dropped; once any partial
+                # delta has been seen this turn, the final aggregated event
+                # is assumed to duplicate that text and is not re-yielded.
+                if guardrail_session:
+                    guardrail_session.record_output(text)
                 yield text
             if event.partial:
                 saw_any_partial = True
+
+        if guardrail_session:
+            remaining = guardrail_session.observe_model_calls(drain_trace_records())
+            remaining += await guardrail_session.finish(safety_stop)
+            for g_event in remaining:
+                yield g_event
     except Exception as e:
         logger.exception("Agent stream error session_id=%s (%s): %s", session_id, type(e).__name__, e)
         detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
         yield f"\n\nError: {detail}"
+    finally:
+        if capture_token is not None:
+            try:
+                stop_trace_capture(capture_token)
+            except ValueError:
+                # Generator finalised from a different context; nothing to reset.
+                pass
 
 
 def _build_confirmation_response_content(interrupt_id: str, response_value: str) -> Optional[types.Content]:
@@ -295,6 +375,8 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
     session_id = payload.get("session_id", "")
     actor_id = payload.get("actor_id") or "loom-agent"
     runtime_model_id = payload.get("model_id")
+    # Per-invocation guardrail override (Contract 2), validated in _run_turn.
+    guardrail_kwargs = _guardrail_kwargs(payload)
 
     interrupt_responses = payload.get("interruptResponse")
     if interrupt_responses and isinstance(interrupt_responses, list):
@@ -317,7 +399,7 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
         logger.info("Resuming from interrupt session_id=%s id=%s response=%s", session_id, interrupt_id, response_value)
 
         content = _build_confirmation_response_content(interrupt_id, response_value)
-        async for event in _run_turn(session_id, actor_id, content, runtime_model_id):
+        async for event in _run_turn(session_id, actor_id, content, runtime_model_id, **guardrail_kwargs):
             yield event
         return
 
@@ -338,8 +420,15 @@ async def invoke(payload: dict[str, Any]) -> AsyncGenerator[Any, None]:
     prompt = payload.get("prompt", "")
     logger.info("Processing invocation session_id=%s actor_id=%s model=%s", session_id, actor_id, runtime_model_id or "default")
     content = types.Content(role="user", parts=[types.Part(text=prompt)]) if prompt else None
-    async for event in _run_turn(session_id, actor_id, content, runtime_model_id):
+    async for event in _run_turn(session_id, actor_id, content, runtime_model_id, **guardrail_kwargs):
         yield event
+
+
+def _guardrail_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
+    """``_run_turn`` kwargs for a payload ``guardrail`` override, if one was sent."""
+    if payload.get("guardrail") is None:
+        return {}
+    return {"guardrail_request": payload["guardrail"]}
 
 
 @app.websocket
@@ -368,9 +457,15 @@ async def ws_invoke(websocket, context) -> None:
             content = types.Content(role="user", parts=[types.Part(text=prompt)]) if prompt else None
 
             result_chunks: list[str] = []
-            async for event in _run_turn(session_id, actor_id, content, runtime_model_id):
-                if isinstance(event, str):
+            rejected = False
+            async for event in _run_turn(session_id, actor_id, content, runtime_model_id, **_guardrail_kwargs(data)):
+                if event == GUARDRAIL_NOT_ALLOWED_MESSAGE:
+                    rejected = True
+                    await websocket.send_json({"type": "error", "content": GUARDRAIL_NOT_ALLOWED_TEXT})
+                elif isinstance(event, str):
                     result_chunks.append(event)
+                elif isinstance(event, dict) and "guardrail" in event:
+                    await websocket.send_json({"type": "guardrail", "content": event["guardrail"]})
                 elif isinstance(event, dict) and "tool_use" in event:
                     await websocket.send_json({"type": "tool_use", "name": event["tool_use"]["name"]})
                 elif isinstance(event, dict) and "interrupt" in event:
@@ -381,7 +476,8 @@ async def ws_invoke(websocket, context) -> None:
                         "content": "This agent requires approval for a tool call; use the HTTP invoke endpoint to resume with interruptResponse.",
                     })
 
-            await websocket.send_json({"type": "result", "content": "".join(result_chunks)})
+            if not rejected:
+                await websocket.send_json({"type": "result", "content": "".join(result_chunks)})
 
     except Exception as e:
         logger.exception("WebSocket handler error: %s", e)

@@ -1146,6 +1146,9 @@ Parses OTEL (OpenTelemetry) log records from CloudWatch:
 Handles agent artifact build and runtime lifecycle:
 
 - Builds agent artifacts by cross-compiling pip dependencies for ARM64 (`manylinux2014_aarch64`).
+  - **Every pin must have a wheel for that platform.** The install uses `--only-binary=:all:`, so a dependency that publishes only newer `manylinux_2_28` wheels can't be installed, and the build fails. litellm ≥1.93 is one such dependency, so both agents' `requirements.in` cap it at `<1.93`.
+  - **Don't edit `requirements.txt` directly.** Bumps that bypass `make lock` (`uv pip compile ... --python-platform aarch64-manylinux2014 --only-binary :all:`) can break this, as a Dependabot `requirements.txt` edit did. Re-lock instead.
+  - **Failures report pip's own error.** The build raises pip's `ERROR:` lines and records them in `agents.status_reason`, instead of a bare "non-zero exit status 1".
 - Creates, updates, and deletes AgentCore runtimes and endpoints.
 - `create_runtime()` and `update_runtime()` always set `platformVersion="V2"` in the boto3 call params, so every runtime Loom creates or updates lands on AgentCore Runtime v2 (snapshot-restore cold starts, paged memory) with no caller-supplied flag. Requires `boto3>=1.43.95` — earlier versions' `bedrock-agentcore-control` service model doesn't expose `platformVersion` on `CreateAgentRuntime`/`UpdateAgentRuntime`.
 - `update_runtime()` accepts optional `description`, `env_vars`, `role_arn`, `authorizer_config`, and `region` parameters. Description updates are propagated from the `PATCH /api/agents/{id}` endpoint.
@@ -1304,6 +1307,12 @@ Note `get_current_user_token()` has the same no-IdP precondition and returns the
 **`session:read` is separate from `agent:read`.** Conversation content — `prompt_text`, `thinking_text`, `response_text`, and approval logs' `tool_input_summary` — is far more sensitive than "this agent exists", so the session/invocation/approval-log readers are gated on `session:read` rather than `agent:read`. Every group that holds `agent:read` today also holds `session:read`, so the split is not a privilege change; the point is that agent visibility can now be granted without handing over every transcript, and the domain admins (`g-admins-security`/`memory`/`mcp`/`a2a`/`registry`) hold neither.
 
 **Conversation reads enforce group *and* ownership.** `GET /api/agents/{id}` returned 403 for an agent outside the caller's group, but the readers beside it never got the same check: `list_sessions` loaded the Agent by ID with no check and returned every conversation on it to any `t-admin`, while `get_session` and `get_invocation` resolved by session UUID with no group check *and* no owner filter. `GET /api/settings/approvals/logs` was worse — declared with `dependencies=[...]` and no `user` parameter, so it had no identity in scope and structurally could not check anything, filtering only on a caller-supplied sequential `agent_id`. `routers/utils.py` now provides `get_session_or_404()` (group check via `get_agent_or_404`, then `assert_session_readable`: owner, or an admin for the agent's group) and `visible_agent_ids()` (for list routes, so an unfiltered query returns the caller's own agents rather than everyone's).
+
+**The group must be the caller's own (1.10.1).** `require_group_tag(tags, label, *, user)` now also requires the `loom:group` value to be one of the caller's groups, using `caller_group_tags()` — the same rule `check_resource_group_access` applies to existing resources (super-admins: any group; `t-admin`: their `g-admins-<group>` groups; users: their `g-users-<group>` groups), factored out so the two can't drift. Checking presence alone let a group admin create or re-tag an MCP server, A2A agent, memory, role, authorizer or agent into another group's catalog. Agent redeploys apply the same check when tags are supplied (`_redeploy_tags`); omitted tags leave the agent's current ones unchanged. The caller is a required keyword argument, so a new call site can't skip it.
+
+**Loom-managed agent config keys (1.10.1).** `PUT /api/agents/{id}/config` refuses (422, before any write) the keys Loom writes and later trusts — `AGENT_CONFIG_JSON`, `COGNITO_CLIENT_ID`, `COGNITO_CLIENT_SECRET_ARN`, `LLM_PROVIDER_API_KEY_SECRET_ARN`, `LITELLM_VIRTUAL_KEY_ALIAS`, any `*_SECRET_ARN` key — and any entry already marked secret. Previously any key was writable, so an `agent:write` holder could point their own agent's deletion/redeploy cleanup at another group's secrets, credential providers or LiteLLM key. As defense in depth, cleanup only ever touches the agent's own resources: secrets under `loom/agents/{agent_id}/` (`_owns_agent_secret`), credential providers named `loom-<name>-<id>-{mcp,a2a}-…`/`…-litellm-key` (`_owns_credential_provider`; providers from the pre-id naming scheme are skipped and logged rather than deleted), and the LiteLLM alias `loom-agent-{agent_id}`.
+
+**Authorizer secrets keyed on id (1.10.1).** Authorizer client, user-client and credential secrets were stored at `loom/authorizers/{name}/…`, derived from the renameable display name, and `store_secret` is create-or-overwrite — so renaming an authorizer onto another's name (or reusing a name another authorizer was renamed away from) overwrote that authorizer's secret. New secrets live at `loom/authorizer-secrets/{id}/…`, a prefix no name-keyed path can produce; existing secrets are updated in place through their stored ARN (`secrets.put_secret_value`); renaming onto an existing name returns 409 before anything is written; names can't contain `/`; and create applies the group check before writing any secret.
 
 **loom:group is mandatory at creation.** `routers/utils.py`'s `require_group_tag()` rejects any create whose tags carry no `loom:group`, wired into every resource-creating path: both agent deploy paths, memory create, MCP server create/update, A2A agent create/update, managed-role import and authorizer create. MCP servers and A2A agents previously had tag *columns* (`tags` and `resource_tags`) that no API exposed, which is why every one of them was untagged — both now accept `tags` on create and update. The frontend disables submit until a tag profile is chosen, on the agent wizard, memory, MCP and A2A forms.
 
@@ -1465,9 +1474,11 @@ SSRF-safe HTTP fetchers for outbound calls to user-supplied URLs, at two guard l
 - `safe_get(url, headers=None, timeout=10) -> Response`, `safe_post(url, data=None, headers=None, timeout=10) -> Response` — strict, public-addresses-only. Forces HTTPS, resolves the hostname via DNS, and rejects private/loopback/link-local (including the `169.254.169.254` cloud metadata address)/multicast/reserved/unspecified addresses. Used for OAuth2/OIDC discovery ("well-known") documents and the token endpoints they advertise (`mcp.py`/`a2a.py`'s `_get_oauth2_token`/`_get_obo_token`), since both are attacker-influenced (the well-known URL comes from an MCP server/A2A agent registration, and the discovery document supplies the token endpoint) and legitimate identity providers are always public internet-facing services.
 - `guarded_get(url, headers=None, timeout=10, follow_redirects=True) -> Response`, `guarded_post(url, json=None, headers=None, timeout=10, follow_redirects=True) -> Response` — permissive, allows both `http`/`https` and private (RFC 1918/RFC 4193) addresses, but still always blocks cloud metadata, loopback, link-local, multicast, reserved, and unspecified addresses. Used for the actual MCP server `endpoint_url` / A2A agent `base_url` connection targets — unlike OAuth infrastructure, reaching a private/VPC-internal address is a legitimate, supported use case here (the backend ECS service runs in private subnets specifically to support VPC-internal MCP servers and A2A agents).
 - Both levels resolve the hostname once via `socket.getaddrinfo` and pin the outbound connection to that validated IP (rather than letting the HTTP client re-resolve at connect time), preventing DNS-rebinding between the check and the actual connection. `guarded_get`/`guarded_post` additionally re-validate every redirect hop before following it (up to 5 hops, `SSRFBlockedError` beyond that) — an initial target passing validation does not grant a later cross-host redirect target a pass.
+- **Special-purpose ranges (1.10.1):** the strict level now also rejects anything that isn't `is_global` — notably `100.64.0.0/10` (RFC 6598 shared/carrier-grade NAT space), which is neither `is_private` nor in the explicit list and so used to pass. The explicit always-disallowed list is kept alongside the `is_global` check because NAT64 (`64:ff9b::/96`) is `is_global`; NAT64's well-known and local-use prefixes (`64:ff9b::/96`, `64:ff9b:1::/48`) are now named explicitly in the always-disallowed list at both levels, rather than being caught only incidentally by `is_reserved`. The permissive level still allows `100.64.0.0/10`, a legitimate VPC secondary CIDR for VPC-internal MCP servers and A2A agents.
 - `SSRFBlockedError(ValueError)` — raised by both levels when a URL is blocked; callers catch it separately from generic connection errors to log/return a distinct "blocked" outcome without ever surfacing the disallowed target's response body.
 - **`get_trusted_oauth_hosts() -> set[str]`, `is_trusted_oauth_host(url, trusted_hosts) -> bool`** — closes the residual gap `safe_get`/`safe_post` leave on their own: both still permit *any* public HTTPS host, so a well-known URL/discovery document (attacker-influenced input at `mcp:write`/`a2a:write`, not the platform's top trust level) could still redirect a client-credentials exchange or an on-behalf-of token exchange to a public server the caller controls — handing over the resource's own `client_secret` (M2M) or, more seriously, another user's real access token (OBO). `get_trusted_oauth_hosts()` builds the set of hostnames from `IdentityProvider.issuer_url` and `AuthorizerConfig.discovery_url` — both populated only via admin flows gated by a higher-trust scope than `mcp:write`/`a2a:write` — via its own short-lived `SessionLocal()` session (module-level pattern, matching `model_catalog.py`/background tasks elsewhere in this codebase); a DB failure fails closed to an empty set rather than raising. `mcp.py`'s `_get_oauth2_token`/`_get_obo_token` and `a2a.py`'s `_get_oauth2_token` call this immediately after resolving `token_endpoint` from the discovery document and refuse to proceed (logging a warning, returning `None`) if the resolved host isn't in the trusted set — before any secret or user token is sent. One operational consequence: a brand-new downstream OAuth2 provider for a single MCP server/A2A agent must first be registered as an Authorizer config (Security tab) or Identity Provider (Settings) before OBO/M2M to it will work — a deliberate one-time step, not a bug.
-- **Coverage beyond MCP/A2A:** the same two guard levels were retrofitted onto every other place the backend makes an outbound OAuth2/OIDC call that was still using raw `urllib.request`/`httpx` with, at most, a scheme check (`oidc.require_https_url`, now removed as dead code once every caller moved to `safe_get`/`safe_post`). `services/oidc.py`'s `fetch_discovery()` (well-known documents for `AuthorizerConfig.discovery_url`/`IdentityProvider.issuer_url`) and `services/jwt_validator.py`'s `_get_jwks()` (JWKS endpoints — `jwks_uri` comes from the discovery document itself, so it's attacker-influenced whenever the issuer is) now call `safe_get`. `services/token.py`'s `get_oauth2_token()` (generic OIDC client-credentials), `services/authorizer_linking.py`'s `resolve_access_token()`/`exchange_code_for_tokens()` (per-user refresh-token/auth-code exchange), and `services/cognito.py`'s `get_cognito_token()` now call `safe_post`, and the two functions whose `token_endpoint` comes from a discovery document they resolved themselves (`token.py`, `authorizer_linking.py`) also gate on `is_trusted_oauth_host()`/`get_trusted_oauth_hosts()`, identical to the `mcp.py`/`a2a.py` fix, since a compromised or malicious discovery response is the same attack regardless of which caller triggered the fetch. `routers/auth.py`'s `/api/auth/token` handler posts to `idp.token_endpoint` (a value already vetted at IdP-registration time, not re-resolved per request) via `safe_post` for the DNS-pinning/IP-validation defense-in-depth, without an additional trust-host check. Deliberately left unguarded: `services/litellm.py`/`model_catalog.py`'s calls to the LiteLLM proxy `base_url` — that value is `admin:write`-gated (as of the settings-scope tightening below, a strictly higher trust tier than `security:write`, held only by `g-admins-super`), a single global deployment setting rather than a per-resource attacker-influenced field, and is documented to legitimately point at `http://localhost:<port>` during local development (an SSM tunnel to the proxy) — `net_guard`'s guards unconditionally block loopback, so applying them here would break that supported flow without closing a real gap.
+- **Coverage beyond MCP/A2A:** the same two guard levels were retrofitted onto every other place the backend makes an outbound OAuth2/OIDC call that was still using raw `urllib.request`/`httpx` with, at most, a scheme check (`oidc.require_https_url`, now removed as dead code once every caller moved to `safe_get`/`safe_post`). `services/oidc.py`'s `fetch_discovery()` (well-known documents for `AuthorizerConfig.discovery_url`/`IdentityProvider.issuer_url`) and `services/jwt_validator.py`'s `_get_jwks()` (JWKS endpoints — `jwks_uri` comes from the discovery document itself, so it's attacker-influenced whenever the issuer is) now call `safe_get`. `services/token.py`'s `get_oauth2_token()` (generic OIDC client-credentials), `services/authorizer_linking.py`'s `resolve_access_token()`/`exchange_code_for_tokens()` (per-user refresh-token/auth-code exchange), and `services/cognito.py`'s `get_cognito_token()` now call `safe_post`, and the two functions whose `token_endpoint` comes from a discovery document they resolved themselves (`token.py`, `authorizer_linking.py`) also gate on `is_trusted_oauth_host()`/`get_trusted_oauth_hosts()`, identical to the `mcp.py`/`a2a.py` fix, since a compromised or malicious discovery response is the same attack regardless of which caller triggered the fetch. `routers/auth.py`'s `/api/auth/token` handler posts to `idp.token_endpoint` (a value already vetted at IdP-registration time, not re-resolved per request) via `safe_post` for the DNS-pinning/IP-validation defense-in-depth, without an additional trust-host check. The LiteLLM proxy calls were originally left unguarded on the grounds that the URL is `admin:write`-gated (super-admin only) and was documented to point at `http://localhost:<port>` over an SSM tunnel during local development. That exemption was removed in 1.10.3; see the next bullet.
+- **LiteLLM proxy calls (1.10.3):** `services/litellm.py`'s `/key/generate` and `/key/delete` and `model_catalog.py`'s `/model/info` now use `guarded_post`/`guarded_get` with `follow_redirects=False`, and the public pricing-catalog fetch (`LOOM_LITELLM_PRICING_URL`) uses `safe_get`. Every one of these proxy calls carries the master key, which the API never returns, so before this a super-admin could change the URL and get the backend to send the key to any host, path or loopback/link-local/metadata address. A trailing `?` or `#` on the base URL turned the appended endpoint path into inert text. Base URLs must be a bare `scheme://host[:port][/path]` (no query, fragment, userinfo, path parameters, backslash or whitespace). This is checked on save (`PUT /api/settings/litellm-proxy` returns 422 and writes nothing, using `net_guard.validate_connection_url`) and again before every request by `litellm.proxy_endpoint`, which also covers the env-var tier. Consequence: a loopback discovery URL (an SSM tunnel on `localhost`) is no longer accepted. The backend has to reach the proxy at an address `net_guard` allows. `tests/test_outbound_http_invariants.py` now fails the build if any module in `app/` makes an HTTP request outside `net_guard`, apart from a justified allowlist (currently only the fixed bedrock-mantle endpoint).
 
 ### `services/mcp.py`
 
@@ -1483,6 +1494,8 @@ MCP server connection, tool discovery, and invocation:
 ### `services/a2a.py`
 
 A2A Agent Card fetching and connection testing:
+
+- `_is_salesforce_url()` / `_is_agentcore_url()` classify on the **parsed hostname** (1.10.1): Salesforce requires a `salesforce.com` host and an `/einstein/ai-agent` path; AgentCore requires a `bedrock-agentcore` label in an `amazonaws.com` host. Both were substring tests on the whole URL, so any URL could select the Salesforce card path (or receive the AgentCore session header) by carrying the string in its path or query. Both card fetches already went through `guarded_get`, so this closed a classification bypass rather than an unguarded fetch.
 
 - `fetch_agent_card(base_url: str, auth_headers: dict | None) -> dict` — fetches the Agent Card from the well-known endpoint via `net_guard.guarded_get` (SSRF-guarded, private/VPC addresses allowed, since `base_url` is user-supplied at A2A agent registration). Standard A2A agents use `/.well-known/agent.json`; AgentCore agents try `/.well-known/agent-card.json` first; Salesforce Agentforce agents use `/v1/card` via `_fetch_salesforce_agent_card`, also guarded. Raises `ValueError` on HTTP errors, invalid JSON, or an `SSRFBlockedError` (mapped to a `ValueError` without echoing any part of the blocked target's response). Error messages for non-2xx statuses use a fixed friendly string rather than the response body, since the connection target is attacker-influenced and echoing response content back to the caller would make the endpoint usable as a blind-SSRF response oracle.
 - `parse_agent_card(card_json: dict) -> dict` — extracts structured fields (name, description, version, provider, capabilities, authentication, skills, etc.) from raw Agent Card JSON.
@@ -1811,6 +1824,7 @@ All approval events are recorded in `approval_logs` table: `request_id`, `sessio
 | `approval_request` | Agent paused — awaiting user decision. Contains `request_id`, `tool_name`, `tool_input_summary`, `timeout_seconds`. |
 | `approval_resolved` | Decision made. Contains `request_id`, `status` (approved/rejected/timeout), `decided_by`, `reason`. |
 | `elicitation_request` | MCP server requesting structured input. Contains `elicitation_id`, `server_name`, `schema`, `message`. |
+| `guardrail` | Bedrock guardrail intervened (enforce) or detected (monitor). Contains `mode`, `source` (INPUT/OUTPUT/UNKNOWN), `action` (intervened/detected), `guardrail_id`, `guardrail_version`, `policies[]` (`policy`, `type`/`name`, `action` — never matched text). See § 17. |
 
 ---
 
@@ -1838,7 +1852,7 @@ The invocation endpoint scans `AGENT_CONFIG_JSON` integrations for `delegation_m
 
 ### 14.4 Runtime Token Exchange (Agent)
 
-The `_OAuth2Auth` handler in `agents/strands_agent/src/integrations/mcp_client.py`:
+The `_OAuth2Auth` handler in `agents/strands_agent/src/integrations/mcp_client.py` (shared by MCP servers and A2A agents, both built with `delegation_mode`, `obo_grant_type` and `audience` from their `auth` config):
 1. Calls `acps.get_workload_access_token_for_jwt(workloadName, userToken)` to get an OBO workload token.
 2. Calls `acps.get_resource_oauth2_token(..., oauth2Flow="ON_BEHALF_OF_TOKEN_EXCHANGE")` to get the downstream token.
 3. Caches by `(credential_provider_name, user_sub)` with TTL from `expiresIn`.
@@ -2010,7 +2024,7 @@ The LiteLLM master key is the one credential Loom holds for the proxy; it is nev
 
 Two distinct base URLs are tracked because the machine calling the proxy differs:
 - **`agent_base_url`** — what deployed agents/harnesses use at runtime to reach the proxy directly. Must be reachable from wherever the agent runs (e.g. an internal ALB).
-- **`discovery_base_url`** — what the Loom *backend itself* uses for calls it makes directly to the proxy (`/model/info` discovery, `/key/generate`, `/key/delete`). Falls back to `agent_base_url` when not separately set — they're identical in a deployed environment, but during local dev the backend typically reaches the proxy through an SSM tunnel (e.g. `http://localhost:4000`) while agents reach it through the real ALB.
+- **`discovery_base_url`** — what the Loom *backend itself* uses for calls it makes directly to the proxy (`/model/info` discovery, `/key/generate`, `/key/delete`). Falls back to `agent_base_url` when not separately set; the two are identical in a deployed environment. Both URLs are validated on save and before every backend request (see `services/net_guard.py` → LiteLLM proxy calls). Loopback, link-local and metadata addresses are refused, so a `localhost` SSM tunnel can't be used as the discovery URL.
 
 ### Per-Agent Virtual Key Vending
 
@@ -2103,3 +2117,123 @@ Aggregation is performed directly in SQL using `func.sum()` with model/family fi
 
 - **Shared Group Budget:** Group-scoped limits represent a shared collective pool for all users in that group (e.g. departmental or team budget ceiling). When any user in the group consumes usage, it counts toward the group limit, and exceeding the limit triggers the configured action (warn or block) for all members of that group.
 - **User Identity Keying:** User-scoped limits match on `username`, which aligns with `InvocationSession.user_id`, session ownership checks, memory partitioning, and audit logging throughout Loom. External federated IdP identity normalization to `sub` is deferred to a platform-wide identity refactoring PR so as not to break session ownership and audit consistency.
+---
+
+## 18. Bedrock Guardrails (issue #17)
+
+### Overview
+
+Loom is the **control plane only**. It's never in the guardrail data path. Enforcement happens where the model call happens:
+- custom agents enforce in their own AgentCore runtime against Bedrock,
+- managed agents are enforced by the AgentCore Harness itself,
+- so callers that invoke a runtime directly, not through Loom, are covered too.
+
+Loom resolves each agent's effective guardrail **at deploy time** and bakes it in:
+- custom agents: the `guardrail` block of `AGENT_CONFIG_JSON`,
+- harness agents: `bedrockModelConfig.additionalParams.guardrailConfig`, as described in the AgentCore harness guide.
+
+Loom also relays agent-reported events and reads intervention history from runtime logs.
+
+Block, mask and detect-only (`NONE`) behavior is configured **per policy inside the guardrail in Bedrock**. Loom only adds two modes:
+- `enforce`: the guardrail is attached inline to every model call.
+- `monitor`: the agent calls `ApplyGuardrail` on the prompt and the final response. It only logs and emits the result and never changes content. This lets you shadow-test a strict guardrail before turning it on.
+
+### Support matrix (`services/guardrails.supported_modes`)
+
+| Agent | enforce | monitor |
+|---|---|---|
+| Custom (Strands/ADK), provider `bedrock` | yes (native `guardrailConfig`) | yes |
+| Custom, non-Bedrock provider | no (no Bedrock call to attach to) | yes |
+| Harness, provider `bedrock` (`converse_stream`) | yes (`additionalParams.guardrailConfig`) | no (no hooks; use a detect-mode guardrail) |
+| Harness, provider `litellm`; registered agents | no | no |
+
+A request that violates the matrix fails with **422** before any record or AWS resource is created.
+
+### Configuration levels
+
+1. **Global default.** Stored in the `guardrail_default` site setting (JSON `{enabled, locked, config}`):
+   - Read with `GET /api/settings/guardrail-default` (`agent:read`) and written with `PUT` (`admin:write`).
+   - If nothing has been saved, it falls back to the CFN-seeded env vars `LOOM_GUARDRAIL_ID`, `LOOM_GUARDRAIL_VERSION` (default `DRAFT`), `LOOM_GUARDRAIL_MODE` (default `enforce`) and `LOOM_GUARDRAIL_LOCKED`. The response's `source` field reports `settings`, `environment` or `none`.
+   - A saved Settings value always wins, even a saved "disabled".
+   - **Locked** means agents can't choose `none`. While the default is in enforce mode, they also can't choose a custom `monitor` config.
+   - If an agent type can't run a locked default (e.g. a monitor default on a harness agent), that agent is rejected rather than silently left unguarded. An unsupported default that isn't locked is simply not applied.
+2. **Per agent.** `guardrail: {selection: "default" | "custom" | "none", config}` on `POST /api/agents` (`deploy`/`harness`), `PUT /{id}/redeploy-deploy` and `PUT /{id}/redeploy-harness`.
+   - The selection is stored in `agents.guardrail_selection`.
+   - The resolved block lives in `AGENT_CONFIG_JSON` (what the runtime enforces).
+   - Config fields: `guardrail_id` (ID or ARN), `guardrail_arn`, `guardrail_version`, `mode`, `stream_processing_mode` (`sync`/`async`; Bedrock can't mask in async), `redact_history`, and `allowed` (up to 10 alternate guardrails selectable at invoke time).
+3. **Per invocation.** `guardrail_id` and `guardrail_version` on `POST /{id}/invoke` and on the WebSocket prompt message.
+   - The selection must be the agent's primary guardrail or one in `allowed` (otherwise **400**). It can never disable the guardrail or change its mode.
+   - Custom agents receive it as `payload.guardrail` and **re-validate it in the runtime**, because direct callers can send any payload.
+   - Harness agents: Loom sends it as a `model` override with the alternate's `guardrailConfig`.
+
+**Drift.** `AgentResponse.guardrail_drift` is true when an inheriting agent's baked-in guardrail differs from the current default. The UI shows "Redeploy to apply". Changing the default never mutates deployed agents.
+
+`AgentResponse` also includes `guardrail_selection`, `guardrail` (the baked-in block) and `guardrail_supported` (`{enforce, monitor}`).
+
+### Harness model-override caveat
+
+An `InvokeHarness` `model` override **replaces** the harness's whole model config for that call. So whenever Loom sends `model`, for a runtime model selection or a guardrail selection, it includes `additionalParams.guardrailConfig` again. Before this change, a runtime model override would silently drop a create-time guardrail.
+
+Anyone who can call `InvokeHarness` directly can send their own model config. Harness enforcement is only as strong as that IAM permission.
+
+### Events and history
+
+- **Stream.** Agents emit `{"guardrail": {...}}`. For harness agents, the backend emits it when the harness stream's `stopReason` is `guardrail_intervened`, with policies summarized from `metadata.trace.guardrail` if present. Loom relays it as the SSE `guardrail` event, or the WebSocket `{"type": "guardrail", "content": {...}}`, after `sanitize_event()` whitelists the fields.
+- **History.** For every event, custom agents write one single-line JSON record containing `"loom_event": "guardrail_intervention"` to stdout, i.e. the runtime log group.
+  - `GET /api/agents/{id}/guardrails/interventions?session_id=&hours=24&limit=100` (`agent:read` plus group access) reads these with Logs Insights over `/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT`.
+  - `hours` is capped at 14 days and `limit` at 500.
+  - The session ID is sanitized into the query and re-checked on parse.
+  - Harness agents return `supported: false` with a note, since the harness doesn't write these records.
+- **PII safety.** Bedrock's trace `match` field contains the *original* PII value. `summarize_assessment()` and `sanitize_event()` keep only `policy`, `type`/`name` and `action`. Prompt and response text, `match`, regex patterns and any other field are dropped before anything is forwarded or parsed.
+
+### Guardrail policy details (snapshotted at deploy/update time)
+
+The agent page shows what the agent's guardrail does, but **reading the page never calls Bedrock**.
+- **When it's read:** `_resolve_guardrail_or_422` calls `GetGuardrail` (one call per guardrail version: the primary plus each `allowed` alternate) when an agent is deployed or updated through any of the four create/redeploy paths.
+- **Where it's stored:** `snapshot_guardrail_details()` writes a summary to `agents.guardrail_details` (JSON `{fetched_at, guardrails: [primary, *alternates]}`). `AgentResponse.guardrail_details` returns the stored value.
+- **Why:** a per-page-load lookup would mean a `GetGuardrail` per agent view, and the earlier name lookup used `ListGuardrails`, which needs one extra call per guardrail to list versions. Bedrock control-plane APIs have low per-account request limits.
+- **What's stored:** name, description, status, region, the blocked messages, and each policy's per-direction action and enabled flag:
+  - content filters with strengths
+  - denied topics with definitions and example *counts*
+  - PII entities
+  - regex *names*
+  - managed word lists and a custom-word *count*
+  - contextual grounding thresholds
+  - the automated-reasoning policy count
+  - cross-region profile and whether a customer-managed KMS key is used
+
+  Custom words, regex patterns and the KMS key ARN aren't copied.
+- **Deploy-time validation:** a `ResourceNotFoundException`/`ValidationException` (wrong ID or version, or the guardrail isn't in that region) fails the request with **422** before anything is created. This closes the earlier gap where a bad guardrail ID only failed at invoke time. Any other failure (access denied, throttling, network) never blocks a deploy; the entry records an `error` instead. The region comes from the guardrail ARN when there is one, otherwise the agent's region.
+- **Refresh:** `POST /api/agents/{id}/guardrails/refresh` (`agent:write`) re-reads the details for the agent's baked-in guardrail(s), e.g. after editing a `DRAFT`. It never changes what the agent enforces. A guardrail that has since been deleted is recorded as an error entry rather than failing the request.
+- **Frontend:** the agent, invoke and chat views take guardrail names from this snapshot (`guardrailSummariesFromDetails`) rather than `GET /api/settings/guardrails`. Only the Settings card and the deploy wizard, which need a picker, list the account's guardrails.
+
+### Guardrail picker
+
+`GET /api/settings/guardrails` (`agent:read`) uses `ListGuardrails` (every guardrail, then each guardrail's versions) to return `{guardrail_id, guardrail_arn, name, description, status, versions}`, with versions ordered `DRAFT` first, then newest first. It returns 502 if Bedrock is unreachable.
+
+### Guardrail definitions live outside Loom
+
+Loom references guardrails, but never creates or edits them:
+- **Ownership:** guardrail policy is a compliance artifact that usually has a different owner and needs change review.
+- **Separation of duties:** Loom write access (`Create`/`UpdateGuardrail`) would let any Loom admin, or a compromised backend, weaken the policy that constrains agents.
+- **API surface:** the policy API is large and keeps growing.
+- **Versions are long-lived:** agents pin a version, and deleting or replacing one from a UI could break them.
+
+`shared/iac/guardrail.yaml` (`make guardrail` in `shared/`) is the provided way to manage them as code:
+- content filters, prompt-attack detection, PII block/mask, profanity, and an optional sample denied topic
+- a detect-only switch
+- a published `AWS::Bedrock::GuardrailVersion` with `DeletionPolicy`/`UpdateReplacePolicy: Retain`. A version change forces replacement, and without `Retain` CloudFormation would delete the version agents are pinned to.
+
+The stack outputs feed `O_GUARDRAIL_ID`/`O_GUARDRAIL_VERSION` via `make outputs`.
+
+### IAM / IaC
+
+- `shared/iac/role.yaml` (agent execution role): `bedrock:ApplyGuardrail` on `guardrail/*` in `pAgentCoreRegions`/account. This is required for inline `guardrailConfig` as well as for `ApplyGuardrail`. Harness execution roles need the same grant.
+- `backend/iac/ecs.yaml` (task role): `bedrock:ListGuardrails` (no resource-level scoping) and `bedrock:GetGuardrail` on `guardrail/*`. New parameters `pGuardrailId`, `pGuardrailVersion`, `pGuardrailMode` and `pGuardrailLocked` seed the `LOOM_GUARDRAIL_*` env fallback (set via `P_GUARDRAIL_*` in `etc/environment.sh`). Logs Insights access to runtime log groups already exists (Phase 40).
+
+### Known limitations
+
+- The PII filter doesn't evaluate tool call arguments, tool results or tool definitions (a Bedrock limitation).
+- Monitor mode evaluates only the user prompt and final response, not intermediate tool-loop model calls.
+- Harness agents have no persisted intervention history, only the live stream event.
+- A new default applies only when an agent is next deployed.

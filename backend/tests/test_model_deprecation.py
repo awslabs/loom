@@ -30,7 +30,8 @@ def _admin_user():
     })()
 
 
-class TestModelDeprecation(unittest.TestCase):
+class _DeprecationCase(unittest.TestCase):
+    """In-memory DB, super-admin caller, and a fixed two-model catalog."""
     @classmethod
     def setUpClass(cls):
         cls.engine = create_engine(
@@ -101,6 +102,9 @@ class TestModelDeprecation(unittest.TestCase):
         self.session.add(config)
         self.session.commit()
         return agent
+
+
+class TestModelDeprecation(_DeprecationCase):
 
     # ---- deprecated_model_ids on GET ----
 
@@ -214,6 +218,88 @@ class TestModelDeprecation(unittest.TestCase):
             json={"allowed_model_ids": ["totally-made-up-model"]},
         )
         self.assertEqual(response.status_code, 400)
+
+
+class TestDisabledModels(_DeprecationCase):
+    """A model an admin disables in Settings → Models is treated like one
+    dropped from the catalog: flagged on agents that still use it, rejected
+    for new assignments, grandfathered on agents that already have it."""
+
+    ENABLED = ["us.anthropic.claude-sonnet-5"]  # opus-4-8 is in the catalog but disabled
+    DISABLED = "us.anthropic.claude-opus-4-8"
+
+    def setUp(self):
+        super().setUp()
+        from app.models.site_setting import SiteSetting
+        self.session.add(SiteSetting(key="enabled_model_ids", value=json.dumps(self.ENABLED)))
+        self.session.commit()
+
+    def test_flags_disabled_default_model(self):
+        agent = self._create_agent(self.DISABLED, allowed_models=None)
+        resp = self.client.get(f"/api/agents/{agent.id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["deprecated_model_ids"], [self.DISABLED])
+
+    def test_flags_disabled_allowed_model_in_list(self):
+        agent = self._create_agent("us.anthropic.claude-sonnet-5",
+                                   allowed_models=["us.anthropic.claude-sonnet-5", self.DISABLED])
+        resp = self.client.get("/api/agents")
+        self.assertEqual(resp.status_code, 200)
+        flagged = {a["id"]: a["deprecated_model_ids"] for a in resp.json()}
+        self.assertEqual(flagged[agent.id], [self.DISABLED])
+
+    def test_models_endpoint_hides_disabled(self):
+        with patch("app.routers.agents.get_bedrock_models", return_value=VALID_CATALOG):
+            resp = self.client.get("/api/agents/models")
+        self.assertEqual([m["model_id"] for m in resp.json()], self.ENABLED)
+
+    def test_patch_cannot_add_disabled_model(self):
+        agent = self._create_agent("us.anthropic.claude-sonnet-5", allowed_models=["us.anthropic.claude-sonnet-5"])
+        resp = self.client.patch(f"/api/agents/{agent.id}",
+                                 json={"allowed_model_ids": ["us.anthropic.claude-sonnet-5", self.DISABLED]})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn(self.DISABLED, resp.json()["detail"])
+        resp = self.client.patch(f"/api/agents/{agent.id}", json={"model_id": self.DISABLED})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_patch_keeps_grandfathered_disabled_model(self):
+        agent = self._create_agent(self.DISABLED, allowed_models=[self.DISABLED, "us.anthropic.claude-sonnet-5"])
+        resp = self.client.patch(f"/api/agents/{agent.id}",
+                                 json={"model_id": self.DISABLED, "allowed_model_ids": [self.DISABLED, "us.anthropic.claude-sonnet-5"]})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["deprecated_model_ids"], [self.DISABLED])
+
+    def test_deploy_rejects_disabled_model(self):
+        for source in ("deploy", "harness"):
+            for body in ({"model_id": self.DISABLED},
+                         {"model_id": "us.anthropic.claude-sonnet-5", "allowed_model_ids": [self.DISABLED]}):
+                with self.subTest(source=source, body=body):
+                    resp = self.client.post("/api/agents", json={"source": source, "name": "new_agent",
+                                                                 "role_arn": "arn:aws:iam::123456789012:role/r", **body})
+                    self.assertEqual(resp.status_code, 400, resp.text)
+                    self.assertIn(self.DISABLED, resp.json()["detail"])
+        self.assertEqual(self.session.query(Agent).count(), 0)
+
+
+class TestRequireEnabledModels(unittest.TestCase):
+
+    def _db(self, enabled: list[str]):
+        return patch("app.routers.settings.get_enabled_model_ids", return_value=enabled)
+
+    def test_no_enabled_list_accepts_anything(self):
+        from app.routers.agents import _require_enabled_models
+        with self._db([]):
+            _require_enabled_models(["anything", None], db=None)  # type: ignore[arg-type]
+
+    def test_keep_grandfathers_current_models(self):
+        from fastapi import HTTPException
+        from app.routers.agents import _require_enabled_models
+        with self._db(["a"]):
+            _require_enabled_models(["a", "old"], db=None, keep={"old"})  # type: ignore[arg-type]
+            with self.assertRaises(HTTPException) as ctx:
+                _require_enabled_models(["a", "new"], db=None, keep={"old"})  # type: ignore[arg-type]
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("new", ctx.exception.detail)
 
 
 if __name__ == "__main__":

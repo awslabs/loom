@@ -8,6 +8,7 @@ which existed to have Loom apply additional statements to a role, were removed
 with that capability.
 """
 import json
+import re
 import logging
 import os
 from typing import Any
@@ -26,7 +27,7 @@ from app.models.authorizer_credential import AuthorizerCredential
 from app.models.agent import Agent
 from app.routers.utils import check_resource_group_access, require_group_tag
 from app.services.security import get_role_policy_details
-from app.services.secrets import store_secret, get_secret, delete_secret
+from app.services.secrets import store_secret, get_secret, delete_secret, put_secret_value
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +159,7 @@ def create_role(request: CreateRoleRequest, user: UserInfo = Depends(require_sco
         description=request.description,
         policy_document=json.dumps(policy_doc),
     )
-    role.set_tags(require_group_tag(tags, "role"))
+    role.set_tags(require_group_tag(tags, "role", user=user))
     db.add(role)
     db.commit()
     db.refresh(role)
@@ -266,26 +267,43 @@ def list_cognito_pools(user: UserInfo = Depends(require_scopes("security:read"))
 # ---------------------------------------------------------------------------
 # Authorizer Configs
 # ---------------------------------------------------------------------------
+_UNSAFE_SECRET_SEGMENT = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _validate_authorizer_name(name: str) -> None:
+    """Authorizer names are display names only; '/' is refused so no name can mimic a path."""
+    if not name or not name.strip() or "/" in name:
+        raise HTTPException(status_code=422, detail="Authorizer name must be non-empty and can't contain '/'")
+
+
+def _authorizer_secret_name(auth_id: int, kind: str) -> str:
+    """Secrets Manager name for an authorizer secret, keyed on the immutable id.
+
+    These secrets used to live at loom/authorizers/{name}/..., derived from
+    the renameable display name. store_secret is create-or-overwrite, so
+    renaming an authorizer to another's name (or reusing a name another
+    authorizer was renamed away from) overwrote that authorizer's secret. A
+    separate prefix keeps the id-keyed names from ever colliding with the old
+    name-keyed ones, even for an authorizer named after a number.
+    """
+    return f"loom/authorizer-secrets/{auth_id}/{kind}"
+
+
+def _write_authorizer_secret(existing_arn: str | None, auth_id: int, kind: str, value: str, description: str) -> str:
+    """Update the authorizer's existing secret in place, or create it at its id-keyed name."""
+    region = _get_region()
+    if existing_arn:
+        return put_secret_value(existing_arn, value, region)
+    return store_secret(name=_authorizer_secret_name(auth_id, kind), secret_value=value, region=region, description=description)
+
+
 @router.post("/authorizers", status_code=status.HTTP_201_CREATED)
 def create_authorizer(request: CreateAuthorizerRequest, user: UserInfo = Depends(require_scopes("security:write")), db: Session = Depends(get_db)) -> dict:
     """Create an authorizer configuration."""
+    _validate_authorizer_name(request.name)
     existing = db.query(AuthorizerConfig).filter(AuthorizerConfig.name == request.name).first()
     if existing:
         raise HTTPException(status_code=409, detail="Authorizer with this name already exists")
-
-    client_secret_arn = None
-    if request.client_secret:
-        region = _get_region()
-        secret_name = f"loom/authorizers/{request.name}/client-secret"
-        try:
-            client_secret_arn = store_secret(
-                name=secret_name,
-                secret_value=request.client_secret,
-                region=region,
-                description=f"Client secret for Loom authorizer '{request.name}'",
-            )
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Failed to store client secret: {e}")
 
     # Tags from the Cognito User Pool, overlaid with the caller's profile tags
     # (the caller's win, and loom:group is required — see require_group_tag).
@@ -301,20 +319,6 @@ def create_authorizer(request: CreateAuthorizerRequest, user: UserInfo = Depends
             logger.warning("Could not fetch tags for Cognito pool %s: %s", request.pool_id, e)
     tags.update(request.tags or {})
 
-    user_client_secret_arn = None
-    if request.user_client_secret:
-        region = _get_region()
-        user_secret_name = f"loom/authorizers/{request.name}/user-client-secret"
-        try:
-            user_client_secret_arn = store_secret(
-                name=user_secret_name,
-                secret_value=request.user_client_secret,
-                region=region,
-                description=f"User client secret for Loom authorizer '{request.name}'",
-            )
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Failed to store user client secret: {e}")
-
     auth = AuthorizerConfig(
         name=request.name,
         authorizer_type=request.authorizer_type,
@@ -324,13 +328,27 @@ def create_authorizer(request: CreateAuthorizerRequest, user: UserInfo = Depends
         allowed_clients=json.dumps(request.allowed_clients),
         allowed_scopes=json.dumps(request.allowed_scopes),
         client_id=request.client_id,
-        client_secret_arn=client_secret_arn,
         user_client_id=request.user_client_id,
-        user_client_secret_arn=user_client_secret_arn,
         user_redirect_uri=request.user_redirect_uri,
     )
-    auth.set_tags(require_group_tag(tags, "authorizer"))
+    # Group check before anything is written, so a rejected create leaves no secrets behind.
+    auth.set_tags(require_group_tag(tags, "authorizer", user=user))
     db.add(auth)
+    db.flush()  # assigns auth.id, which keys the secret names
+    try:
+        if request.client_secret:
+            auth.client_secret_arn = _write_authorizer_secret(
+                None, auth.id, "client-secret", request.client_secret,
+                f"Client secret for Loom authorizer {auth.id}",
+            )
+        if request.user_client_secret:
+            auth.user_client_secret_arn = _write_authorizer_secret(
+                None, auth.id, "user-client-secret", request.user_client_secret,
+                f"User client secret for Loom authorizer {auth.id}",
+            )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=f"Failed to store client secret: {e}")
     db.commit()
     db.refresh(auth)
     return auth.to_dict()
@@ -365,7 +383,13 @@ def update_authorizer(
         raise HTTPException(status_code=404, detail="Authorizer not found")
     check_resource_group_access(auth, user, resource_label="authorizer")
 
-    if request.name is not None:
+    if request.name is not None and request.name != auth.name:
+        _validate_authorizer_name(request.name)
+        taken = db.query(AuthorizerConfig).filter(
+            AuthorizerConfig.name == request.name, AuthorizerConfig.id != auth.id,
+        ).first()
+        if taken:
+            raise HTTPException(status_code=409, detail="Authorizer with this name already exists")
         auth.name = request.name
     if request.authorizer_type is not None:
         auth.authorizer_type = request.authorizer_type
@@ -382,16 +406,11 @@ def update_authorizer(
     if request.client_id is not None:
         auth.client_id = request.client_id
     if request.client_secret is not None:
-        region = _get_region()
-        secret_name = f"loom/authorizers/{auth.name}/client-secret"
         try:
-            client_secret_arn = store_secret(
-                name=secret_name,
-                secret_value=request.client_secret,
-                region=region,
-                description=f"Client secret for Loom authorizer '{auth.name}'",
+            auth.client_secret_arn = _write_authorizer_secret(
+                auth.client_secret_arn, auth.id, "client-secret", request.client_secret,
+                f"Client secret for Loom authorizer {auth.id}",
             )
-            auth.client_secret_arn = client_secret_arn
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Failed to store client secret: {e}")
     if request.user_client_id is not None:
@@ -399,16 +418,11 @@ def update_authorizer(
     if request.user_redirect_uri is not None:
         auth.user_redirect_uri = request.user_redirect_uri
     if request.user_client_secret is not None:
-        region = _get_region()
-        user_secret_name = f"loom/authorizers/{auth.name}/user-client-secret"
         try:
-            user_client_secret_arn = store_secret(
-                name=user_secret_name,
-                secret_value=request.user_client_secret,
-                region=region,
-                description=f"User client secret for Loom authorizer '{auth.name}'",
+            auth.user_client_secret_arn = _write_authorizer_secret(
+                auth.user_client_secret_arn, auth.id, "user-client-secret", request.user_client_secret,
+                f"User client secret for Loom authorizer {auth.id}",
             )
-            auth.user_client_secret_arn = user_client_secret_arn
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Failed to store user client secret: {e}")
 
@@ -469,7 +483,7 @@ def create_credential(auth_id: int, request: CreateCredentialRequest, user: User
     client_secret_arn = None
     if request.client_secret:
         region = _get_region()
-        secret_name = f"loom/authorizers/{auth.name}/credentials/{request.label}"
+        secret_name = _authorizer_secret_name(auth.id, f"credentials/{_UNSAFE_SECRET_SEGMENT.sub('-', request.label)}")
         try:
             client_secret_arn = store_secret(
                 name=secret_name,

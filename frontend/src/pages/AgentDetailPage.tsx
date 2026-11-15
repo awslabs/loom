@@ -9,6 +9,7 @@ import type { SSETokenInfo } from "@/api/types";
 import { InvokePanel } from "@/components/InvokePanel";
 import { LatencySummary } from "@/components/LatencySummary";
 import { DeploymentPanel, ModelsCard } from "@/components/DeploymentPanel";
+import { GuardrailCard, GuardrailInterventionsCard } from "@/components/GuardrailPanel";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
 import { RegistryActions } from "@/components/RegistryActions";
 import { getRegistryRecord } from "@/api/registry";
@@ -26,7 +27,7 @@ import { formatTimestamp, capitalize } from "@/lib/format";
 import { useInvoke } from "@/hooks/useInvoke";
 import { useAuth } from "@/contexts/AuthContext";
 import { trackAction } from "@/api/audit";
-import type { AgentResponse, SessionResponse } from "@/api/types";
+import type { AgentResponse, GuardrailRef, SessionResponse } from "@/api/types";
 
 interface AgentDetailPageProps {
   agent: AgentResponse;
@@ -159,9 +160,9 @@ export function AgentDetailPage({
   useEffect(() => { loadEvalOverview(); }, [loadEvalOverview]);
   const currentUserId = backendUserId ?? user?.username ?? user?.sub;
 
-  const handleInvoke = async (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean) => {
+  const handleInvoke = async (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean, guardrail?: GuardrailRef) => {
     if (user && browserSessionId) trackAction(user.username ?? user.sub, browserSessionId, 'agent', 'invoke', agent.name ?? agent.runtime_id ?? String(agent.id));
-    await invoke(prompt, qualifier, sessionId, credentialId, bearerToken, modelId, connectorIds, useLinkedToken);
+    await invoke(prompt, qualifier, sessionId, credentialId, bearerToken, modelId, connectorIds, useLinkedToken, undefined, guardrail);
     onSessionsRefresh();
   };
 
@@ -265,6 +266,8 @@ export function AgentDetailPage({
         <div className="flex min-w-0 flex-col gap-4">
           {isDeployed && <DeploymentPanel agent={agent} onRedeploy={onRedeploy ?? (async () => {})} onPatchAgent={onPatchAgent} />}
           <ModelsCard agent={agent} onPatchAgent={onPatchAgent} />
+          {isDeployed && <GuardrailCard agent={agent} onUpdated={() => onRefreshAgents?.()} />}
+          {isDeployed && agent.guardrail && <GuardrailInterventionsCard agentId={agent.id} onOpenSession={onSelectSession} />}
           {agent.status === "READY" && (agent.deployment_status === "deployed" || isDeployed) && (
             <ExternalIntegrationSection agentId={agent.id} />
           )}
@@ -399,6 +402,8 @@ export function AgentDetailPage({
             sessionEnd={sessionEnd}
             error={error}
             rawError={rawError}
+            guardrail={agent.guardrail}
+            guardrailDetails={agent.guardrail_details}
             onInvoke={handleInvoke}
             onCancel={cancel}
             onOpenSessionDetail={onSelectSession}

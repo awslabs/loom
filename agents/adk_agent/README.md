@@ -113,6 +113,32 @@ Approval decisions resume via a synthetic `adk_request_confirmation` FunctionCal
 
 **Known parity gap:** MCP elicitation (Strands' `ctx.elicit()` / `{"elicitation": ...}` event) and the `{"token_info": ...}` OBO-token-metadata event are not wired for the WebSocket (`ws_invoke`) path — a tool requiring approval over WebSocket surfaces an error directing the client to fall back to the HTTP `interruptResponse` flow.
 
+### Bedrock Guardrails
+
+The optional top-level `guardrail` config key (same schema as `strands_agent`; absent or `null` = no guardrail) is written by Loom at deploy time:
+
+```json
+"guardrail": {
+  "guardrail_id": "<guardrail-id>",
+  "guardrail_arn": "",
+  "guardrail_version": "1",
+  "mode": "enforce",
+  "stream_processing_mode": "sync",
+  "redact_history": true,
+  "source": "default",
+  "allowed": [{"guardrail_id": "<other-guardrail-id>", "guardrail_arn": "", "guardrail_version": "DRAFT"}]
+}
+```
+
+- **`enforce`** (provider `bedrock` only): `LiteLlm` is built with `guardrailConfig` (`guardrailIdentifier` = `guardrail_arn or guardrail_id`, `guardrailVersion`, `trace: "enabled"`, plus `streamProcessingMode: "async"` when configured), which LiteLLM's Bedrock Converse path forwards on every model call. ADK's `LiteLlm` drops both the Bedrock guardrail trace and (in streaming mode) the `content_filter` finish reason LiteLLM maps `guardrail_intervened` to, so the model is given a `GuardrailTraceClient` (`src/integrations/guardrails.py`) that records them per model call. The handler turns `inputAssessment`/`outputAssessments` into `INPUT`/`OUTPUT` events, and a `content_filter`/`SAFETY` finish with no usable trace into a `source: "UNKNOWN"`, `policies: []` event; each intervention is reported once, and a guardrail `SAFETY` finish is not surfaced as an error. `redact_history` has no ADK equivalent and is ignored. Enforce on a non-Bedrock provider logs a warning and attaches nothing (the backend rejects that combination). Note that Bedrock can't mask PII in `async` stream processing mode.
+- **`monitor`** (any provider): nothing is attached inline. The agent calls `bedrock-runtime:ApplyGuardrail` (off the event loop) on the user prompt (`INPUT`) and on the final streamed response text (`OUTPUT`). Content is never changed; an event is emitted only when the result is `GUARDRAIL_INTERVENED`. Failures are logged as warnings and never break the stream.
+
+**Per-invocation override:** the payload may carry `"guardrail": {"guardrail_id": "...", "guardrail_version": "..."}`. The agent accepts it only if it matches the primary or an `allowed` entry (mode and other settings always come from the primary); otherwise it returns `Error: Requested guardrail is not allowed for this agent.` without calling the model. The same applies to the WebSocket `prompt` message, which gets `{"type": "error", ...}` on rejection.
+
+**Events and logs:** every intervention/detection is streamed as `{"guardrail": {"mode", "source", "action", "guardrail_id", "guardrail_version", "policies"}}` (WebSocket: `{"type": "guardrail", "content": {...}}`) and written to stdout as one JSON line with `"loom_event": "guardrail_intervention"`, which Loom queries with CloudWatch Logs Insights. `policies` lists only the policy, type/name and action — the trace `match` field (which holds the original matched text/PII) and regex patterns are always dropped, and prompt/response text is never logged.
+
+**IAM:** the agent execution role needs `bedrock:ApplyGuardrail` on the guardrail ARNs (`arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail/*` in `shared/iac/role.yaml`). This is required for enforce mode too, not only for the standalone API. The guardrail must be in the same region as the model.
+
 ### Observability (OTEL)
 
 `TelemetryPlugin` (`src/telemetry.py`) is a `BasePlugin` producing the same span hierarchy as `strands_agent`'s `TelemetryHook`: `agent.invocation` (root, per request) with `tool.call` and `model.call` child spans. ADK splits success/error into separate callback pairs (`after_*_callback` / `on_*_error_callback`), both of which close the same pending span so the resulting span shape matches Strands' output exactly.

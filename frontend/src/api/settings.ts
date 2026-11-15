@@ -1,5 +1,5 @@
 import { apiFetch } from "./client";
-import type { TagPolicy, TagPolicyCreateRequest, TagPolicyUpdateRequest, TagProfile, TagProfileCreateRequest, VpcConfig, VpcConfigCreateRequest, VpcConfigDetail } from "./types";
+import type { GuardrailDefault, GuardrailDefaultUpdateRequest, GuardrailSummary, TagPolicy, TagPolicyCreateRequest, TagPolicyUpdateRequest, TagProfile, TagProfileCreateRequest, VpcConfig, VpcConfigCreateRequest, VpcConfigDetail } from "./types";
 
 // Site Settings API
 export interface SiteSetting {
@@ -183,4 +183,21 @@ export function deleteVpcConfig(id: number): Promise<void> {
 
 export function getVpcConfigDetail(id: number): Promise<VpcConfigDetail> {
   return apiFetch<VpcConfigDetail>(`/api/settings/vpc-configs/${id}/detail`);
+}
+
+// Bedrock Guardrails API (issue #17)
+/** Account guardrails (+ versions) in the backend region. 502 with `detail` if Bedrock can't be reached. */
+export function listGuardrails(): Promise<GuardrailSummary[]> {
+  return apiFetch<GuardrailSummary[]>("/api/settings/guardrails");
+}
+
+export function getGuardrailDefault(): Promise<GuardrailDefault> {
+  return apiFetch<GuardrailDefault>("/api/settings/guardrail-default");
+}
+
+export function updateGuardrailDefault(request: GuardrailDefaultUpdateRequest): Promise<GuardrailDefault> {
+  return apiFetch<GuardrailDefault>("/api/settings/guardrail-default", {
+    method: "PUT",
+    body: JSON.stringify(request),
+  });
 }

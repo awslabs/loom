@@ -7,6 +7,21 @@ from app.models.agent import Agent
 from app.models.managed_role import ManagedRole
 
 
+def caller_group_tags(user: UserInfo) -> list[str] | None:
+    """loom:group values the caller may access, or None for a super-admin (all groups).
+
+    The single source of the group rule: admins (t-admin) are confined to
+    their g-admins-<group> groups, users to the union of their g-users-<group>
+    groups. Shared by the access check on existing resources and the
+    assignment check on create/update, so the two cannot drift apart.
+    """
+    if "g-admins-super" in user.groups:
+        return None
+    if "t-admin" in user.groups:
+        return [g.replace("g-admins-", "", 1) for g in user.groups if g.startswith("g-admins-")]
+    return [g.replace("g-users-", "", 1) for g in user.groups if g.startswith("g-users-")]
+
+
 def check_resource_group_access(resource, user: UserInfo, resource_label: str = "resource") -> None:
     """Enforce the same loom:group ownership check the agent invoke route applies.
 
@@ -28,7 +43,8 @@ def check_resource_group_access(resource, user: UserInfo, resource_label: str = 
     nobody has assigned to a group is now nobody's to read until somebody
     assigns it.
     """
-    if "g-admins-super" in user.groups:
+    allowed_tags = caller_group_tags(user)
+    if allowed_tags is None:
         return
     resource_group = resource.get_tags().get("loom:group", "")
     if not resource_group:
@@ -39,12 +55,6 @@ def check_resource_group_access(resource, user: UserInfo, resource_label: str = 
                 "can access it. Assign it to a group to grant access."
             ),
         )
-    if "t-admin" in user.groups:
-        admin_groups = [g for g in user.groups if g.startswith("g-admins-")]
-        allowed_tags = [g.replace("g-admins-", "", 1) for g in admin_groups]
-    else:
-        user_groups = [g for g in user.groups if g.startswith("g-users-")]
-        allowed_tags = [g.replace("g-users-", "", 1) for g in user_groups]
     if resource_group not in allowed_tags:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -227,8 +237,16 @@ def filter_visible_resources(resources: list, user: UserInfo, resource_label: st
     return visible
 
 
-def require_group_tag(tags: dict[str, str] | None, resource_label: str = "resource") -> dict[str, str]:
-    """Reject a create/update whose tags carry no loom:group, and return them.
+def require_group_tag(
+    tags: dict[str, str] | None, resource_label: str = "resource", *, user: UserInfo,
+) -> dict[str, str]:
+    """Reject a create/update whose loom:group is missing or not the caller's, and return the tags.
+
+    The group value must be one the caller could access afterwards
+    (``caller_group_tags``). Checking only that the tag was present let a
+    group-scoped admin create or re-tag an MCP server, A2A agent, memory,
+    role, authorizer or agent into another group, planting it in that
+    group's catalog. Super-admins may assign any group.
 
     Authorization is by loom:group, so a resource without one is unreachable
     for everyone except a super-admin (see check_resource_group_access, which
@@ -241,12 +259,19 @@ def require_group_tag(tags: dict[str, str] | None, resource_label: str = "resour
     is "the API cannot create one", not "the type cannot exist".
     """
     resolved = tags or {}
-    if not resolved.get("loom:group"):
+    group = resolved.get("loom:group")
+    if not group:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
                 f"A {resource_label} must carry a loom:group tag — pick a tag profile. "
                 "Without one, only a super-admin could access it."
             ),
+        )
+    allowed = caller_group_tags(user)
+    if allowed is not None and group not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You can't assign a {resource_label} to group '{group}' — you can only use your own groups.",
         )
     return resolved

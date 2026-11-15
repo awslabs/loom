@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import type { SSESessionStart, SSESessionEnd, SSEApprovalRequest, SSEApprovalResolved, SSEElicitationRequest, SSETokenInfo } from "@/api/types";
+import type { SSESessionStart, SSESessionEnd, SSEApprovalRequest, SSEApprovalResolved, SSEElicitationRequest, SSETokenInfo, SSEGuardrail, GuardrailRef } from "@/api/types";
 import { invokeAgentStream, invokeAgentWs, type WsInvokeController } from "@/api/invocations";
 import { friendlyInvokeError } from "@/lib/errors";
 
@@ -14,7 +14,8 @@ export type StreamSegment =
   | { type: "tool_use"; name: string; index: number; total: number; timestamp: number }
   | { type: "approval_request"; data: SSEApprovalRequest }
   | { type: "approval_resolved"; data: SSEApprovalResolved }
-  | { type: "elicitation_request"; data: SSEElicitationRequest; resolvedSummary?: string };
+  | { type: "elicitation_request"; data: SSEElicitationRequest; resolvedSummary?: string }
+  | { type: "guardrail"; data: SSEGuardrail };
 
 interface InvokeSnapshot {
   streamedText: string;
@@ -79,6 +80,7 @@ async function _startInvoke(
   connectorIds?: number[],
   useLinkedToken?: boolean,
   useWebSocket?: boolean,
+  guardrail?: GuardrailRef,
 ) {
   // Abort any in-flight stream/ws for this agent
   _controllers.get(agentId)?.abort();
@@ -100,7 +102,7 @@ async function _startInvoke(
   });
 
   if (useWebSocket) {
-    _startInvokeWs(agentId, prompt, qualifier, authorizerName, sessionId, modelId, connectorIds);
+    _startInvokeWs(agentId, prompt, qualifier, authorizerName, sessionId, modelId, connectorIds, guardrail);
     return;
   }
 
@@ -116,6 +118,7 @@ async function _startInvoke(
         ...(modelId ? { model_id: modelId } : {}),
         ...(connectorIds && connectorIds.length > 0 ? { connector_ids: connectorIds } : {}),
         ...(useLinkedToken ? { use_linked_token: true } : {}),
+        ...(guardrail ? { guardrail_id: guardrail.guardrail_id, guardrail_version: guardrail.guardrail_version } : {}),
       },
       {
         onSessionStart: (data) => _update(agentId, { sessionStart: data }),
@@ -159,6 +162,10 @@ async function _startInvoke(
           const cur = _get(agentId);
           _update(agentId, { tokenInfos: [...cur.tokenInfos, data] });
         },
+        onGuardrail: (data) => {
+          const cur = _get(agentId);
+          _update(agentId, { segments: [...cur.segments, { type: "guardrail" as const, data }] });
+        },
         onSessionEnd: (data) => {
           _update(agentId, { sessionEnd: data, isStreaming: false, currentToolName: null });
         },
@@ -194,6 +201,7 @@ function _startInvokeWs(
   sessionId?: string,
   modelId?: string,
   connectorIds?: number[],
+  guardrail?: GuardrailRef,
 ) {
   const wsCtrl = invokeAgentWs(
     agentId,
@@ -203,6 +211,7 @@ function _startInvokeWs(
       ...(sessionId ? { session_id: sessionId } : {}),
       ...(modelId ? { model_id: modelId } : {}),
       ...(connectorIds && connectorIds.length > 0 ? { connector_ids: connectorIds } : {}),
+      ...(guardrail ? { guardrail_id: guardrail.guardrail_id, guardrail_version: guardrail.guardrail_version } : {}),
     },
     {
       onSessionStart: (data) => {
@@ -237,6 +246,10 @@ function _startInvokeWs(
         };
         const segs = [...cur.segments, { type: "elicitation_request" as const, data: elicitData }];
         _update(agentId, { segments: segs });
+      },
+      onGuardrail: (data) => {
+        const cur = _get(agentId);
+        _update(agentId, { segments: [...cur.segments, { type: "guardrail" as const, data }] });
       },
       onResult: (content) => {
         const cur = _get(agentId);
@@ -346,8 +359,8 @@ export function useInvoke(agentId: number, authorizerName?: string) {
   }, [agentId]);
 
   const invoke = useCallback(
-    async (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean, useWebSocket?: boolean) => {
-      await _startInvoke(agentId, prompt, qualifier, authorizerRef.current, sessionId, credentialId, bearerToken, modelId, connectorIds, useLinkedToken, useWebSocket);
+    async (prompt: string, qualifier: string, sessionId?: string, credentialId?: number, bearerToken?: string, modelId?: string, connectorIds?: number[], useLinkedToken?: boolean, useWebSocket?: boolean, guardrail?: GuardrailRef) => {
+      await _startInvoke(agentId, prompt, qualifier, authorizerRef.current, sessionId, credentialId, bearerToken, modelId, connectorIds, useLinkedToken, useWebSocket, guardrail);
     },
     [agentId],
   );

@@ -1,5 +1,19 @@
 include etc/environment.sh
 
+# Guardrail stack defaults (issue #17) — used when etc/environment.sh predates
+# the guardrail block, so sam never receives empty template/stack arguments.
+P_GUARDRAIL_STACK ?= loom-guardrail
+P_GUARDRAIL_TEMPLATE ?= iac/guardrail.yaml
+P_GUARDRAIL_OUTPUT ?= iac/guardrail_output.yaml
+P_GUARDRAIL_NAME ?= loom-default
+P_GUARDRAIL_DETECT_ONLY ?= false
+P_GUARDRAIL_CONTENT_FILTER_STRENGTH ?= HIGH
+P_GUARDRAIL_PROMPT_ATTACK_STRENGTH ?= HIGH
+P_GUARDRAIL_PII_MASK_ACTION ?= ANONYMIZE
+P_GUARDRAIL_PROFANITY_FILTER ?= true
+P_GUARDRAIL_SAMPLE_DENIED_TOPIC ?= false
+P_GUARDRAIL_VERSION_DESCRIPTION ?= initial
+
 # role
 role: role.package role.deploy
 role.package:
@@ -350,6 +364,56 @@ security-group.delete:
 		--profile $(PROFILE) \
 		--region $(REGION) \
 		--stack-name $(P_AGENT_SG_STACK) \
+		--no-prompts
+
+# Bedrock guardrail (policies owned here, referenced by ID in Loom)
+guardrail: guardrail.package guardrail.deploy
+
+guardrail.package:
+	sam package \
+		--profile $(PROFILE) \
+		--region $(REGION) \
+		--template-file $(P_GUARDRAIL_TEMPLATE) \
+		--output-template-file $(P_GUARDRAIL_OUTPUT) \
+		--s3-bucket $(BUCKET) \
+		--s3-prefix $(P_GUARDRAIL_STACK)
+
+guardrail.deploy:
+	sam deploy \
+		--profile $(PROFILE) \
+		--region $(REGION) \
+		--template-file $(P_GUARDRAIL_OUTPUT) \
+		--stack-name $(P_GUARDRAIL_STACK) \
+		--s3-bucket $(BUCKET) \
+		--s3-prefix $(P_GUARDRAIL_STACK) \
+		--parameter-overrides \
+			pGuardrailName=$(P_GUARDRAIL_NAME) \
+			pDetectOnly=$(P_GUARDRAIL_DETECT_ONLY) \
+			pContentFilterStrength=$(P_GUARDRAIL_CONTENT_FILTER_STRENGTH) \
+			pPromptAttackStrength=$(P_GUARDRAIL_PROMPT_ATTACK_STRENGTH) \
+			pPiiMaskAction=$(P_GUARDRAIL_PII_MASK_ACTION) \
+			pEnableProfanityFilter=$(P_GUARDRAIL_PROFANITY_FILTER) \
+			pEnableSampleDeniedTopic=$(P_GUARDRAIL_SAMPLE_DENIED_TOPIC) \
+			$(if $(P_GUARDRAIL_KMS_KEY_ARN),pKmsKeyArn=$(P_GUARDRAIL_KMS_KEY_ARN)) \
+			pVersionDescription="$(P_GUARDRAIL_VERSION_DESCRIPTION)" \
+			pTagApplication=$(P_TAG_APPLICATION) \
+			pTagGroup=$(P_TAG_GROUP) \
+			pTagOwner=$(P_TAG_OWNER) \
+		--no-confirm-changeset
+
+guardrail.outputs:
+	@aws cloudformation describe-stacks \
+		--profile $(PROFILE) \
+		--region $(REGION) \
+		--stack-name $(P_GUARDRAIL_STACK) \
+		--query 'Stacks[0].Outputs' \
+		--output json | jq .
+
+guardrail.delete:
+	sam delete \
+		--profile $(PROFILE) \
+		--region $(REGION) \
+		--stack-name $(P_GUARDRAIL_STACK) \
 		--no-prompts
 
 # Bedrock AgentCore service-linked role (run once per account before first agent deployment)

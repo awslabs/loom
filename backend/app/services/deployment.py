@@ -95,6 +95,17 @@ def _fix_console_script_shebangs(target_dir: str) -> None:
         logger.info("Fixed shebang for %s", script_name)
 
 
+def _pip_error_summary(stderr: str | None, max_lines: int = 3) -> str:
+    """Return the meaningful ERROR lines from pip's stderr (last few only).
+
+    pip's "Could not find a version ... (from versions: ...)" line lists every
+    release ever published, so it's truncated rather than dropped.
+    """
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip().startswith("ERROR:")]
+    lines = [ln if len(ln) <= 300 else ln[:300] + "…" for ln in lines]
+    return " | ".join(lines[-max_lines:]) or "pip exited with an error (no ERROR lines in its output)"
+
+
 def build_agent_artifact(region: str, agent_framework: str = "strands") -> tuple[str, str]:
     """
     Build and upload the custom-code agent artifact to S3.
@@ -132,20 +143,27 @@ def build_agent_artifact(region: str, agent_framework: str = "strands") -> tuple
         shutil.copytree(str(src_dir), os.path.join(tmp_dir, "src"))
 
         # Install dependencies targeting linux/arm64 for AgentCore Runtime
-        subprocess.run(
-            [
-                "pip", "install",
-                "-r", str(requirements),
-                "-t", tmp_dir,
-                "--quiet",
-                "--platform", "manylinux2014_aarch64",
-                "--only-binary=:all:",
-                "--python-version", "3.13",
-                "--implementation", "cp",
-            ],
-            check=True,
-            capture_output=True,
-        )
+        pip_cmd = [
+            "pip", "install",
+            "-r", str(requirements),
+            "-t", tmp_dir,
+            "--quiet",
+            "--platform", "manylinux2014_aarch64",
+            "--only-binary=:all:",
+            "--python-version", "3.13",
+            "--implementation", "cp",
+        ]
+        try:
+            subprocess.run(pip_cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            # pip's own error lines (e.g. "No matching distribution found for
+            # X==1.2.3" when a pin has no manylinux2014_aarch64 wheel) are the
+            # only useful part of a failure; without them the deploy log just
+            # says "returned non-zero exit status 1".
+            raise RuntimeError(
+                f"Dependency install for the {agent_framework} agent artifact failed: "
+                f"{_pip_error_summary(exc.stderr)}"
+            ) from exc
 
         # Fix console script shebangs for Linux deployment.
         # pip generates scripts with the local Python path (e.g.

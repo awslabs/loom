@@ -251,7 +251,7 @@ def create_mcp_server(
     )
     # loom:group is what authorization is keyed on, so it is required rather
     # than optional — see require_group_tag.
-    resolved_tags = require_group_tag(request.tags, "MCP server")
+    resolved_tags = require_group_tag(request.tags, "MCP server", user=user)
     server.set_tags(resolved_tags)
     _assert_name_available(db, request.name, resolved_tags["loom:group"])
     server.api_key_header_name = request.api_key_header_name
@@ -388,7 +388,7 @@ def update_mcp_server(
     # tags is a JSON column, so it goes through set_tags rather than setattr;
     # an update that touches tags must still supply loom:group.
     if "tags" in update_data:
-        server.set_tags(require_group_tag(update_data.pop("tags"), "MCP server"))
+        server.set_tags(require_group_tag(update_data.pop("tags"), "MCP server", user=user))
     # A rename is how this row gets aimed at another group's name-keyed
     # secrets, so it is checked against the row's own (possibly just updated)
     # group before it is applied.

@@ -13,6 +13,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from app.services.usage_limits import check_usage_limits, resolve_effective_model_id
+from app.services.model_catalog import get_model_family
 
 logger = logging.getLogger(__name__)
 
@@ -552,6 +554,7 @@ async def invoke_agent_stream(
     supports_elicitation: bool = False,
     user_access_token: str | None = None,
     delegation_mode: str = "m2m",
+    usage_warnings: list[str] | None = None,
     guardrail_override: dict[str, str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """
@@ -604,6 +607,9 @@ async def invoke_agent_stream(
     }
     if token_source:
         session_start_data["token_source"] = token_source
+    if usage_warnings:
+        session_start_data["usage_warnings"] = usage_warnings
+        
     if access_token:
         session_start_data["has_token"] = True
         token_summary = _extract_token_summary(access_token, "user", token_source)
@@ -1064,6 +1070,7 @@ async def invoke_harness_agent_stream(
     dynamic_tools: list[dict[str, Any]] | None = None,
     user_access_token: str | None = None,
     delegation_mode: str = "m2m",
+    usage_warnings: list[str] | None = None
     guardrail_override: dict[str, str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Invoke a harness-deployed agent and yield SSE events.
@@ -1199,6 +1206,8 @@ async def invoke_harness_agent_stream(
         harness_token_summary = _extract_token_summary(access_token, "user", token_source)
         if harness_token_summary:
             harness_start_data["user_token"] = harness_token_summary
+    if usage_warnings: 
+        harness_start_data["usage_warnings"] = usage_warnings
     yield format_sse_event("session_start", harness_start_data)
 
     if delegation_mode == "obo" and not user_access_token:
@@ -1506,12 +1515,25 @@ async def invoke_agent_endpoint(
             )
         runtime_model_id = request_body.model_id
 
-    # Validate per-invocation guardrail selection against the agent's
+# Validate per-invocation guardrail selection against the agent's
     # allowlist (fast-fail; the agent runtime re-validates for custom agents).
     guardrail_override = _validate_guardrail_selection(
         agent, request_body.guardrail_id, request_body.guardrail_version,
     )
 
+    # Resolve the model actually used: the runtime override if given, else the
+    # agent's configured default. Needed before the usage-limit check below.
+    effective_model_id = resolve_effective_model_id(agent, runtime_model_id)
+
+    # Pre-flight usage-limit check. Runs before creating or reusing a session,
+    # so a blocked request leaves no empty/orphaned session row behind.
+    decision = check_usage_limits(db, user.username, user.groups or [], effective_model_id)
+    if decision.enforcement == "block":
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Usage limit '{decision.limit_name}' exceeded "
+                   f"({decision.current_usage}/{decision.threshold} {decision.measure})",
+        )
     # Record client invoke time before session creation
     client_invoke_time = time.time()
 
@@ -1547,6 +1569,7 @@ async def invoke_agent_endpoint(
             status="pending",
             created_at=datetime.utcnow(),
             user_id=user.username,
+            groups=json.dumps(user.groups or []),
         )
         db.add(session)
         db.commit()
@@ -1558,6 +1581,8 @@ async def invoke_agent_endpoint(
         invocation_id=str(uuid.uuid4()),
         status="pending",
         prompt_text=request_body.prompt,
+        model_id=effective_model_id,
+        model_family=get_model_family(effective_model_id) if effective_model_id else None,
         created_at=datetime.utcnow(),
     )
     db.add(invocation)
@@ -1823,6 +1848,7 @@ async def invoke_agent_endpoint(
             dynamic_harness_tools,
             user_access_token=user_access_token,
             delegation_mode=delegation_mode,
+            usage_warnings=decision.warnings,
             guardrail_override=guardrail_override,
         )
     else:
@@ -1835,6 +1861,7 @@ async def invoke_agent_endpoint(
             supports_elicitation=has_elicitation_connector,
             user_access_token=user_access_token,
             delegation_mode=delegation_mode,
+            usage_warnings=decision.warnings,
             guardrail_override=guardrail_override,
         )
 
@@ -1957,6 +1984,22 @@ async def invoke_agent_websocket(
             # resolution chain (manual token / credential ID / linked user).
             access_token = data.get("bearer_token")
 
+            # Pre-flight usage-limit check for WebSocket invoke
+            ws_effective_model_id = resolve_effective_model_id(agent, data.get("model_id"))
+            ws_decision = check_usage_limits(db, user.username, user.groups or [], ws_effective_model_id)
+            if ws_decision.enforcement == "block":
+                await websocket.send_json({
+                    "type": "error",
+                    "content": f"Usage limit '{ws_decision.limit_name}' exceeded "
+                               f"({ws_decision.current_usage}/{ws_decision.threshold} {ws_decision.measure})",
+                })
+                await websocket.close(code=1008)
+                return
+
+            session_start_msg = {"type": "session_start", "session_id": session_id}
+            if ws_decision.warnings:
+                session_start_msg["usage_warnings"] = ws_decision.warnings
+            await websocket.send_json(session_start_msg)
             try:
                 ws_guardrail = _validate_guardrail_selection(
                     agent, data.get("guardrail_id"), data.get("guardrail_version"),

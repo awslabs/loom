@@ -15,6 +15,7 @@ evaluates this agent before reading its results log group, so a caller can
 never point it at an arbitrary log group.
 """
 
+import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +45,8 @@ from app.services.agentcore import invoke_agent
 from app.services.cognito import get_cognito_token
 from app.services.otel import fetch_otel_events
 from app.services.secrets import get_secret
+from app.services.usage_limits import check_usage_limits, resolve_effective_model_id
+from app.services.model_catalog import get_model_family
 
 logger = logging.getLogger(__name__)
 
@@ -569,7 +572,10 @@ def _invoke_text(arn: str, region: str, session_id: str, prompt: str, model_id: 
 
 
 def _record_invocation(db: Session, agent_id: int, session_id: str, prompt: str,
-                       response: str | None, username: str | None) -> None:
+                       response: str | None, username: str | None,
+                       groups: list[str] | None = None,
+                       model_id: str | None = None,
+                       region: str | None = None) -> None:
     """Record a test-case invocation as a real session/invocation.
 
     Test-case runs invoke the agent through the service layer directly rather
@@ -579,13 +585,28 @@ def _record_invocation(db: Session, agent_id: int, session_id: str, prompt: str,
     AgentCore (and is what gets scored), but GET /sessions/{id} 404s because
     Loom never persisted it.
     """
+    input_tokens = max(1, len(prompt) // 4)
+    output_tokens = len(response) // 4 if response else 0
+    try:
+        from app.services.tokens import count_input_tokens, count_output_tokens
+        if model_id and region:
+            input_tokens = count_input_tokens(model_id, prompt, region)
+            if response:
+                output_tokens = count_output_tokens(model_id, response, region)
+    except Exception:
+        pass
+
     db.add(InvocationSession(
         agent_id=agent_id, session_id=session_id, qualifier="DEFAULT",
         status="complete", created_at=datetime.utcnow(), user_id=username,
+        groups=json.dumps(groups or []),
     ))
     db.add(Invocation(
         session_id=session_id, invocation_id=str(uuid4()), status="complete",
         prompt_text=prompt, response_text=response, created_at=datetime.utcnow(),
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        model_id=model_id,
+        model_family=get_model_family(model_id) if model_id else None,
     ))
     db.commit()
 
@@ -736,11 +757,26 @@ def _execute_batch_runs(items: list[tuple[int, str | None]], agent_id: int,
         with ThreadPoolExecutor(max_workers=_BATCH_WORKERS) as pool:
             rows = _existing_runs(db, work)
             work = [i for i in work if i.run_id in rows]
+            allowed_work = []
             for item in work:
                 if item.prompt is not None:
+                    eff_m = resolve_effective_model_id(agent, item.model_id)
+                    decision = check_usage_limits(db, user.username, user.groups or [], eff_m)
+                    if decision.enforcement == "block":
+                        _fail_run(
+                            db,
+                            rows[item.run_id],
+                            f"Usage limit '{decision.limit_name}' exceeded "
+                            f"({decision.current_usage}/{decision.threshold} {decision.measure})",
+                        )
+                        continue
                     rows[item.run_id].status = "INVOKING"
+                    allowed_work.append(item)
+                else:
+                    allowed_work.append(item)
+            work = allowed_work
             db.commit()
-            invoked = {i.run_id: pool.submit(_invoke_text, arn, region, i.session_id, i.prompt, i.model_id,
+            invoked = {i.run_id: pool.submit(_invoke_text, arn, region, i.session_id, i.prompt, resolve_effective_model_id(agent, i.model_id),
                                              access_token)
                        for i in work if i.prompt is not None}
             rows = _existing_runs(db, work)
@@ -753,7 +789,18 @@ def _execute_batch_runs(items: list[tuple[int, str | None]], agent_id: int,
                     if error is not None:
                         _fail_run(db, rows[item.run_id], f"Failed to invoke agent: {error}")
                         continue
-                    _record_invocation(db, agent_id, item.session_id, item.prompt, response, user.username)
+                    eff_m = resolve_effective_model_id(agent, item.model_id)
+                    _record_invocation(
+                        db,
+                        agent_id,
+                        item.session_id,
+                        item.prompt,
+                        response,
+                        user.username,
+                        groups=user.groups,
+                        model_id=eff_m,
+                        region=region,
+                    )
                 if item.run_id in rows:
                     live.append(item)
 
@@ -879,16 +926,37 @@ def _execute_run(run_id: int, test_case_id: int, agent_id: int, session_id: str,
         if prompt is not None:
             if stopped():
                 return
+            eff_model_id = resolve_effective_model_id(agent, model_id)
+            decision = check_usage_limits(db, user.username, user.groups or [], eff_model_id)
+            if decision.enforcement == "block":
+                _fail_run(
+                    db,
+                    run,
+                    f"Usage limit '{decision.limit_name}' exceeded "
+                    f"({decision.current_usage}/{decision.threshold} {decision.measure})",
+                )
+                return
+
             run.status = "INVOKING"
             db.commit()
-            response, error = _invoke_text(agent.arn, agent.region, session_id, prompt, model_id, access_token)
+            response, error = _invoke_text(agent.arn, agent.region, session_id, prompt, eff_model_id, access_token)
             if stopped():
                 return
             db.refresh(run)
             if error is not None:
                 _fail_run(db, run, f"Failed to invoke agent: {error}")
                 return
-            _record_invocation(db, agent.id, session_id, prompt, response, user.username)
+            _record_invocation(
+                db,
+                agent.id,
+                session_id,
+                prompt,
+                response,
+                user.username,
+                groups=user.groups,
+                model_id=eff_model_id,
+                region=agent.region,
+            )
 
         if stopped():
             return

@@ -17,6 +17,7 @@ from app.models.audit import AuditLogin, AuditAction, AuditPageView
 from app.models.approval_policy import ApprovalPolicy
 from app.models.approval_log import ApprovalLog
 from app.models.vpc_config import VpcConfig
+from app.models.usage_limit import UsageLimit
 from app.models.evaluation import EvaluationTestCase, EvaluationRun
 # a2a and identity_provider were missing here. They worked at runtime only
 # because a router imports them, so `import app.models` left their tables out
@@ -32,7 +33,7 @@ __all__ = [
     "AuthorizerCredential", "Memory", "TagPolicy", "TagProfile",
     "McpServer", "McpTool", "McpServerAccess", "SiteSetting",
     "AuditLogin", "AuditAction", "AuditPageView",
-    "ApprovalPolicy", "ApprovalLog", "VpcConfig",
+    "ApprovalPolicy", "ApprovalLog", "VpcConfig", "UsageLimit",
     "EvaluationTestCase", "EvaluationRun",
     "A2aAgent", "A2aAgentSkill", "A2aAgentAccess", "IdentityProvider",
 ]

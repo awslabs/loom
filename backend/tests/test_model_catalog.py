@@ -16,6 +16,7 @@ from app.services.model_catalog import (
     get_bedrock_models,
     get_litellm_models_live,
     get_merged_models,
+    get_model_family,
 )
 
 
@@ -50,6 +51,36 @@ class TestNormalizeModelId(unittest.TestCase):
             "deepseek.v3.2",
         )
 
+
+class TestGetModelFamily(unittest.TestCase):
+    def test_bedrock_style_id_uses_lab_prefix(self):
+        # Straightforward case: dotted Bedrock id, lab is the first segment.
+        self.assertEqual(get_model_family("anthropic.claude-sonnet-4-6"), "anthropic")
+
+    def test_region_prefixed_bedrock_id_still_resolves(self):
+        # Family lookup has to normalize first — a region-prefixed id
+        # shouldn't fail to match just because "us." is in the way.
+        self.assertEqual(get_model_family("us.anthropic.claude-sonnet-4-6"), "anthropic")
+
+    def test_litellm_style_flat_id_matches_prefix(self):
+        # No dots to split on here — this is the case _bedrock_lab alone
+        # can't handle, which is the whole reason this function exists.
+        self.assertEqual(get_model_family("gpt-4o"), "openai")
+
+    def test_gemini_flat_id_matches_prefix(self):
+        self.assertEqual(get_model_family("gemini-1.5-pro"), "gemini")
+
+    def test_unrecognized_id_falls_back_to_other(self):
+        # Must not raise — an unknown model should still be limitable
+        # under a catch-all family rather than break the caller.
+        self.assertEqual(get_model_family("some-random-model"), "other")
+
+    def test_unrecognized_bedrock_style_lab_falls_back_to_other(self):
+        # A dotted id whose prefix isn't in _ALLOWED_BEDROCK_LABS — should
+        # fall through past _bedrock_lab (returns None) and the LiteLLM
+        # prefix list (no match either) to "other", not raise or return None.
+        self.assertEqual(get_model_family("unknownlab.some-model"), "other")
+        
 
 class TestFetchBedrockAvailability(unittest.TestCase):
     @patch("boto3.client")

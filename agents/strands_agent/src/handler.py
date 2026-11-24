@@ -41,7 +41,7 @@ from mcp.types import ElicitResult
 
 from src.config import AgentConfig, GuardrailConfig, MCPServerConfig, AuthConfig, load_config
 from src.agent import _build_model, attach_mcp_tools, build_agent
-from src.integrations.approval import ApprovalHook
+from src.integrations.approval import NON_INTERACTIVE_STATE_KEY, ApprovalHook
 from src.integrations.guardrails import (
     GUARDRAIL_NOT_ALLOWED_MESSAGE,
     GUARDRAIL_NOT_ALLOWED_TEXT,
@@ -660,6 +660,15 @@ async def ws_invoke(websocket, context) -> None:
             if selected_model is not None:
                 agent.model = selected_model
 
+            # Approval policies, as the HTTP entrypoint applies them. This path
+            # never read them, so a tool gated over HTTP ran unprompted here.
+            # A missing key (an older backend) leaves the current set in place
+            # rather than clearing it.
+            ws_policies = data.get("approval_policies")
+            if isinstance(ws_policies, list) and _approval_hook:
+                _approval_hook.policies = ws_policies
+                logger.info("Applied %d approval policy(ies) from WebSocket payload", len(ws_policies))
+
             guardrail_session = _new_guardrail_session(guardrail, session_id)
             if guardrail_session:
                 guardrail_session.start_input(prompt)
@@ -669,7 +678,14 @@ async def ws_invoke(websocket, context) -> None:
             run_state: dict[str, Any] = {}
 
             def _run_agent(p=prompt):
-                result = agent(p)
+                # This socket can't relay an approval request and resume, so the
+                # approval hook refuses gated tools for the run instead of
+                # interrupting (see ApprovalHook._check_approval).
+                agent.state.set(NON_INTERACTIVE_STATE_KEY, True)
+                try:
+                    result = agent(p)
+                finally:
+                    agent.state.delete(NON_INTERACTIVE_STATE_KEY)
                 run_state["stopped"] = _guardrail_stopped(result)
                 return str(result)
 

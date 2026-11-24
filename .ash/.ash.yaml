@@ -35,6 +35,9 @@ global_settings:
     - path: backend/tests/test_litellm_ssrf.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Placeholder master key ("sk-master") for a faked LiteLLM proxy env var, not a real secret value.
+    - path: backend/tests/test_security_followups.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Placeholder secret ARN and fake client-secret values ("new-secret", "plaintext") used to assert credentials are cleared on an issuer or URL change, not real secrets.
     - path: backend/tests/test_settings_litellm_proxy.py
       rule_id: SECRET-BASIC-AUTH-CREDENTIALS
       reason: Fake user:pass@ proxy URL asserting that saving a base URL carrying userinfo returns 422, not a real credential.

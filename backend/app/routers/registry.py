@@ -123,6 +123,29 @@ def _find_resource_by_record_id(record_id: str, db: Session) -> McpServer | A2aA
 
 
 
+def _assert_skill_writable(record_id: str, user: UserInfo, db: Session) -> None:
+    """Refuse a skill record write unless the caller may write every agent using it.
+
+    The dependents are every agent with a skill integration naming this
+    record, including disabled ones: one can be re-enabled without touching the
+    record, and it would then fold in whatever the record holds at that point.
+    """
+    import json as _json
+
+    agent_ids: set[int] = set()
+    for integration in db.query(Integration).filter(Integration.integration_type == "skill").all():
+        try:
+            config = _json.loads(integration.integration_config or "{}")
+        except _json.JSONDecodeError:
+            continue
+        if isinstance(config, dict) and config.get("record_id") == record_id:
+            agent_ids.add(integration.agent_id)
+    if not agent_ids:
+        return
+    for agent in db.query(Agent).filter(Agent.id.in_(agent_ids)).all():
+        check_resource_group_access(agent, user, resource_label="agent")
+
+
 def _owned_resource_or_403(record_id: str, user: UserInfo, db: Session):
     """Resolve the Loom resource behind a record_id and authorize the caller.
 
@@ -137,11 +160,17 @@ def _owned_resource_or_403(record_id: str, user: UserInfo, db: Session):
     transition is the side effect that cannot be rolled back, so it must not
     happen for a caller who is going to be refused.
 
-    Returns None when no Loom resource is linked (skill records have none),
-    which leaves those records governed by `registry:write` as before.
+    Returns None when no Loom resource is linked (skill records have none).
+    A skill still has owners in effect: every agent that attaches it folds its
+    SKILL.md into its system prompt at the next deploy. Writing the record is
+    therefore a write to each of those agents, so the caller must have access
+    to all of them. Without this, `registry:write` alone let one group plant
+    instructions into another group's agent, which the writer could neither
+    read nor invoke.
     """
     resource = _find_resource_by_record_id(record_id, db)
     if resource is None:
+        _assert_skill_writable(record_id, user, db)
         return None
     label = {
         McpServer: "mcp server", A2aAgent: "a2a agent", Agent: "agent",

@@ -20,7 +20,7 @@ from google.adk.tools.base_tool import BaseTool
 
 from src.config import AgentConfig
 from src.integrations.a2a_client import create_a2a_tools
-from src.integrations.approval import ApprovalPolicyMatcher, apply_confirmation_to_tools
+from src.integrations.approval import ApprovalPlugin, ApprovalPolicyMatcher, apply_confirmation_to_tools
 from src.integrations.guardrails import GuardrailTraceClient, enforce_applies
 from src.integrations.code_interpreter import AgentCoreCodeInterpreterTools, build_code_interpreter_tools
 from src.integrations.mcp_client import build_toolsets
@@ -204,7 +204,8 @@ async def build_agent(
         len(tools), len(approval_matcher.policies),
     )
 
-    plugins: list[BasePlugin] = [TelemetryPlugin()]
+    # First, so a refused or paused call never reaches the other plugins.
+    plugins: list[BasePlugin] = [ApprovalPlugin(approval_matcher), TelemetryPlugin()]
     logger.info("Enabled telemetry plugin")
 
     if config.integrations.memory.enabled:

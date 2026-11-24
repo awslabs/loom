@@ -33,6 +33,13 @@ class McpServer(Base):
     oauth2_audience = Column(String, nullable=True)  # Token exchange audience (required for Okta custom auth servers)
     api_key_header_name = Column(String, nullable=True)  # e.g. 'x-api-key', 'Authorization'
     has_admin_api_key = Column(String, nullable=True)  # 'true' or 'false'
+    # Generation of the per-user API key namespace; see
+    # services.mcp.user_api_key_secret_name. NULL marks a server created
+    # before per-user keys were bound to an endpoint, which keeps the legacy
+    # name-keyed path until its endpoint first moves. New servers start at 1,
+    # and each endpoint_url change increments it, so keys entered for the old
+    # host are unreachable from the new one by construction.
+    user_key_epoch = Column(Integer, nullable=True, default=1)
     supports_elicitation = Column(String, nullable=True, default="false")  # 'true' or 'false'
     runtime_endpoint_url = Column(String, nullable=True)  # direct runtime URL for WebSocket (bypasses Gateway)
     registry_record_id = Column(String, nullable=True)

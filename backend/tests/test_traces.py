@@ -80,6 +80,10 @@ class TestTracesRouter(unittest.TestCase):
         self.session.add(self.agent)
         self.session.commit()
         self.session.refresh(self.agent)
+        # Session routes now require the session to exist and be readable.
+        from app.models.session import InvocationSession
+        self.session.add(InvocationSession(agent_id=self.agent.id, session_id="sess-1", qualifier="DEFAULT"))
+        self.session.commit()
 
     def tearDown(self):
         self.session.rollback()

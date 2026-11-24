@@ -118,6 +118,10 @@ export function SessionDetailPage({ agent, session, onSelectInvocation, onRerunI
   const tracesFetchedRef = useRef(false);
 
   const qualifier = session.qualifier || "DEFAULT";
+  // Raw log streams and vended logs interleave every user's conversations, so
+  // the API serves them only to admins (who may read any session). Others get
+  // this session's own filtered logs.
+  const canReadAgentWideLogs = user?.groups?.includes("t-admin") ?? false;
 
   const refreshLogs = useCallback(() => {
     if (activeStream.startsWith("vended:")) {
@@ -133,8 +137,8 @@ export function SessionDetailPage({ agent, session, onSelectInvocation, onRerunI
   // Fetch session logs and available streams on mount
   useEffect(() => {
     void fetchSessionLogs(agent.id, session.session_id, qualifier);
-    void fetchLogStreams(agent.id, qualifier);
-  }, [agent.id, session.session_id, qualifier, fetchSessionLogs, fetchLogStreams]);
+    if (canReadAgentWideLogs) void fetchLogStreams(agent.id, qualifier);
+  }, [agent.id, session.session_id, qualifier, canReadAgentWideLogs, fetchSessionLogs, fetchLogStreams]);
 
   // Live tail: poll the active source while enabled
   useEffect(() => {
@@ -324,7 +328,7 @@ export function SessionDetailPage({ agent, session, onSelectInvocation, onRerunI
                     <SelectLabel>Source</SelectLabel>
                     <SelectItem value={SESSION_LOGS_VALUE}>Service-level logs</SelectItem>
                   </SelectGroup>
-                  {sortedStreams.length > 0 && (
+                  {canReadAgentWideLogs && sortedStreams.length > 0 && (
                     <>
                       <SelectSeparator />
                       <SelectGroup>
@@ -335,7 +339,7 @@ export function SessionDetailPage({ agent, session, onSelectInvocation, onRerunI
                       </SelectGroup>
                     </>
                   )}
-                  {vendedSources.length > 0 && (
+                  {canReadAgentWideLogs && vendedSources.length > 0 && (
                     <>
                       <SelectSeparator />
                       <SelectGroup>

@@ -153,6 +153,8 @@ def _migrate_add_columns(eng) -> None:
         ("agents", "status_reason", "TEXT"),
         ("agents", "agent_framework", "VARCHAR"),
         ("mcp_servers", "tags", "TEXT"),
+        # NULL for existing rows on purpose: they keep the legacy per-user key path.
+        ("mcp_servers", "user_key_epoch", "INTEGER"),
         ("a2a_agents", "resource_tags", "TEXT"),
         ("evaluation_test_cases", "pass_threshold", "REAL DEFAULT 0.7"),
         ("evaluation_test_cases", "model_id", "VARCHAR"),

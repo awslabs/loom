@@ -225,6 +225,7 @@ async def invoke_agent_ws(
     dynamic_mcp_servers: list[dict[str, Any]] | None = None,
     runtime_model_id: str | None = None,
     guardrail: dict[str, str] | None = None,
+    approval_policies: list[dict[str, Any]] | None = None,
 ) -> AsyncGenerator[dict[str, Any], str | None]:
     """Invoke an AgentCore Runtime agent via WebSocket for MCP elicitation support.
 
@@ -287,6 +288,10 @@ async def invoke_agent_ws(
                     "guardrail_id": guardrail.get("guardrail_id", ""),
                     "guardrail_version": guardrail.get("guardrail_version", "DRAFT"),
                 }
+            # Always sent, even empty, so the agent applies the current set on
+            # every prompt. This path used to omit approval policies entirely,
+            # so a tool gated over HTTP invoke ran unprompted over the socket.
+            payload["approval_policies"] = approval_policies or []
 
             await ws.send(json.dumps(payload))
             logger.info("WebSocket prompt sent session_id=%s", session_id)

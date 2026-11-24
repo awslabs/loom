@@ -1427,6 +1427,7 @@ def _deploy_agent(request: AgentCreateRequest, db: Session, background_tasks: Ba
             "obo_grant_type": s.obo_grant_type,
             "oauth2_audience": s.oauth2_audience,
             "api_key_header_name": s.api_key_header_name,
+            "user_api_key_path": user_api_key_secret_name(s, "{actor_id}"),
             "supports_elicitation": s.supports_elicitation == "true",
         }
         for s in mcp_records
@@ -1665,7 +1666,7 @@ def _deploy_agent_background(
                 # Same path services/mcp.py resolves at request time; built by
                 # the one helper so the two cannot drift. actor_id stays a
                 # literal placeholder for the runtime to substitute.
-                secret_name = user_api_key_secret_name(server["name"], "{actor_id}")
+                secret_name = server["user_api_key_path"]
                 entry["auth"] = {
                     "type": "api_key",
                     "credentials_secret_arn": secret_name,
@@ -1777,9 +1778,7 @@ def _deploy_agent_background(
         def _create_ci_resource() -> tuple[str, str]:
             import boto3
             ci_region = (request.code_interpreter_region or "").strip() or region
-            base_name = re.sub(r"_?code_interpreter$", "", request.name).strip("_")
-            raw_name = f"loom_ci_{base_name}"
-            sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", raw_name)[:48]
+            sanitized = _new_code_interpreter_name(request.name)
             network_mode = request.code_interpreter_network_mode or "PUBLIC"
             boto_client = boto3.client("bedrock-agentcore-control", region_name=ci_region)
             resp = boto_client.create_code_interpreter(
@@ -2160,7 +2159,7 @@ def _update_deploy_agent_background(
                 # Same path services/mcp.py resolves at request time; built by
                 # the one helper so the two cannot drift. actor_id stays a
                 # literal placeholder for the runtime to substitute.
-                secret_name = user_api_key_secret_name(server["name"], "{actor_id}")
+                secret_name = server["user_api_key_path"]
                 entry["auth"] = {
                     "type": "api_key",
                     "credentials_secret_arn": secret_name,
@@ -2503,6 +2502,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
                 "delegation_mode": (server.delegation_mode or "m2m"),
                 "obo_grant_type": server.obo_grant_type,
                 "api_key_header_name": server.api_key_header_name,
+                "user_api_key_path": user_api_key_secret_name(server, "{actor_id}"),
                 "supports_elicitation": server.supports_elicitation == "true",
             })
 
@@ -2846,30 +2846,19 @@ def _deploy_harness_background(
             try:
                 import boto3 as _boto3
                 ci_region = ci_config.get("region") or region
-                base_name = re.sub(r"_?code_interpreter$", "", name).strip("_")
-                raw_ci_name = f"loom_ci_{base_name}"
-                sanitized_ci_name = re.sub(r"[^a-zA-Z0-9_]", "_", raw_ci_name)[:48]
                 ci_net_mode = ci_config.get("network_mode") or "SANDBOX"
                 ci_boto = _boto3.client("bedrock-agentcore-control", region_name=ci_region)
-                # Reuse existing CI resource with this name if it already exists
-                ci_id: str | None = None
-                ci_arn_val: str | None = None
-                existing_cis = ci_boto.list_code_interpreters().get("codeInterpreterSummaries", [])
-                for existing_ci in existing_cis:
-                    if existing_ci.get("name") == sanitized_ci_name:
-                        ci_id = existing_ci["codeInterpreterId"]
-                        ci_arn_val = existing_ci["codeInterpreterArn"]
-                        logger.info("Reusing existing CI resource %s for harness agent %s", ci_id, agent_id)
-                        break
-                if not ci_id:
-                    ci_resp = ci_boto.create_code_interpreter(
-                        name=sanitized_ci_name,
-                        executionRoleArn=ci_config["execution_role_arn"],
-                        networkConfiguration={"networkMode": ci_net_mode},
-                    )
-                    ci_id = ci_resp["codeInterpreterId"]
-                    ci_arn_val = ci_resp["codeInterpreterArn"]
-                    logger.info("Created CI resource %s for harness agent %s", ci_id, agent_id)
+                # Always a new interpreter under a unique name: an existing one
+                # found by name may belong to another group (see
+                # _new_code_interpreter_name).
+                ci_resp = ci_boto.create_code_interpreter(
+                    name=_new_code_interpreter_name(name),
+                    executionRoleArn=ci_config["execution_role_arn"],
+                    networkConfiguration={"networkMode": ci_net_mode},
+                )
+                ci_id = ci_resp["codeInterpreterId"]
+                ci_arn_val = ci_resp["codeInterpreterArn"]
+                logger.info("Created CI resource %s for harness agent %s", ci_id, agent_id)
                 ci_arn = ci_arn_val
                 agent.code_interpreter_id = ci_id
                 db.commit()
@@ -3220,9 +3209,7 @@ def _update_harness_background(
                 try:
                     import boto3 as _boto3
                     ci_region_upd = ci_config.get("region") or region
-                    base_name_upd = re.sub(r"_?code_interpreter$", "", name).strip("_")
-                    raw_ci_name_upd = f"loom_ci_{base_name_upd}"
-                    san_ci_name_upd = re.sub(r"[^a-zA-Z0-9_]", "_", raw_ci_name_upd)[:48]
+                    san_ci_name_upd = _new_code_interpreter_name(name)
                     ci_net_upd = ci_config.get("network_mode") or "SANDBOX"
                     ci_boto_upd = _boto3.client("bedrock-agentcore-control", region_name=ci_region_upd)
                     ci_resp_upd = ci_boto_upd.create_code_interpreter(
@@ -3404,6 +3391,26 @@ def _register_agent_in_registry_background(agent_id: int) -> None:
             db.commit()
     finally:
         db.close()
+
+
+def _new_code_interpreter_name(agent_name: str) -> str:
+    """A fresh, unguessable name for a Code Interpreter this agent creates.
+
+    The name used to be derived from the agent name alone (loom_ci_{name}),
+    and harness deploy reused any existing interpreter with that name. Agent
+    names are caller-chosen, so an admin in one group could name a harness to
+    land on another group's interpreter, have its id stored on their agent, and
+    then delete it with cleanup_aws. A random suffix makes every interpreter
+    Loom creates unique, so nothing is ever adopted by name: an agent only ever
+    touches the interpreter whose id it recorded when it created it.
+
+    Code Interpreter names allow [a-zA-Z][a-zA-Z0-9_]{0,47}.
+    """
+    import secrets as _secrets
+
+    base = re.sub(r"_?code_interpreter$", "", agent_name).strip("_")
+    base = re.sub(r"[^a-zA-Z0-9_]", "_", base)[:31]
+    return f"loom_ci_{base}_{_secrets.token_hex(4)}"
 
 
 def _delete_code_interpreter(ci_id: str, region: str) -> None:
@@ -3789,25 +3796,14 @@ def delete_agent(
         except Exception as e:
             logger.warning("Failed to delete runtime %s: %s", _runtime_id, e)
 
-    # Delete custom Code Interpreter resource if one was created
+    # Delete the Code Interpreter only by the id this agent recorded when it
+    # created it. There used to be a fallback that looked one up by the name
+    # derived from agent.name and deleted it; names are caller-chosen, so that
+    # deleted whichever interpreter carried the name, including another
+    # group's. An interpreter left by a deploy that failed before recording its
+    # id has to be removed by hand.
     if _ci_id and _ci_region:
         _delete_code_interpreter(_ci_id, _ci_region)
-    elif agent.source == "harness" and agent.name:
-        # Fallback: no code_interpreter_id stored, but a CI may exist from a failed deploy.
-        # Reconstruct the expected name and look it up.
-        try:
-            import boto3 as _boto3
-            _fallback_region = _region
-            base_name = re.sub(r"_?code_interpreter$", "", agent.name).strip("_")
-            expected_ci_name = re.sub(r"[^a-zA-Z0-9_]", "_", f"loom_ci_{base_name}")[:48]
-            ci_client = _boto3.client("bedrock-agentcore-control", region_name=_fallback_region)
-            summaries = ci_client.list_code_interpreters().get("codeInterpreterSummaries", [])
-            for s in summaries:
-                if s.get("name") == expected_ci_name:
-                    _delete_code_interpreter(s["codeInterpreterId"], _fallback_region)
-                    break
-        except Exception as ci_scan_err:
-            logger.warning("Failed to scan/delete orphaned CI for harness %s: %s", agent.name, ci_scan_err)
 
     # Clean up credential providers
     for cp_name in cp_names:
@@ -4194,6 +4190,7 @@ def redeploy_deploy_agent(
             "obo_grant_type": s.obo_grant_type,
             "oauth2_audience": s.oauth2_audience,
             "api_key_header_name": s.api_key_header_name,
+            "user_api_key_path": user_api_key_secret_name(s, "{actor_id}"),
             "supports_elicitation": s.supports_elicitation == "true",
         }
         for s in mcp_records
@@ -4481,6 +4478,7 @@ def redeploy_harness_agent(
                 "delegation_mode": (server.delegation_mode or "m2m"),
                 "obo_grant_type": server.obo_grant_type,
                 "api_key_header_name": server.api_key_header_name,
+                "user_api_key_path": user_api_key_secret_name(server, "{actor_id}"),
                 "supports_elicitation": server.supports_elicitation == "true",
             })
 

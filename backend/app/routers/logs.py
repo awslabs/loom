@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
-from app.routers.utils import get_agent_or_404
+from app.routers.utils import assert_can_read_all_sessions, get_agent_or_404, get_session_or_404
 from app.models.agent import Agent
 from app.models.memory import Memory
 from app.routers.agents import derive_log_group
@@ -161,6 +161,8 @@ def get_agent_logs(
     parameter to query a specific stream (see /logs/streams for available names).
     """
     agent, log_group = _resolve_agent_and_log_group(agent_id, qualifier, db, user)
+    # A stream interleaves every session's prompts and answers.
+    assert_can_read_all_sessions(user)
 
     # Resolve which stream to query
     stream_name = stream
@@ -221,6 +223,9 @@ def get_session_logs(
     Searches across all streams since the session may span multiple streams.
     """
     agent, log_group = _resolve_agent_and_log_group(agent_id, qualifier, db, user)
+    # Group check alone let a t-user read another user's session in the same
+    # group here, while GET /sessions/{sid} refused it. Same rule as that route.
+    get_session_or_404(agent_id, session_id, db, user)
 
     # Fetch log events filtered by session_id (searches across streams with retry)
     try:
@@ -353,6 +358,8 @@ def get_vended_logs(
 ) -> LogResponse:
     """Retrieve log events from a vended log group."""
     agent = _resolve_agent(agent_id, db, user)
+    # Vended runtime logs aren't partitioned by session either.
+    assert_can_read_all_sessions(user)
 
     allowed = {(src.log_group, src.stream) for src in _vended_sources_for(agent, agent_id, db)}
     if (log_group, stream) not in allowed:

@@ -113,18 +113,41 @@ def secret_name_for(resource: Any) -> str:
     return oauth2_client_secret_name(resource.id)
 
 
-def user_api_key_secret_name(server_name: str, user_sub: str) -> str:
+def legacy_user_api_key_secret_name(server_name: str, user_sub: str) -> str:
+    """The pre-1.10.4, name-keyed per-user key location."""
+    return f"loom/mcp/{server_name}/api-key/{user_sub}"
+
+
+def user_api_key_secret_name(server: Any, user_sub: str) -> str:
     """Secrets Manager name for one user's personal API key for a server.
 
-    Still keyed on the server name, deliberately: this path is embedded in
-    `AGENT_CONFIG_JSON` at deploy time and read by the deployed agent itself,
-    so re-keying it would strip per-user keys from every already-deployed
-    agent until it was redeployed. It is safe to leave name-keyed because
-    cross-group name collisions are now refused at the API boundary (see
-    `_assert_name_available`), and because the trailing `user_sub` confines
-    each entry to the one caller who owns it.
+    A per-user key is a credential the user entered for one host. Keyed only on
+    the server name, it followed an `endpoint_url` change: the admin key and
+    OAuth2 secret were cleared on a move, but these were not, so the next
+    invoke sent each user's key to whatever host the URL now named. They can't
+    simply be deleted on a move either, because nothing records which users
+    have one, and listing secrets by prefix would need an IAM grant that can't
+    be scoped.
+
+    So the path carries the server's `user_key_epoch`, which every endpoint
+    change increments: after a move, every reader (the backend's invoke and
+    tool routes, and the path embedded in `AGENT_CONFIG_JSON` at deploy) points
+    at a namespace that is empty until users re-enter keys for the new host.
+    Keyed on the immutable server id rather than the name, so a rename or a
+    new server reusing an old name can't reach another row's keys.
+
+    Servers created before this change have `user_key_epoch` NULL and keep the
+    legacy name-keyed path until their endpoint first moves, so upgrading does
+    not drop anyone's key. The trailing `user_sub` still confines each entry to
+    the one caller who owns it.
+
+    `server` is an `McpServer` row (or anything with `id`, `name` and
+    `user_key_epoch`).
     """
-    return f"loom/mcp/{server_name}/api-key/{user_sub}"
+    epoch = getattr(server, "user_key_epoch", None)
+    if not epoch:
+        return legacy_user_api_key_secret_name(getattr(server, "name", ""), user_sub)
+    return f"loom/mcp/{server.id}/user-api-key/e{int(epoch)}/{user_sub}"
 
 
 def _resolve_legacy_admin_api_key(server: Any, region: str, db: Any) -> str | None:
@@ -231,10 +254,9 @@ def resolve_api_key(server: Any, user_sub: str | None = None, db: Any = None) ->
     if getattr(server, "auth_type", None) != "api_key":
         return None
     region = os.getenv("AWS_REGION", "us-east-1")
-    name = getattr(server, "name", "")
     if user_sub:
         try:
-            return get_secret(user_api_key_secret_name(name, user_sub), region)
+            return get_secret(user_api_key_secret_name(server, user_sub), region)
         except Exception:
             return None
     if getattr(server, "has_admin_api_key", None) == "true":

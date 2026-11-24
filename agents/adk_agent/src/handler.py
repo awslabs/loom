@@ -454,6 +454,15 @@ async def ws_invoke(websocket, context) -> None:
             actor_id = data.get("actor_id") or "loom-agent"
             runtime_model_id = data.get("model_id")
 
+            # Approval policies, as the HTTP entrypoint applies them. This path
+            # never read them, so a tool gated over HTTP ran unprompted here. A
+            # missing key (an older backend) leaves the current set in place.
+            # A pause surfaces below as an error, since this socket can't resume.
+            ws_policies = data.get("approval_policies")
+            if isinstance(ws_policies, list) and _approval_matcher is not None:
+                _approval_matcher.policies = ws_policies
+                logger.info("Applied %d approval policy(ies) from WebSocket payload", len(ws_policies))
+
             content = types.Content(role="user", parts=[types.Part(text=prompt)]) if prompt else None
 
             result_chunks: list[str] = []

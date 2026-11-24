@@ -190,7 +190,9 @@ class TestInvocationsRouter(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         mock_get_secret.assert_called_once_with(
-            "loom/mcp/secured_mcp/api-key/local",
+            # Servers created since per-user keys were bound to the endpoint use
+            # the id- and epoch-keyed path (services.mcp.user_api_key_secret_name).
+            f"loom/mcp/{server.id}/user-api-key/e1/local",
             "us-east-1",
         )
         tools = mock_invoke_harness.call_args.kwargs["tools"]

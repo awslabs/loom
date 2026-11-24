@@ -56,6 +56,10 @@ class TestLogsRouter(unittest.TestCase):
         self.session.add(self.agent)
         self.session.commit()
         self.session.refresh(self.agent)
+        # Session routes now require the session to exist and be readable.
+        from app.models.session import InvocationSession
+        self.session.add(InvocationSession(agent_id=self.agent.id, session_id="test-session-123", qualifier="DEFAULT"))
+        self.session.commit()
 
     def tearDown(self):
         """Clean up database after each test."""

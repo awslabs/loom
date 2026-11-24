@@ -213,6 +213,21 @@ def update_identity_provider(
     if request.group_mappings is not None:
         _assert_group_mappings_within_caller_scopes(request.group_mappings, user)
 
+    issuer_changed = request.issuer_url is not None and request.issuer_url != idp.issuer_url
+    if issuer_changed:
+        # Changing the issuer rebinds who the stored mappings apply to: a token
+        # from the new issuer gets whatever groups the table names. A caller
+        # who only sends issuer_url keeps the stored mappings, which may grant
+        # g-admins-super, so the check above (new mappings only) let a
+        # security:write admin point a super-admin mapping at an issuer they
+        # control. The effective table is checked instead, whether it comes
+        # from this request or from the row.
+        effective_mappings = (
+            request.group_mappings if request.group_mappings is not None
+            else idp.get_group_mappings()
+        )
+        _assert_group_mappings_within_caller_scopes(effective_mappings, user)
+
     rerun_discovery = False
     for field in ("name", "provider_type", "issuer_url", "client_id", "client_type", "scopes", "audience", "group_claim_path", "status"):
         value = getattr(request, field)
@@ -220,6 +235,22 @@ def update_identity_provider(
             if field == "issuer_url" and value != idp.issuer_url:
                 rerun_discovery = True
             setattr(idp, field, value)
+
+    if issuer_changed and request.client_secret is None and idp.client_secret_arn:
+        # The client secret was issued by the old IdP. /api/auth/token (no
+        # auth) posts it to whatever token_endpoint discovery returns for the
+        # new issuer, so it must not follow the move — the same rule as an MCP
+        # server's credentials on an endpoint_url change. Sending the new
+        # secret in the same request is how to move an IdP in one call.
+        try:
+            delete_secret(idp.client_secret_arn, _get_region())
+        except Exception as e:
+            logger.warning("Failed to delete the client secret for IdP %s on issuer change: %s", idp.id, e)
+        idp.client_secret_arn = None
+        logger.warning(
+            "Cleared the client secret for IdP %s: issuer_url changed. Re-enter it for the new issuer.",
+            idp.id,
+        )
 
     if request.client_secret is not None:
         region = _get_region()

@@ -233,9 +233,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   configRef.current = config;
 
   // Process OIDC callback code
-  const handleOIDCCallback = useCallback(async (code: string, cfg: AuthConfig) => {
+  const handleOIDCCallback = useCallback(async (code: string, state: string | null, cfg: AuthConfig) => {
     try {
-      const tokenResponse = await exchangeOIDCCode(code, cfg);
+      const tokenResponse = await exchangeOIDCCode(code, state, cfg);
       const newTokens: AuthTokens = {
         idToken: tokenResponse.id_token,
         accessToken: tokenResponse.access_token,
@@ -294,6 +294,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.history.replaceState({}, "", window.location.pathname);
     } catch (e) {
       console.error("OIDC callback failed:", e);
+      // Drop the unredeemed code and state from the URL; the existing session is left untouched.
+      window.history.replaceState({}, "", window.location.pathname);
     }
   }, []);
 
@@ -323,7 +325,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const params = new URLSearchParams(window.location.search);
         const code = params.get("code");
         if (code && isExternalOIDC(cfg) && window.location.pathname !== "/oauth/link-callback") {
-          void handleOIDCCallback(code, cfg).finally(() => setIsLoading(false));
+          void handleOIDCCallback(code, params.get("state"), cfg).finally(() => setIsLoading(false));
           return;
         }
 

@@ -27,6 +27,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import sys
 import threading
 from typing import Any, AsyncGenerator
@@ -185,6 +186,56 @@ def _ensure_mcp_tools(actor_id: str = ""):
         logger.warning("Failed to attach MCP tools: %s. Will retry on next invocation.", e)
 
 
+# Per-user connector API keys the backend names for an invocation: the current
+# and legacy forms of user_api_key_secret_name in backend/app/services/mcp.py.
+_USER_API_KEY_SECRET_RE = re.compile(r"loom/mcp/[^/]+/(?:user-api-key/e\d+|api-key)/[^/]+")
+
+
+def _resolve_dynamic_auth(server_data: dict[str, Any]) -> tuple[AuthConfig | None, bool]:
+    """Build the auth for a payload-supplied MCP server, or refuse it.
+
+    The backend is not the only caller that can send ``dynamic_mcp_servers``:
+    anyone allowed to invoke the runtime directly can, and the runtime reads
+    the named secret (or mints the named provider's token) with its own role
+    and sends it to the payload's ``endpoint_url``. So an OAuth2 credential
+    provider, or a configured API key secret, is accepted only for the
+    deployed server that owns it, at that server's endpoint, and with the
+    deployed auth settings. The only other secrets a payload may name are
+    per-user connector API keys.
+
+    Returns ``(auth, ok)``; ``ok`` is False when the server must be skipped.
+    """
+    auth_data = server_data.get("auth")
+    if not auth_data:
+        return None, True
+    if not isinstance(auth_data, dict):
+        return None, False
+    auth_type = auth_data.get("type", "")
+    if auth_type not in ("oauth2", "api_key"):
+        # No credential is resolved for any other type.
+        return None, True
+    ref_key = "credential_provider_name" if auth_type == "oauth2" else "credentials_secret_arn"
+    ref = auth_data.get(ref_key, "")
+    endpoint_url = server_data.get("endpoint_url", "")
+    configured = _config.integrations.mcp_servers if _config is not None else []
+    for server in configured:
+        if (
+            ref
+            and server.auth is not None
+            and server.auth.type == auth_type
+            and getattr(server.auth, ref_key) == ref
+            and server.endpoint_url == endpoint_url
+        ):
+            return dataclasses.replace(server.auth), True
+    if auth_type == "api_key" and isinstance(ref, str) and _USER_API_KEY_SECRET_RE.fullmatch(ref):
+        return AuthConfig(
+            type="api_key",
+            credentials_secret_arn=ref,
+            api_key_header_name=auth_data.get("api_key_header_name") or "x-api-key",
+        ), True
+    return None, False
+
+
 def _attach_dynamic_mcp_servers(agent_instance, dynamic_servers: list[dict[str, Any]], actor_id: str, elicitation_callback=None) -> None:
     """Attach dynamically-requested MCP servers for this invocation.
 
@@ -203,19 +254,10 @@ def _attach_dynamic_mcp_servers(agent_instance, dynamic_servers: list[dict[str, 
             logger.debug("Reusing cached dynamic MCP client for '%s'", name)
             continue
 
-        auth_data = server_data.get("auth")
-        auth_config = None
-        if auth_data:
-            auth_config = AuthConfig(
-                type=auth_data.get("type", ""),
-                credentials_secret_arn=auth_data.get("credentials_secret_arn", ""),
-                api_key_header_name=auth_data.get("api_key_header_name", "x-api-key"),
-                well_known_endpoint=auth_data.get("well_known_endpoint", ""),
-                credential_provider_name=auth_data.get("credential_provider_name", ""),
-                scopes=auth_data.get("scopes", ""),
-                delegation_mode=(auth_data.get("delegation_mode") or "m2m").lower(),
-                obo_grant_type=auth_data.get("obo_grant_type", ""),
-            )
+        auth_config, auth_ok = _resolve_dynamic_auth(server_data)
+        if not auth_ok:
+            logger.warning("Skipping dynamic MCP server '%s' — auth is not in the deployed config or a per-user connector key", name)
+            continue
 
         # Skip OAuth2 servers with no usable credentials — they would connect
         # unauthenticated and fail.
@@ -740,19 +782,10 @@ def _attach_dynamic_mcp_servers_ws(
             logger.debug("Reusing cached dynamic MCP client (ws) for '%s'", name)
             continue
 
-        auth_data = server_data.get("auth")
-        auth_config = None
-        if auth_data:
-            auth_config = AuthConfig(
-                type=auth_data.get("type", ""),
-                credentials_secret_arn=auth_data.get("credentials_secret_arn", ""),
-                api_key_header_name=auth_data.get("api_key_header_name", "x-api-key"),
-                well_known_endpoint=auth_data.get("well_known_endpoint", ""),
-                credential_provider_name=auth_data.get("credential_provider_name", ""),
-                scopes=auth_data.get("scopes", ""),
-                delegation_mode=(auth_data.get("delegation_mode") or "m2m").lower(),
-                obo_grant_type=auth_data.get("obo_grant_type", ""),
-            )
+        auth_config, auth_ok = _resolve_dynamic_auth(server_data)
+        if not auth_ok:
+            logger.warning("Skipping dynamic MCP server (ws) '%s' — auth is not in the deployed config or a per-user connector key", name)
+            continue
 
         config = MCPServerConfig(
             name=name,

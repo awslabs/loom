@@ -54,6 +54,11 @@ class TestNameCollisionFailsClosed(unittest.TestCase):
         patcher = patch("boto3.client", return_value=self.client)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # This class is about name collisions; the trusted-discovery gate has
+        # its own test in test_credential_trusted_discovery.py.
+        trust = patch("app.services.credential.verify_trusted_oauth_discovery")
+        trust.start()
+        self.addCleanup(trust.stop)
 
     def _create_oauth2(self, **overrides):
         kwargs = dict(

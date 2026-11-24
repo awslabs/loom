@@ -149,6 +149,19 @@ class TestVendVirtualKey(unittest.TestCase):
 
         self.assertIsNone(vend_virtual_key(1, "agent", ["gpt-4o"], MagicMock()))
 
+    @patch("app.services.net_guard.guarded_post")
+    @patch("app.services.secrets.get_secret")
+    @patch("app.services.litellm._setting")
+    def test_empty_allowlist_refuses_without_calling_proxy(self, mock_setting, mock_get_secret, mock_post):
+        """LiteLLM treats models: [] as all models — never mint an unscoped key."""
+        mock_setting.side_effect = _settings(enabled=True, agent_base_url="https://proxy.example.com")
+        mock_get_secret.return_value = "sk-master"
+
+        for allowed in ([], [""], ["  "], None):
+            with self.subTest(allowed=allowed):
+                self.assertIsNone(vend_virtual_key(1, "agent", allowed, MagicMock()))
+        mock_post.assert_not_called()
+
 
 class TestRevokeVirtualKey(unittest.TestCase):
     @patch("app.services.net_guard.guarded_post")

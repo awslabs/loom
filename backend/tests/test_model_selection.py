@@ -212,6 +212,32 @@ class TestModelSelection(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Invalid model IDs", response.json()["detail"])
 
+    def test_patch_base_url_ignored_for_litellm_agent_without_provider(self):
+        """PATCH with base_url but no provider keeps a LiteLLM agent on the server-resolved URL."""
+        agent = self._create_agent_with_models(allowed_models=["us.anthropic.claude-sonnet-4-6"])
+        entry = self.session.query(ConfigEntry).filter(
+            ConfigEntry.agent_id == agent.id, ConfigEntry.key == "AGENT_CONFIG_JSON"
+        ).one()
+        entry.value = json.dumps({
+            "model_id": "us.anthropic.claude-sonnet-4-6",
+            "provider": "litellm",
+            "base_url": "https://litellm.platform.example",
+        })
+        self.session.commit()
+
+        with patch("app.services.litellm.get_agent_base_url", return_value="https://litellm.platform.example"), \
+             patch("app.services.litellm.vend_virtual_key") as mock_vend:
+            response = self.client.patch(
+                f"/api/agents/{agent.id}",
+                json={"base_url": "https://attacker.example"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        mock_vend.assert_not_called()
+        self.session.refresh(entry)
+        stored = json.loads(entry.value)
+        self.assertEqual(stored["provider"], "litellm")
+        self.assertEqual(stored["base_url"], "https://litellm.platform.example")
+
     # ---- Invoke with model_id ----
 
     def test_invoke_rejects_disallowed_model(self):

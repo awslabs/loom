@@ -2,6 +2,7 @@ import { Children, isValidElement, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { AlertTriangle } from "lucide-react";
 import { extractBulletSection } from "@/lib/skillMd";
+import { MarkdownImage } from "@/components/MarkdownRenderer";
 
 /** Flatten React children (strings and nested elements, e.g. the <strong>
  * markdown produces for **bold** text) into plain text, so callers can
@@ -90,6 +91,7 @@ export function SkillDocument({ body, className }: SkillDocumentProps) {
               })}
             </div>
           ),
+          img: MarkdownImage,
         }}
       >
         {remainingBody}

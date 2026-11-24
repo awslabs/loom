@@ -211,7 +211,17 @@ def vend_virtual_key(
     Returns the virtual key string on success, or None if the proxy isn't
     configured or the request fails — deploy should degrade gracefully
     rather than hard-fail when the LiteLLM proxy integration is optional.
+
+    An empty allowlist is refused (None, without touching the proxy):
+    LiteLLM treats ``models: []`` as "all models", so minting with it would
+    hand the agent an unscoped key.
     """
+    scoped_model_ids = [m for m in (allowed_model_ids or []) if isinstance(m, str) and m.strip()]
+    if not scoped_model_ids:
+        logger.warning(
+            "Refusing to vend LiteLLM virtual key for agent %s: empty model allowlist", agent_id
+        )
+        return None
     config = get_litellm_proxy_config(db)
     if config is None:
         logger.warning("Cannot vend LiteLLM virtual key for agent %s: no proxy configured", agent_id)
@@ -228,7 +238,7 @@ def vend_virtual_key(
             proxy_endpoint(base_url, "/key/generate"),
             headers={"Authorization": f"Bearer {master_key}"},
             json={
-                "models": allowed_model_ids,
+                "models": scoped_model_ids,
                 "key_alias": key_alias,
                 "metadata": {"loom_agent_id": agent_id, "loom_agent_name": agent_name},
             },

@@ -141,10 +141,21 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
+              # AgentCore Identity keeps each credential provider's client
+              # secret / API key in Secrets Manager under
+              # "bedrock-agentcore-identity!default/{oauth2,apikey}/<provider>".
+              # A bare "bedrock-agentcore-identity!*" let this role read the raw
+              # secret of every provider in the account, bypassing the per-agent
+              # token-vault scoping above. Agent code never reads these secrets
+              # by name; AgentCore reads its own provider's secret on the role's
+              # behalf during GetResourceOauth2Token / GetResourceApiKey, so the
+              # grant stays but is scoped to the same "loom-${pAgentName}-*"
+              # provider names as the token vault.
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource:
-                  - !Sub "arn:aws:secretsmanager:${pAgentCoreRegions}:${AWS::AccountId}:secret:bedrock-agentcore-identity!*"
+                  - !Sub "arn:aws:secretsmanager:${pAgentCoreRegions}:${AWS::AccountId}:secret:bedrock-agentcore-identity!default/oauth2/loom-${pAgentName}-*"
+                  - !Sub "arn:aws:secretsmanager:${pAgentCoreRegions}:${AWS::AccountId}:secret:bedrock-agentcore-identity!default/apikey/loom-${pAgentName}-*"
                   - !Sub "arn:aws:secretsmanager:${pAgentCoreRegions}:${AWS::AccountId}:secret:loom/agents/${pAgentName}*"
                   - !Sub "arn:aws:secretsmanager:${pAgentCoreRegions}:${AWS::AccountId}:secret:loom/agents/harness_${pAgentName}*"
         - PolicyName: observability
@@ -193,12 +204,14 @@ Resources:
             PolicyDocument:
               Version: "2012-10-17"
               Statement:
+                # Session actions only: the backend creates and deletes each
+                # agent's interpreter with its own credentials. Custom
+                # interpreters are scoped to this role's agent-name prefix
+                # (Loom names them loom_ci_<agent>_<hex>), so a runtime can't
+                # list, run code in, or delete another prefix's interpreter.
                 - Effect: Allow
                   Action:
-                    - bedrock-agentcore:CreateCodeInterpreter
-                    - bedrock-agentcore:DeleteCodeInterpreter
                     - bedrock-agentcore:GetCodeInterpreter
-                    - bedrock-agentcore:ListCodeInterpreters
                     - bedrock-agentcore:StartCodeInterpreterSession
                     - bedrock-agentcore:StopCodeInterpreterSession
                     - bedrock-agentcore:InvokeCodeInterpreter
@@ -207,7 +220,7 @@ Resources:
                   Resource:
                     - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:aws:code-interpreter/*"
                     - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:code-interpreter/*"
-                    - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:code-interpreter-custom/*"
+                    - !Sub "arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:code-interpreter-custom/loom_ci_${pAgentName}_*"
           - !Ref AWS::NoValue
 
 Outputs:

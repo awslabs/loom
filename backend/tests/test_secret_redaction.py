@@ -103,6 +103,9 @@ class TestCredentialProviderScrubsItsError(unittest.TestCase):
         sleep = patch("time.sleep")
         sleep.start()
         self.addCleanup(sleep.stop)
+        trust = patch("app.services.credential.verify_trusted_oauth_discovery")
+        trust.start()
+        self.addCleanup(trust.stop)
 
     def test_oauth2_client_secret_is_scrubbed(self) -> None:
         self.client.create_oauth2_credential_provider.side_effect = Exception(

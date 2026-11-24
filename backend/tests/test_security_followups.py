@@ -128,9 +128,17 @@ class TestIdpIssuerSwap(_ApiCase):
             resp = self.client.put(f"/api/settings/identity-providers/{idp_id}", json=body)
         return resp, delete_secret, store_secret
 
+    def _as_idp_admin(self) -> None:
+        # IdP writes need admin:write. Pair it with a security admin's scopes
+        # rather than using SUPER, so the mapping re-check still has scopes
+        # to refuse.
+        user = UserInfo(sub="sub-alice", username="alice@example.com", groups=SECURITY_ADMIN,
+                        scopes=derive_scopes(SECURITY_ADMIN) | {"admin:read", "admin:write"})
+        app.dependency_overrides[get_current_user] = lambda: user
+
     def test_issuer_only_change_cannot_keep_a_super_admin_mapping(self) -> None:
         idp = self._idp({"Admins": ["t-admin", "g-admins-super"]})
-        self._as(SECURITY_ADMIN)
+        self._as_idp_admin()
         resp, delete_secret, _ = self._put(idp.id, {"issuer_url": "https://attacker.example.com"})
         self.assertEqual(resp.status_code, 403, resp.text)
         self.db.refresh(idp)
@@ -143,7 +151,7 @@ class TestIdpIssuerSwap(_ApiCase):
         # at a claim the caller controls (an app role, a profile field) would hand
         # that mapping to whoever can put "Admins" in it.
         idp = self._idp({"Admins": ["t-admin", "g-admins-super"]})
-        self._as(SECURITY_ADMIN)
+        self._as_idp_admin()
         resp, _, _ = self._put(idp.id, {"group_claim_path": "roles"})
         self.assertEqual(resp.status_code, 403, resp.text)
         self.db.refresh(idp)
@@ -151,7 +159,7 @@ class TestIdpIssuerSwap(_ApiCase):
 
     def test_issuer_change_clears_the_client_secret(self) -> None:
         idp = self._idp({"Users": ["t-user"]})
-        self._as(SECURITY_ADMIN)
+        self._as_idp_admin()
         resp, delete_secret, _ = self._put(idp.id, {"issuer_url": "https://new.example.com"})
         self.assertEqual(resp.status_code, 200, resp.text)
         self.db.refresh(idp)
@@ -161,7 +169,7 @@ class TestIdpIssuerSwap(_ApiCase):
 
     def test_new_secret_in_the_same_request_is_kept(self) -> None:
         idp = self._idp({"Users": ["t-user"]})
-        self._as(SECURITY_ADMIN)
+        self._as_idp_admin()
         resp, delete_secret, store_secret = self._put(
             idp.id, {"issuer_url": "https://new.example.com", "client_secret": "new-secret"},
         )
@@ -179,7 +187,7 @@ class TestIdpIssuerSwap(_ApiCase):
 
     def test_unchanged_issuer_keeps_the_secret(self) -> None:
         idp = self._idp({"Admins": ["t-admin", "g-admins-super"]})
-        self._as(SECURITY_ADMIN)
+        self._as_idp_admin()
         resp, delete_secret, _ = self._put(idp.id, {"issuer_url": "https://old.example.com", "scopes": "openid"})
         self.assertEqual(resp.status_code, 200, resp.text)
         self.db.refresh(idp)
@@ -332,6 +340,27 @@ class TestSessionOwnerOnLogsAndTraces(_ApiCase):
         app.dependency_overrides[get_current_user] = lambda: user
         resp = self.client.get(f"/api/agents/{self.agent.id}/evaluations/traces/{TRACE_ID}/exchange")
         self.assertEqual(resp.status_code, 403, resp.text)
+
+    def test_eval_results_only_carry_readable_sessions(self) -> None:
+        def record(session_id: str) -> dict:
+            return {"session_id": session_id, "trace_id": f"t-{session_id}", "trace_time": None,
+                    "evaluated_at": None, "evaluator": "Builtin.Helpfulness", "value": 0.5,
+                    "label": "Fair", "explanation": f"judge on {session_id}", "level": "Trace"}
+
+        records = [record("bob-sess"), record("alice-sess"), record("unknown-sess")]
+        params = {"source_type": "online", "source_id": "cfg-1"}
+        seen: dict[str, set] = {}
+        for name, groups in (("user", DEMO_USER), ("admin", DEMO_ADMIN)):
+            self._as(groups)
+            with patch("app.routers.evaluations.evals.resolve_results_location", return_value=MagicMock()), \
+                    patch("app.routers.evaluations.evals.read_results", return_value=(records, False)):
+                resp = self.client.get(f"/api/agents/{self.agent.id}/evaluations/results", params=params)
+            self.assertEqual(resp.status_code, 200, resp.text)
+            seen[name] = {t["session_id"] for t in resp.json()["results"]}
+            if name == "user":
+                self.assertNotIn("judge on bob-sess", resp.text)
+        self.assertEqual(seen["user"], {"alice-sess"})
+        self.assertEqual(seen["admin"], {"bob-sess", "alice-sess", "unknown-sess"})
 
     def test_agent_wide_logs_are_admin_only(self) -> None:
         with patch("app.routers.logs.list_log_streams", return_value=[{"name": "s", "last_event_time": 1}]), \

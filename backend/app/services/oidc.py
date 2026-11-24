@@ -18,8 +18,9 @@ def require_https_endpoint(field: str, value: str) -> str:
     """Reject a discovery endpoint that is not an absolute https:// URL.
 
     The discovery document is attacker-influenced: registering an authorizer
-    or identity provider takes `security:write`, and the document itself is
-    served by whatever host that URL points at. Three of its fields are used
+    takes `security:write` (an identity provider, `admin:write`), and the
+    document itself is served by whatever host that URL points at. Three of
+    its fields are used
     as URLs afterwards, and `authorization_endpoint` is the dangerous one —
     it is concatenated into `authorize_url` and handed to the SPA, which
     assigns it to `window.location.href`. A `javascript:` URL there executes

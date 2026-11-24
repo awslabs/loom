@@ -1,5 +1,6 @@
 """Shared utilities for router modules."""
 from fastapi import HTTPException, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.dependencies.auth import UserInfo
@@ -156,6 +157,27 @@ def assert_trace_session_readable(agent, session_id: str | None, db: Session, us
             detail="You do not have access to this trace",
         )
     assert_session_readable(session, user, agent)
+
+
+def readable_session_ids(agent, db: Session, user: UserInfo) -> set[str] | None:
+    """Session ids on this agent whose content the caller may read, or None for an admin (all).
+
+    The list counterpart of assert_trace_session_readable, for views that
+    carry a session id on every row and so can be filtered rather than
+    refused: a row whose session id isn't in the set belongs to another user,
+    or can't be tied to a session at all, and is dropped. Same rule as
+    assert_session_readable: the caller's own sessions, and unowned ones.
+    """
+    from app.models.session import InvocationSession
+
+    if "t-admin" in user.groups:
+        return None
+    rows = db.query(InvocationSession.session_id).filter(
+        InvocationSession.agent_id == agent.id,
+        or_(InvocationSession.user_id.is_(None), InvocationSession.user_id == "",
+            InvocationSession.user_id == user.username),
+    ).all()
+    return {sid for (sid,) in rows}
 
 
 def visible_agent_ids(db: Session, user: UserInfo) -> list[int] | None:

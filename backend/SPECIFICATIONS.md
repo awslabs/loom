@@ -631,7 +631,7 @@ The `model_id` field is optional on registration and stored as an `AGENT_CONFIG_
 | `mcp_servers` | MCP server configuration (stored in `AGENT_CONFIG_JSON` as `integrations.mcp_servers`) |
 | `a2a_agents` | A2A agent IDs to integrate (from A2A catalog) |
 | `tags` | Build-time tag values (e.g., `{"team": "aws", "owner": "heeki"}`) |
-| `harness_tools` | Custom tool definitions for harness deployment (optional) |
+| `harness_tools` | Extra harness tools (optional). Only `inline_function` entries (`{name, type, config: {inlineFunction}}`) are accepted; `remote_mcp` and code-interpreter tools are built server-side from bound records |
 | `harness_max_iterations` | Maximum iterations for harness agent loop (optional) |
 | `harness_timeout_seconds` | Timeout in seconds for harness invocations (optional) |
 | `harness_max_tokens` | Maximum tokens for harness model output (optional) |
@@ -1703,10 +1703,10 @@ Stores OIDC identity provider configurations. Columns include `name`, `provider_
 | `GET` | `/api/settings/identity-providers/{id}` | Get a specific identity provider |
 | `PUT` | `/api/settings/identity-providers/{id}` | Update an identity provider configuration |
 | `DELETE` | `/api/settings/identity-providers/{id}` | Delete an identity provider configuration |
-| `POST` | `/api/settings/identity-providers/discover` | Run OIDC discovery against a well-known URL |
-| `POST` | `/api/settings/identity-providers/{id}/test-discovery` | Test discovery for an existing provider |
+| `GET` | `/api/settings/identity-providers/{id}/discover` | Re-run OIDC discovery for an existing provider and update its cached endpoints |
+| `POST` | `/api/settings/identity-providers/test-discovery` | Test OIDC discovery for an issuer URL without saving anything |
 
-Scope enforcement: `security:read` for GET, `security:write` for POST/PUT/DELETE.
+Scope enforcement: `security:read` for the list and get routes; `admin:write` for create, update, delete, `discover` and `test-discovery`. The active provider is the login IdP for the whole platform: the unauthenticated `GET /api/auth/config` sends every user, super-admins included, to its `authorization_endpoint`. Creating, activating, repointing or deleting a provider is therefore a platform-global change, gated like the other platform settings in `routers/settings.py`. `g-admins-security` (`security:write` without `admin:write`) can view providers but not change them.
 
 ### OIDC Discovery Service (`services/oidc.py`)
 
@@ -1727,7 +1727,7 @@ External IdPs use different claim names and group identifiers. The `group_mappin
 - The `group_mapping` JSON dict maps external group names/IDs to Loom group names (e.g., `{"EntraAdmins": "g-admins-super", "EntraUsers": "g-users-demo"}`).
 - Unmapped groups are ignored. Users with no mapped groups receive no scopes (same as an unrecognized Cognito group).
 
-**Self-escalation guard on `group_mappings` writes:** `security:write` alone is enough to create/update an identity provider, and the mapping table names arbitrary Loom groups with no restriction on which ones — so without a check, a security-scoped admin (`g-admins-security`: `security:read/write`, `tagging:read` only) could map an external group they control to `g-admins-super` and, by authenticating through that IdP, obtain every scope in the system including `admin:write`. `routers/identity_providers.py`'s `_assert_group_mappings_within_caller_scopes()` closes this: on `create`/`update`, every Loom group named anywhere in `group_mappings`' values is resolved via `derive_scopes()`, and the request is rejected (403) if that union grants any scope the calling admin doesn't already hold — the general "no delegation beyond what you hold" rule, not a hardcoded reserved-group denylist, so it also blocks mapping to e.g. `g-admins-mcp` (which a security admin doesn't hold `mcp:write` for either). A genuine super-admin (holding every scope) is unaffected. Type groups (`t-admin`/`t-user`, which grant no scopes) and mapping to one's own group are always allowed.
+**Self-escalation guard on `group_mappings` writes:** identity provider writes were originally gated on `security:write` alone (they now need `admin:write`, see above), and the mapping table names arbitrary Loom groups with no restriction on which ones — so without a check, a security-scoped admin (`g-admins-security`: `security:read/write`, `tagging:read` only) could map an external group they control to `g-admins-super` and, by authenticating through that IdP, obtain every scope in the system including `admin:write`. `routers/identity_providers.py`'s `_assert_group_mappings_within_caller_scopes()` closes this: on `create`/`update`, every Loom group named anywhere in `group_mappings`' values is resolved via `derive_scopes()`, and the request is rejected (403) if that union grants any scope the calling admin doesn't already hold — the general "no delegation beyond what you hold" rule, not a hardcoded reserved-group denylist, so it also blocks mapping to e.g. `g-admins-mcp` (which a security admin doesn't hold `mcp:write` for either). A genuine super-admin (holding every scope) is unaffected. Group names also confer `loom:group` reach on their own (`t-admin`, `g-admins-<x>`, `g-users-<x>`, many of which grant no scopes), so a caller outside `g-admins-super` may additionally map only groups they already belong to, compared verbatim; `t-user` is always allowed. With writes on `admin:write`, which only `g-admins-super` holds today, both checks are defense in depth for any future role that holds `admin:write` without super-admin membership.
 
 **Empty mapping tables fail closed.** The guard above covers the mapping *table*, and was bypassable by never putting the group name in the table at all. `_build_user_from_external_claims()` used to read an empty or missing table as "no restrictions configured, trust the IdP" and copy the raw `groups` claim straight through as Loom group names. Because that token is signed by whoever controls the IdP, the claim is attacker-controlled — so a caller holding only `security:write` could create a provider with mappings omitted (or `PUT {"group_mappings": {}}`, which skipped the guard's truthiness check while the persist ran on `is not None`), mint a JWT claiming `g-admins-super`, and authenticate with every scope including `admin:write`.
 

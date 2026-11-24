@@ -1,5 +1,6 @@
 import { apiFetch, getBaseUrl } from "./client";
 import { assertHttpsUrl, navigateToExternal } from "@/lib/navigation";
+import { checkOIDCCallback } from "@/lib/oidcCallback";
 
 export interface AuthConfig {
   provider_type?: string;
@@ -227,10 +228,24 @@ export async function startOIDCLogin(config: AuthConfig): Promise<void> {
 
 export async function exchangeOIDCCode(
   code: string,
+  returnedState: string | null,
   config: AuthConfig,
 ): Promise<OIDCTokenResponse> {
-  const codeVerifier = sessionStorage.getItem("oidc_code_verifier") || "";
+  // The pending sign-in is single-use: read it and clear it before anything
+  // else, so a replayed or repeated callback finds nothing to redeem against.
+  const storedState = sessionStorage.getItem("oidc_state");
+  const storedVerifier = sessionStorage.getItem("oidc_code_verifier");
   const redirectUri = sessionStorage.getItem("oidc_redirect_uri") || `${window.location.origin}/oauth/callback`;
+  sessionStorage.removeItem("oidc_code_verifier");
+  sessionStorage.removeItem("oidc_redirect_uri");
+  sessionStorage.removeItem("oidc_state");
+
+  // Only redeem a code that answers a sign-in this tab started (login CSRF).
+  const check = checkOIDCCallback(returnedState, storedState, storedVerifier);
+  if (!check.ok) {
+    throw new Error(`OIDC callback rejected: ${check.reason}`);
+  }
+  const codeVerifier = check.codeVerifier;
 
   let response: Response;
 
@@ -264,11 +279,6 @@ export async function exchangeOIDCCode(
     const text = await response.text();
     throw new Error(`Token exchange failed: ${text}`);
   }
-
-  // Clean up PKCE state
-  sessionStorage.removeItem("oidc_code_verifier");
-  sessionStorage.removeItem("oidc_redirect_uri");
-  sessionStorage.removeItem("oidc_state");
 
   return response.json() as Promise<OIDCTokenResponse>;
 }

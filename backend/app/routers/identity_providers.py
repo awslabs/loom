@@ -75,15 +75,31 @@ def _run_discovery(idp: IdentityProvider) -> None:
 def _assert_group_mappings_within_caller_scopes(group_mappings: dict[str, list[str]], caller: UserInfo) -> None:
     """Reject an IdP group-mapping table that would grant scopes the caller doesn't have.
 
-    security:write alone lets an admin configure an IdP's external->internal
-    group mapping; without this check, that admin could map an attacker-
-    controlled external group name to a reserved group like g-admins-super
+    IdP writes need admin:write, which only g-admins-super holds today, so
+    this is defense in depth: should that scope ever be granted to another
+    group, an admin who can configure an IdP's external->internal group
+    mapping could otherwise map an attacker-controlled external group name
+    to a reserved group like g-admins-super
     and self-escalate to full admin:write on next login through that IdP.
     Applying the same "no delegation beyond what you hold" rule the rest of
     the scope model uses closes this for every target group, not just the
     reserved ones, since e.g. mapping to g-admins-mcp would equally grant
-    mcp:write the caller doesn't have. Unrecognized group names (not in
-    GROUP_SCOPES) grant no scopes on their own, so they're never blocked.
+    mcp:write the caller doesn't have.
+
+    Scopes are only half of what a group name confers: t-admin and
+    g-admins-<x> / g-users-<x> also decide which loom:group tags the user
+    can reach (caller_group_tags), and most of those names are not in
+    GROUP_SCOPES, so derive_scopes() sees nothing to compare. A
+    security:write admin could map their external group to
+    [t-admin, g-admins-security, g-admins-test] and reach the test group's
+    authorizers and credentials. So, unless the caller is a super-admin
+    (member of g-admins-super), every target must also be a group the caller
+    already holds, compared verbatim so case/whitespace variants are not
+    laundered. The exemption keys on group membership rather than the
+    admin:write scope: IdP writes already require admin:write, so a scope
+    exemption would switch this check off for every caller who can reach it.
+    t-user is the one exception: it grants no scopes and no loom:group, and
+    only narrows the UI and listings, so mapping it delegates nothing.
     """
     target_groups = {g for mapped in group_mappings.values() for g in mapped}
     if not target_groups:
@@ -96,6 +112,17 @@ def _assert_group_mappings_within_caller_scopes(group_mappings: dict[str, list[s
             detail=(
                 "Group mapping would grant scopes you don't have: "
                 f"{', '.join(sorted(excess))}"
+            ),
+        )
+    if "g-admins-super" in caller.groups:
+        return
+    unheld = target_groups - set(caller.groups) - {"t-user"}
+    if unheld:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Group mapping names groups you are not a member of: "
+                f"{', '.join(sorted(unheld))}"
             ),
         )
 
@@ -113,12 +140,20 @@ def _enforce_single_active(db: Session, new_idp_id: int | None, new_status: str)
 
 # ---------------------------------------------------------------------------
 # CRUD endpoints
+#
+# Writes need admin:write rather than security:write. The active IdP is the
+# login provider for the whole platform: the unauthenticated /api/auth/config
+# sends every user, super-admins included, to its authorization_endpoint, so
+# whoever can create, activate, repoint or delete one can phish or lock out
+# every account. That makes it a platform-global setting like the rest of
+# routers/settings.py. g-admins-security (security:write, no admin:write) can
+# still read providers. The discovery routes follow the write scope.
 # ---------------------------------------------------------------------------
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_identity_provider(
     request: CreateIdPRequest,
-    user: UserInfo = Depends(require_scopes("security:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> dict:
     existing = db.query(IdentityProvider).filter(IdentityProvider.name == request.name).first()
@@ -201,7 +236,7 @@ def get_identity_provider(
 def update_identity_provider(
     idp_id: int,
     request: UpdateIdPRequest,
-    user: UserInfo = Depends(require_scopes("security:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> dict:
     idp = db.query(IdentityProvider).filter(IdentityProvider.id == idp_id).first()
@@ -296,7 +331,7 @@ def update_identity_provider(
 @router.delete("/{idp_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_identity_provider(
     idp_id: int,
-    user: UserInfo = Depends(require_scopes("security:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> None:
     idp = db.query(IdentityProvider).filter(IdentityProvider.id == idp_id).first()
@@ -319,7 +354,7 @@ def delete_identity_provider(
 @router.get("/{idp_id}/discover")
 def discover_identity_provider(
     idp_id: int,
-    user: UserInfo = Depends(require_scopes("security:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
     db: Session = Depends(get_db),
 ) -> dict:
     """Re-fetch OIDC discovery metadata for an IdP."""
@@ -341,7 +376,7 @@ def discover_identity_provider(
 @router.post("/test-discovery")
 def test_discovery(
     body: dict,
-    user: UserInfo = Depends(require_scopes("security:write")),
+    user: UserInfo = Depends(require_scopes("admin:write")),
 ) -> dict:
     """Test OIDC discovery for a given issuer URL without saving anything."""
     issuer_url = body.get("issuer_url", "")

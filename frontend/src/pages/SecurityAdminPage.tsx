@@ -8,7 +8,7 @@ import type { AgentResponse } from "@/api/types";
 
 type SecurityTab = "identity" | "roles" | "authorizers" | "approvals";
 
-export function SecurityAdminPage({ readOnly, agents = [] }: { readOnly?: boolean; agents?: AgentResponse[] }) {
+export function SecurityAdminPage({ readOnly, canEditIdentityProviders = false, agents = [] }: { readOnly?: boolean; canEditIdentityProviders?: boolean; agents?: AgentResponse[] }) {
   const [activeTab, setActiveTab] = useState<SecurityTab>("identity");
   const [counts, setCounts] = useState<Partial<Record<SecurityTab, number>>>({});
 
@@ -40,7 +40,7 @@ export function SecurityAdminPage({ readOnly, agents = [] }: { readOnly?: boolea
           ))}
         </TabsList>
 
-        <TabsContent value="identity" className="pt-4"><IdentityProviderPanel readOnly={readOnly} onCountChange={setCount("identity")} /></TabsContent>
+        <TabsContent value="identity" className="pt-4"><IdentityProviderPanel readOnly={readOnly || !canEditIdentityProviders} onCountChange={setCount("identity")} /></TabsContent>
         <TabsContent value="roles" className="pt-4"><RoleManagementPanel readOnly={readOnly} agents={agents} onCountChange={setCount("roles")} /></TabsContent>
         <TabsContent value="authorizers" className="pt-4"><AuthorizerManagementPanel readOnly={readOnly} onCountChange={setCount("authorizers")} /></TabsContent>
         <TabsContent value="approvals" className="pt-4"><ApprovalPolicyPanel readOnly={readOnly} onCountChange={setCount("approvals")} /></TabsContent>

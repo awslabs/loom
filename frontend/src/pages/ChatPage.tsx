@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import ReactMarkdown from "react-markdown";
 import { CollapsibleJsonBlock } from "@/components/CollapsibleJsonBlock";
+import { MarkdownImage } from "@/components/MarkdownRenderer";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 import { listAgents, fetchModels, fetchLitellmModels } from "@/api/agents";
@@ -1109,6 +1110,7 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
                             pre: ({ children }) => <pre className="mb-2 overflow-x-auto rounded bg-black/10 dark:bg-white/10 p-3 text-xs font-mono">{children}</pre>,
                             strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
                             a: ({ href, children }) => <a href={href} className="underline underline-offset-2 hover:opacity-80" target="_blank" rel="noopener noreferrer">{children}</a>,
+                            img: MarkdownImage,
                           }}>{queuedPrompt}</ReactMarkdown>
                           <button
                             onClick={() => setQueuedPrompt(null)}
@@ -1610,6 +1612,7 @@ function StreamingBubble({
                     a: ({ href, children }) => (
                       <a href={href} className="underline underline-offset-2 hover:opacity-80" target="_blank" rel="noopener noreferrer">{children}</a>
                     ),
+                    img: MarkdownImage,
                   }}
                 >
                   {seg.content}
@@ -1748,6 +1751,7 @@ function MessageBubble({
                   {children}
                 </a>
               ),
+              img: MarkdownImage,
             }}
           >
             {text}

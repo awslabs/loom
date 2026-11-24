@@ -201,6 +201,100 @@ class TestInvocationsRouter(unittest.TestCase):
             "Bearer updated-user-key",
         )
 
+    @patch("app.services.mcp._get_oauth2_token")
+    @patch("app.routers.invocations.get_log_events", return_value=[])
+    @patch("app.routers.invocations.parse_agent_start_time", return_value=None)
+    @patch("app.routers.invocations.compute_cold_start")
+    @patch("app.routers.invocations.derive_log_group")
+    @patch("app.routers.invocations.invoke_harness_stream")
+    @patch("app.routers.invocations.compute_client_duration", return_value=100.0)
+    def test_harness_oauth2_token_not_minted_for_a_reused_server_name(
+        self,
+        _mock_duration,
+        mock_invoke_harness,
+        _mock_derive_log_group,
+        _mock_compute_cold_start,
+        _mock_parse_agent_start,
+        _mock_get_log_events,
+        mock_get_oauth2_token,
+    ):
+        """A server name re-registered elsewhere must not get its token sent to this agent's tool.
+
+        The harness config references MCP servers by name. Group A deploys
+        against "shared_mcp" at its own URL, deletes that server, and group B
+        later registers the same name at B's endpoint. Invoking A's agent must
+        not mint B's client-credentials token for the URL frozen in A's
+        config, because B's live endpoint isn't the one A deployed against.
+        """
+        self.agent.source = "harness"
+        self.agent.harness_id = "h-test"
+        self.agent.arn = "arn:aws:bedrock-agentcore:us-east-1:123456789012:harness/h-test"
+        self.agent.set_tags({"loom:group": "group-a"})
+
+        own = McpServer(
+            name="own_mcp",
+            endpoint_url="https://a.example.com/mcp",
+            transport_type="streamable_http",
+            status="active",
+            auth_type="oauth2",
+            delegation_mode="m2m",
+        )
+        own.set_tags({"loom:group": "group-a"})
+        other = McpServer(
+            name="shared_mcp",
+            endpoint_url="https://b.example.com/mcp",
+            transport_type="streamable_http",
+            status="active",
+            auth_type="oauth2",
+            delegation_mode="m2m",
+        )
+        other.set_tags({"loom:group": "group-b"})
+        self.session.add_all([own, other])
+        self.session.flush()
+        self.session.add(ConfigEntry(
+            agent_id=self.agent.id,
+            key="AGENT_CONFIG_JSON",
+            value=json.dumps({
+                "model_id": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+                "harness_config": {
+                    "tools": [
+                        {"type": "remote_mcp", "name": "own_mcp",
+                         "config": {"remoteMcp": {"url": "https://a.example.com/mcp"}}},
+                        {"type": "remote_mcp", "name": "shared_mcp",
+                         "config": {"remoteMcp": {"url": "https://attacker.example.com/mcp"}}},
+                    ],
+                },
+                "integrations": {
+                    "mcp_servers": [
+                        {"name": "own_mcp", "endpoint_url": "https://a.example.com/mcp", "auth_type": "oauth2"},
+                        {"name": "shared_mcp", "endpoint_url": "https://attacker.example.com/mcp", "auth_type": "oauth2"},
+                    ],
+                },
+            }),
+            source="env_var",
+        ))
+        self.session.commit()
+        mock_get_oauth2_token.side_effect = lambda server: f"token-for-{server.name}"
+        mock_invoke_harness.return_value = iter([{"type": "text", "content": "ok"}])
+
+        response = self.client.post(
+            f"/api/agents/{self.agent.id}/invoke",
+            json={"prompt": "hi", "qualifier": "DEFAULT"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        tools = {t["name"]: t for t in mock_invoke_harness.call_args.kwargs["tools"]}
+        self.assertEqual(
+            tools["own_mcp"]["config"]["remoteMcp"]["headers"]["Authorization"],
+            "Bearer token-for-own_mcp",
+        )
+        self.assertNotIn(
+            "Authorization",
+            tools["shared_mcp"]["config"]["remoteMcp"].get("headers") or {},
+        )
+        minted_for = [c.args[0].name for c in mock_get_oauth2_token.call_args_list if c.args]
+        self.assertNotIn("shared_mcp", minted_for)
+
     def test_invoke_agent_invalid_qualifier(self):
         """Test invoking with an invalid qualifier."""
         response = self.client.post(

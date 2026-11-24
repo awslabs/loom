@@ -182,6 +182,15 @@ global_settings:
     - path: backend/tests/test_invocations.py
       rule_id: SECRET-SECRET-KEYWORD
       reason: Field name ("api_key_header_name") configuring which HTTP header carries an API key, not a secret value.
+    - path: agents/strands_agent/tests/test_handler.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Fake Secrets Manager paths (credentials_secret_arn) and the api_key_header_name field name, used to prove the runtime refuses payload-chosen secrets; no secret values.
+    - path: backend/tests/test_credential_trusted_discovery.py
+      rule_id: SECRET-SECRET-KEYWORD
+      reason: Placeholder client_secret ("SECRET") passed to a mocked credential-provider call to prove an untrusted token endpoint is refused; not a real secret.
+    - path: frontend/tests/oidcCallback.test.ts
+      rule_id: SECRET-HEX-HIGH-ENTROPY-STRING
+      reason: Fixed hex OIDC state value used to test the login-CSRF state check; not a secret.
 fail_on_findings: true
 ash_plugin_modules: []
 external_reports_to_include: []

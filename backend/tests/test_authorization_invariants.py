@@ -828,3 +828,41 @@ class TestServerSuppliedUrlsAreGuarded(unittest.TestCase):
             text = path.read_text()
             self.assertNotIn("urlTransform", text, f"{path.name} overrides react-markdown's URL sanitiser")
             self.assertNotIn("dangerouslySetInnerHTML", text, f"{path.name} injects raw HTML")
+
+
+ROLE_TEMPLATE = APP_DIR.parent.parent / "shared" / "iac" / "role.yaml"
+
+
+class TestRuntimeRoleCodeInterpreterScope(unittest.TestCase):
+    """The agent runtime role reaches only its own prefix's custom interpreters.
+
+    The backend creates and deletes each agent's interpreter with its own
+    credentials, named loom_ci_<agent>_<hex>. A bare code-interpreter-custom/*
+    grant, plus Create/Delete/List, let any compromised runtime enumerate,
+    run code in, or delete another group's interpreter.
+    """
+
+    def _statements(self) -> list[dict]:
+        role = _load_cfn_template(ROLE_TEMPLATE)["Resources"]["AgentRole"]["Properties"]
+        statements: list[dict] = []
+        for entry in role["Policies"]:
+            # Conditional policies are [condition, policy, AWS::NoValue].
+            policies = entry if isinstance(entry, list) else [entry]
+            for policy in policies:
+                if isinstance(policy, dict) and policy.get("PolicyName") == "code-interpreter":
+                    statements.extend(policy["PolicyDocument"]["Statement"])
+        self.assertTrue(statements, "code-interpreter policy not found in role.yaml")
+        return statements
+
+    def test_custom_interpreters_scoped_to_agent_name_prefix(self) -> None:
+        resources = [r for s in self._statements() for r in s["Resource"]]
+        custom = [r for r in resources if "code-interpreter-custom/" in r]
+        self.assertEqual(
+            custom,
+            ["arn:aws:bedrock-agentcore:${pAgentCoreRegions}:${AWS::AccountId}:code-interpreter-custom/loom_ci_${pAgentName}_*"],
+        )
+
+    def test_runtime_role_has_no_interpreter_lifecycle_actions(self) -> None:
+        actions = {a for s in self._statements() for a in s["Action"]}
+        for lifecycle in ("CreateCodeInterpreter", "DeleteCodeInterpreter", "ListCodeInterpreters"):
+            self.assertNotIn(f"bedrock-agentcore:{lifecycle}", actions)

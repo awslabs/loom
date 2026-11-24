@@ -470,6 +470,8 @@ def update_mcp_server(
             ("current", admin_api_key_secret_name(server.id)),
             ("legacy", legacy_admin_api_key_secret_name(previous_name)),
         ):
+            if secret_name is None:
+                continue  # a name that could alias an id-keyed path
             try:
                 delete_secret(secret_name, region)
             except Exception as e:
@@ -516,6 +518,8 @@ def delete_mcp_server(
             # Servers created before the migration may still have theirs here.
             ("legacy", legacy_admin_api_key_secret_name(server.name)),
         ):
+            if secret_name is None:
+                continue  # a name that could alias an id-keyed path
             try:
                 delete_secret(secret_name, region)
             except Exception as e:

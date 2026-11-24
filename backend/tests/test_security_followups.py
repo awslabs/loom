@@ -38,7 +38,7 @@ from app.models.identity_provider import IdentityProvider
 from app.models.integration import Integration
 from app.models.mcp import McpServer
 from app.models.session import InvocationSession
-from app.services.mcp import resolve_api_key, user_api_key_secret_name
+from app.services.mcp import resolve_api_key, resolve_oauth2_client_secret, user_api_key_secret_name
 
 SUPER = ["t-admin", "g-admins-super"]
 DEMO_ADMIN = ["t-admin", "g-admins-demo"]
@@ -137,6 +137,17 @@ class TestIdpIssuerSwap(_ApiCase):
         self.assertEqual(idp.issuer_url, "https://old.example.com")
         self.assertIsNotNone(idp.client_secret_arn)
         delete_secret.assert_not_called()
+
+    def test_group_claim_change_cannot_rebind_a_super_admin_mapping(self) -> None:
+        # The stored table maps "Admins" to super-admin; pointing group_claim_path
+        # at a claim the caller controls (an app role, a profile field) would hand
+        # that mapping to whoever can put "Admins" in it.
+        idp = self._idp({"Admins": ["t-admin", "g-admins-super"]})
+        self._as(SECURITY_ADMIN)
+        resp, _, _ = self._put(idp.id, {"group_claim_path": "roles"})
+        self.assertEqual(resp.status_code, 403, resp.text)
+        self.db.refresh(idp)
+        self.assertIsNone(idp.group_claim_path)
 
     def test_issuer_change_clears_the_client_secret(self) -> None:
         idp = self._idp({"Users": ["t-user"]})
@@ -511,6 +522,26 @@ class TestLegacyOauthSecretDoesNotFollowAMove(_ApiCase):
         self.db.refresh(server)
         self.assertEqual(server.oauth2_client_secret, "plaintext")
         delete_secret.assert_not_called()
+
+    def test_cleared_flag_ignores_a_secret_still_cached_by_another_task(self) -> None:
+        """After a move the row says has_oauth2_secret="false", but another
+        task's get_secret cache can still hold the old value for five minutes.
+        The resolver must take the row's word for it."""
+        moved = [
+            McpServer(id=41, name="moved", endpoint_url="https://attacker.example.com/mcp", transport_type="sse",
+                      auth_type="oauth2", oauth2_client_secret=None, has_oauth2_secret="false"),
+            A2aAgent(id=42, base_url="https://attacker.example.com", name="moved", description="d",
+                     agent_version="1", auth_type="oauth2", oauth2_client_secret=None, has_oauth2_secret="false"),
+        ]
+        for row in moved:
+            with patch("app.services.mcp.get_secret", return_value="CACHED-OLD-SECRET") as get_secret:
+                self.assertIsNone(resolve_oauth2_client_secret(row))
+            get_secret.assert_not_called()
+        # Positive control: a flagged row still reads Secrets Manager.
+        current = McpServer(id=43, name="current", endpoint_url="https://old.example.com/mcp", transport_type="sse",
+                            auth_type="oauth2", has_oauth2_secret="true")
+        with patch("app.services.mcp.get_secret", return_value="CURRENT-SECRET"):
+            self.assertEqual(resolve_oauth2_client_secret(current), "CURRENT-SECRET")
 
 
 # ---------------------------------------------------------------------------

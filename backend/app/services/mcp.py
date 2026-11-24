@@ -72,12 +72,27 @@ def resolve_oauth2_client_secret(server: Any) -> str | None:
     migrates the value across on the way through, so the plaintext copy stops
     existing the first time it is used. `scripts/migrate_oauth2_secrets.py`
     does the same thing eagerly for every row.
+
+    Only a row whose `has_oauth2_secret` is "true", or a pre-migration row
+    that still holds the plaintext column, is read at all. An endpoint move
+    sets the flag to "false" and clears the column, but `get_secret` caches
+    per process for five minutes and `delete_secret` evicts only the local
+    task's entry, so without this check another backend task would keep
+    minting tokens with the old credentials against the new host. The flag is
+    read from the row on every request, so it is authoritative across tasks —
+    the same rule `resolve_api_key` applies to `has_admin_api_key`.
     """
     legacy = getattr(server, "oauth2_client_secret", None)
     if getattr(server, "id", None) is None:
         # A detached or stub row — nothing to key a Secrets Manager name on,
         # so there is only the in-memory value to return.
         return legacy
+    flag = getattr(server, "has_oauth2_secret", None)
+    if flag == "false" or (flag != "true" and not legacy):
+        # Cleared (an endpoint move) or never set. Rows created before the
+        # flag existed have it NULL and keep the plaintext column, so they
+        # still fall through to the lazy migration below.
+        return None
     region = os.getenv("AWS_REGION", "us-east-1")
     name = secret_name_for(server)
     try:

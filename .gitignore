@@ -21,3 +21,11 @@ outputs*.sh
 loom.db
 notes.md
 *_output.yaml
+.omni/
+.claude/
+.github/
+.cursor/
+.kiro/
+.agents/
+.env.omni
+.omni/collector.json

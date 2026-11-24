@@ -1122,8 +1122,10 @@ async def invoke_harness_agent_stream(
 
             # Build name → auth_type lookup from stored config
             mcp_auth_map: dict[str, str] = {}
+            mcp_url_map: dict[str, str] = {}
             for mcp_cfg in mcp_servers_config:
                 mcp_auth_map[mcp_cfg["name"]] = mcp_cfg.get("auth_type", "none")
+                mcp_url_map[mcp_cfg["name"]] = mcp_cfg.get("endpoint_url", "")
 
             # Pre-fetch OAuth2 tokens for MCP servers that need them
             mcp_tokens: dict[str, str] = {}
@@ -1132,6 +1134,18 @@ async def invoke_harness_agent_stream(
                 oauth2_names = [n for n, t in mcp_auth_map.items() if t == "oauth2"]
                 oauth2_servers = db.query(McpServer).filter(McpServer.name.in_(oauth2_names)).all()
                 for server in oauth2_servers:
+                    # The stored config only records names, so a deleted or
+                    # renamed server's name can later belong to a different
+                    # row (possibly another group's). Only mint a server's
+                    # credentials when its live endpoint is the URL this
+                    # agent was deployed against; otherwise the token would
+                    # go to a host that server never pointed at.
+                    if server.endpoint_url != mcp_url_map.get(server.name):
+                        logger.warning(
+                            "Skipping OAuth2 token for MCP server '%s': endpoint differs from deploy-time config",
+                            server.name,
+                        )
+                        continue
                     token = _get_oauth2_token(server)
                     if token:
                         mcp_tokens[server.name] = token
@@ -1144,7 +1158,11 @@ async def invoke_harness_agent_stream(
                     tool_copy = _json.loads(_json.dumps(tool))
                     tool_name = tool_copy.get("name", "")
                     remote_mcp = (tool_copy.get("config") or {}).get("remoteMcp")
-                    if remote_mcp and tool_name in mcp_tokens:
+                    if (
+                        remote_mcp
+                        and tool_name in mcp_tokens
+                        and remote_mcp.get("url") == mcp_url_map.get(tool_name)
+                    ):
                         headers = remote_mcp.get("headers") or {}
                         headers["Authorization"] = f"Bearer {mcp_tokens[tool_name]}"
                         remote_mcp["headers"] = headers
@@ -1170,6 +1188,19 @@ async def invoke_harness_agent_stream(
             # data carries user-scoped credentials; merge those headers into
             # the configured tool instead of dropping the duplicate by name.
             dynamic_remote = (tool.get("config") or {}).get("remoteMcp") or {}
+            existing_url = (
+                (existing.get("config") or {}).get("remoteMcp") or {}
+            ).get("url")
+            if (
+                existing.get("type") != "remote_mcp"
+                or existing_url != dynamic_remote.get("url")
+            ):
+                # Same name, different endpoint: never hand the invoker's
+                # credentials to a configured tool pointing elsewhere. The
+                # connector resolved from the bound record replaces it.
+                existing.clear()
+                existing.update(_json.loads(_json.dumps(tool)))
+                continue
             dynamic_headers = dynamic_remote.get("headers") or {}
             if dynamic_headers:
                 existing_remote = (
@@ -1972,6 +2003,17 @@ async def invoke_agent_websocket(
                 data = await websocket.receive_json()
                 continue
 
+            # Same runtime model rule as the HTTP invoke route.
+            ws_model_id = data.get("model_id") or None
+            ws_allowed_models = agent.get_allowed_model_ids()
+            if ws_model_id and ws_allowed_models and ws_model_id not in ws_allowed_models:
+                await websocket.send_json({
+                    "type": "error",
+                    "content": f"Model '{ws_model_id}' is not in this agent's allowed models: {ws_allowed_models}",
+                })
+                data = await websocket.receive_json()
+                continue
+
             await websocket.send_json({"type": "session_start", "session_id": session_id})
 
             gen = invoke_agent_ws(
@@ -1983,7 +2025,7 @@ async def invoke_agent_websocket(
                 access_token=access_token,
                 actor_id=actor_id,
                 dynamic_mcp_servers=dynamic_mcp_servers,
-                runtime_model_id=data.get("model_id"),
+                runtime_model_id=ws_model_id,
                 guardrail=ws_guardrail,
                 approval_policies=_active_approval_policies(db),
             )

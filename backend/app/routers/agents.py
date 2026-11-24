@@ -36,6 +36,7 @@ from app.routers.utils import (
     filter_visible_resources,
     assert_role_arn_bindable,
     bindable_role_arns,
+    caller_group_tags,
     get_agent_or_404,
     require_group_tag,
 )
@@ -729,6 +730,49 @@ def _validate_skill_ids(skill_ids: list[str]) -> None:
             )
 
 
+# Harness tool types a caller may submit directly in harness_tools, mapped to
+# the single config key each must carry. remote_mcp and
+# agentcore_code_interpreter tools are built server-side from bound,
+# group-checked records (mcp_servers, code_interpreter_role_id); accepting them
+# raw would let a caller plant a tool that shares a connector's name but points
+# at their own URL, and invocation-time credential injection is keyed on that
+# name.
+_CLIENT_HARNESS_TOOL_CONFIG_KEYS: dict[str, str] = {"inline_function": "inlineFunction"}
+
+
+def _validate_harness_tools(harness_tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Reject client-supplied harness tools other than the inline_function
+    tools the UI sends (e.g. user_confirmation); return the accepted list."""
+    if not harness_tools:
+        return []
+    for index, tool in enumerate(harness_tools):
+        tool_type = tool.get("type")
+        config_key = (
+            _CLIENT_HARNESS_TOOL_CONFIG_KEYS.get(tool_type)
+            if isinstance(tool_type, str) else None
+        )
+        config = tool.get("config")
+        if (
+            config_key is None
+            or not isinstance(tool.get("name"), str)
+            or not tool["name"]
+            or set(tool) - {"name", "type", "config"}
+            or not isinstance(config, dict)
+            or set(config) != {config_key}
+            or not isinstance(config[config_key], dict)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"harness_tools[{index}] is not allowed: only inline_function "
+                    "tools with an inlineFunction config may be supplied directly. "
+                    "Attach MCP servers via mcp_servers and the code interpreter "
+                    "via code_interpreter_enabled."
+                ),
+            )
+    return harness_tools
+
+
 def _sync_attached_skills(agent_id: int, skill_ids: list[str], db: Session) -> None:
     """Reconcile 'skill'-typed Integration rows for this agent against the
     requested skill_ids — the same mechanism AttachedSkillsSection.tsx uses,
@@ -1114,7 +1158,7 @@ def create_agent(
             )
 
     if request.source == "register":
-        return _register_agent(request, db)
+        return _register_agent(request, db, user)
     elif request.source == "deploy":
         return _deploy_agent(request, db, background_tasks, user)
     elif request.source == "harness":
@@ -1126,7 +1170,7 @@ def create_agent(
         )
 
 
-def _register_agent(request: AgentCreateRequest, db: Session) -> AgentResponse:
+def _register_agent(request: AgentCreateRequest, db: Session, user: UserInfo) -> AgentResponse:
     """Register an existing agent by ARN."""
     if not request.arn:
         raise HTTPException(
@@ -1198,10 +1242,6 @@ def _register_agent(request: AgentCreateRequest, db: Session) -> AgentResponse:
     if imported_authorizer:
         agent.set_authorizer_config(imported_authorizer)
 
-    db.add(agent)
-    db.commit()
-    db.refresh(agent)
-
     # Fetch tags from AWS for registered agents
     aws_tags: dict[str, str] = {}
     try:
@@ -1218,9 +1258,19 @@ def _register_agent(request: AgentCreateRequest, db: Session) -> AgentResponse:
         if p.key not in aws_tags and p.required:
             aws_tags[p.key] = p.default_value if p.default_value else "missing"
 
+    # The runtime's own AWS tags decide which group's catalog it lands in
+    # (request.tags is not consulted on this path), so they get the same
+    # assignment check deploy applies. Done before the row is written so a
+    # refused registration leaves nothing behind. Super-admins may still
+    # register any runtime, including one whose tag fetch failed.
+    if caller_group_tags(user) is not None:
+        require_group_tag(aws_tags, "agent", user=user)
     if aws_tags:
         agent.set_tags(aws_tags)
-        db.commit()
+
+    db.add(agent)
+    db.commit()
+    db.refresh(agent)
 
     # Store model_id as config entry if provided
     if request.model_id:
@@ -2506,7 +2556,7 @@ def _deploy_harness(request: AgentCreateRequest, db: Session, background_tasks: 
                 "supports_elicitation": server.supports_elicitation == "true",
             })
 
-    extra_harness_tools = request.harness_tools or []
+    extra_harness_tools = _validate_harness_tools(request.harness_tools)
 
     # Snapshot memory data (first memory resource is passed to harness API)
     memory_snapshots: list[dict[str, Any]] = []
@@ -2957,18 +3007,30 @@ def _deploy_harness_background(
         db.commit()
 
 
-        # Delete any existing harness with the same name left over from a prior failed deploy.
+        # Never delete or adopt a harness by name. Agent names are caller-chosen,
+        # so a same-named harness may belong to another group or live outside
+        # Loom entirely (e.g. one left behind by a local-only delete). Fail the
+        # deploy instead, mirroring _new_code_interpreter_name: an agent only
+        # ever touches the harness whose id it recorded when it created it.
+        name_conflict = False
         try:
             import boto3 as _boto3
             _hc = _boto3.client("bedrock-agentcore-control", region_name=region)
             existing_harnesses = _hc.list_harnesses().get("harnesses", [])
-            for _h in existing_harnesses:
-                if _h.get("harnessName") == name:
-                    logger.info("Deleting conflicting existing harness %s before create", _h["harnessId"])
-                    _hc.delete_harness(harnessId=_h["harnessId"])
-                    break
+            name_conflict = any(_h.get("harnessName") == name for _h in existing_harnesses)
         except Exception as _pre_err:
             logger.warning("Pre-create harness conflict check failed: %s", _pre_err)
+        if name_conflict:
+            reason = (
+                f"A harness named '{name}' already exists in AWS. Loom will not "
+                "delete or adopt it; choose a different name or remove it in AWS."
+            )
+            logger.error("Harness deploy aborted for agent %s: %s", agent_id, reason)
+            agent.deployment_status = "failed"
+            agent.status = "FAILED"
+            agent.status_reason = reason
+            db.commit()
+            return
 
         response = create_harness_api(
             name=name,
@@ -4339,6 +4401,10 @@ def redeploy_harness_agent(
             detail="Agent has no harness_id — cannot update. Delete and redeploy instead.",
         )
 
+    # Validated before the old config entry is deleted below, so a rejected
+    # payload leaves the deployed agent untouched.
+    extra_harness_tools = _validate_harness_tools(request.harness_tools)
+
     if (request.provider or "bedrock").lower() == "bedrock" and request.model_id:
         try:
             assert_model_supports_endpoint(request.model_id, SUPPORTED_MODELS, BEDROCK_RUNTIME)
@@ -4481,8 +4547,6 @@ def redeploy_harness_agent(
                 "user_api_key_path": user_api_key_secret_name(server, "{actor_id}"),
                 "supports_elicitation": server.supports_elicitation == "true",
             })
-
-    extra_harness_tools = request.harness_tools or []
 
     # Snapshot memory resources for update
     update_memory_snapshots: list[dict[str, Any]] = []
@@ -4923,15 +4987,32 @@ def patch_agent(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Unsupported provider '{provider}'. Must be one of: {sorted(SUPPORTED_PROVIDER_IDS)}"
                 )
-            if provider != "bedrock" and agent.source == "harness":
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Harness-sourced agents only support the 'bedrock' provider (AgentCore Harness API limitation)"
-                )
         patched_provider = (request.provider or "bedrock").lower() if request.provider is not None else None
+        # Decide by the provider the agent ends up with (the stored one when
+        # the request omits it), so a base_url/api_key-only PATCH can't skip
+        # the harness restriction or the LiteLLM base_url resolution below.
+        effective_provider = patched_provider
+        if effective_provider is None:
+            effective_provider = "bedrock"
+            config_entry = next((e for e in agent.config_entries if e.key == "AGENT_CONFIG_JSON"), None)
+            if config_entry:
+                try:
+                    effective_provider = (json.loads(config_entry.value).get("provider") or "bedrock").lower()
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    pass
+        if effective_provider != "bedrock" and agent.source == "harness":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Harness-sourced agents only support the 'bedrock' provider (AgentCore Harness API limitation)"
+            )
         patched_base_url: str | None = request.base_url
         api_key_secret_arn = None
-        if patched_provider == "litellm":
+        if patched_provider is None and effective_provider == "litellm":
+            # base_url/api_key-only PATCH of a LiteLLM agent: keep the
+            # server-resolved proxy URL and the existing virtual key.
+            from app.services.litellm import get_agent_base_url
+            patched_base_url = get_agent_base_url(db) or ""
+        elif patched_provider == "litellm":
             # Same as create-time: never accept a client-supplied api_key or
             # base_url for LiteLLM — resolve from the global connection and
             # mint a fresh scoped virtual key.

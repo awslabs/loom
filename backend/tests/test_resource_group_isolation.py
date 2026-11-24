@@ -359,6 +359,19 @@ class TestSecurityRouterGroupIsolationEndToEnd(_GroupIsolationTestBase):
         resp = self.client.post(f"/api/security/authorizers/{auth_id}/credentials/{cred.id}/token")
         self.assertEqual(resp.status_code, 403)
 
+    # -- List route: GET /authorizers must drop other groups' rows --
+
+    def test_user_lists_only_own_group_authorizers(self):
+        """GET /authorizers returned every group's authorizer to any agent:read
+        holder; it now filters by loom:group like the MCP and A2A listings."""
+        self._create_authorizer("demo")
+        self._create_authorizer("mcp")
+        self._create_authorizer(None)
+        self._override_user(["t-user", "g-users-demo"])
+        resp = self.client.get("/api/security/authorizers")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([a["name"] for a in resp.json()], ["auth-demo"])
+
 
 class TestMcpServerGroupIsolationEndToEnd(_GroupIsolationTestBase):
     """Same regression, for McpServer single-object routes. McpServer had no

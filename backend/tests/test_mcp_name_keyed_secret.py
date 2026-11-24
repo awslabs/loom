@@ -482,3 +482,24 @@ class TestOauth2ClientSecretsLiveInSecretsManager(McpSecretTestCase):
         self.assertEqual(200, resp.status_code)
         self.assertNotIn(path, self.vault.store)
         self.assertFalse(resp.json()["has_oauth2_secret"])
+
+
+class TestNumericNameCannotAliasAnIdKeyedSecret(McpSecretTestCase):
+    def test_numeric_name_neither_reads_nor_deletes_another_servers_key(self) -> None:
+        """Legacy `loom/mcp/{name}/...` and id-keyed `loom/mcp/{id}/...` share a
+        namespace, so a server named after another server's id must not reach
+        that server's admin key through the legacy fallback or delete path."""
+        victim_path = admin_api_key_secret_name(self.victim.id)
+        self.vault.store[victim_path] = VICTIM_KEY
+        self._as(["t-admin", "g-admins-demo"])
+        created = self._create(str(self.victim.id), "demo")
+        self.assertEqual(created.status_code, 201)
+        attacker_id = created.json()["id"]
+        # With its own id-keyed key gone, the row falls back to the legacy path.
+        del self.vault.store[admin_api_key_secret_name(attacker_id)]
+        attacker = self.db.query(McpServer).filter(McpServer.id == attacker_id).first()
+
+        self.assertNotEqual(resolve_api_key(attacker, db=self.db), VICTIM_KEY)
+        self.assertEqual(self.vault.store.get(victim_path), VICTIM_KEY)
+        self.assertEqual(self.client.delete(f"/api/mcp/servers/{attacker_id}").status_code, 200)
+        self.assertEqual(self.vault.store.get(victim_path), VICTIM_KEY)

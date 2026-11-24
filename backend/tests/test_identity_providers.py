@@ -349,6 +349,16 @@ class TestIdentityProviderCRUD(unittest.TestCase):
         user = UserInfo(sub="test-sub", username="test-user", groups=groups, scopes=derive_scopes(groups))
         app.dependency_overrides[get_current_user] = lambda: user
 
+    def _override_idp_admin(self) -> None:
+        """A caller allowed to write IdPs (admin:write) who otherwise holds only
+        a security admin's scopes, so the group-mapping guard still has scopes
+        to refuse. No built-in group looks like this: g-admins-super holds
+        every scope, so the guard can't be reached through it."""
+        groups = ["t-admin", "g-admins-security"]
+        scopes = derive_scopes(groups) | {"admin:read", "admin:write"}
+        user = UserInfo(sub="test-sub", username="test-user", groups=groups, scopes=scopes)
+        app.dependency_overrides[get_current_user] = lambda: user
+
     def _idp_payload(self, **overrides) -> dict:
         defaults = {
             "name": "test-azure-ad",
@@ -450,21 +460,39 @@ class TestIdentityProviderCRUD(unittest.TestCase):
     @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
     @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
     def test_create_idp_rejects_mapping_to_reserved_super_admin_group(self, mock_disc, mock_store, mock_del):
-        """A security-scoped admin (security:write only) must not be able to
-        map an external group to g-admins-super, which would grant scopes
-        (admin:write, agent:write, memory:write, ...) they don't have."""
-        self._override_user(["t-admin", "g-admins-security"])
+        """An admin who may write IdPs but isn't a super-admin must not be able
+        to map an external group to g-admins-super, which would grant scopes
+        (agent:write, memory:write, ...) they don't have."""
+        self._override_idp_admin()
         resp = self.client.post(
             "/api/settings/identity-providers",
             json=self._idp_payload(group_mappings={"attacker-ext-group": ["t-admin", "g-admins-super"]}),
         )
         self.assertEqual(resp.status_code, 403)
-        self.assertIn("admin:write", resp.json()["detail"])
+        self.assertIn("agent:write", resp.json()["detail"])
         mock_store.assert_not_called()
 
         # Confirm nothing was persisted.
         list_resp = self.client.get("/api/settings/identity-providers")
         self.assertEqual(list_resp.json(), [])
+
+    @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
+    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    def test_security_admin_cannot_create_login_idp(self, mock_disc, mock_store):
+        """The active IdP is every user's login provider, so creating one needs
+        admin:write. A security admin (security:write only) is refused before
+        anything is fetched, stored or persisted, even with a mapping table
+        that grants nothing beyond their own scopes."""
+        self._override_user(["t-admin", "g-admins-security"])
+        resp = self.client.post(
+            "/api/settings/identity-providers",
+            json=self._idp_payload(group_mappings={"corp-security-team": ["t-admin", "g-admins-security"]}),
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("admin:write", resp.json()["detail"])
+        mock_disc.assert_not_called()
+        mock_store.assert_not_called()
+        self.assertEqual(self.client.get("/api/settings/identity-providers").json(), [])
 
     @patch("app.routers.identity_providers.delete_secret")
     @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
@@ -484,7 +512,7 @@ class TestIdentityProviderCRUD(unittest.TestCase):
         thing to create -- but the table they persist now grants nothing, so
         there is no escalation left to reach.
         """
-        self._override_user(["t-admin", "g-admins-security"])
+        self._override_idp_admin()
 
         create = self.client.post(
             "/api/settings/identity-providers",
@@ -515,7 +543,7 @@ class TestIdentityProviderCRUD(unittest.TestCase):
     def test_create_idp_rejects_mapping_to_any_group_caller_lacks(self, mock_disc, mock_store, mock_del):
         """Same rule applies to non-reserved groups: a security-scoped admin
         cannot grant mcp:write via a mapping to g-admins-mcp either."""
-        self._override_user(["t-admin", "g-admins-security"])
+        self._override_idp_admin()
         resp = self.client.post(
             "/api/settings/identity-providers",
             json=self._idp_payload(group_mappings={"some-ext-group": ["g-admins-mcp"]}),
@@ -530,7 +558,7 @@ class TestIdentityProviderCRUD(unittest.TestCase):
         """A security-scoped admin CAN map an external group to their own
         group (or to a scope-free type group), since that grants nothing
         beyond what they already hold."""
-        self._override_user(["t-admin", "g-admins-security"])
+        self._override_idp_admin()
         resp = self.client.post(
             "/api/settings/identity-providers",
             json=self._idp_payload(group_mappings={"corp-security-team": ["t-admin", "g-admins-security"]}),
@@ -558,12 +586,39 @@ class TestIdentityProviderCRUD(unittest.TestCase):
         create_resp = self.client.post("/api/settings/identity-providers", json=self._idp_payload(group_mappings=None))
         idp_id = create_resp.json()["id"]
 
-        self._override_user(["t-admin", "g-admins-security"])
+        self._override_idp_admin()
         resp = self.client.put(
             f"/api/settings/identity-providers/{idp_id}",
             json={"group_mappings": {"attacker-ext-group": ["t-admin", "g-admins-super"]}},
         )
         self.assertEqual(resp.status_code, 403)
+
+    @patch("app.routers.identity_providers.delete_secret")
+    @patch("app.routers.identity_providers.store_secret", return_value="arn:aws:secretsmanager:us-east-1:123456789012:secret:test")
+    @patch("app.routers.identity_providers.fetch_discovery", return_value=MOCK_DISCOVERY)
+    def test_create_idp_rejects_mapping_to_groups_caller_is_not_in(self, mock_disc, mock_store, mock_del):
+        """Group names confer loom:group reach on their own, not just scopes:
+        g-admins-test grants no scopes (it is not in GROUP_SCOPES) but, next to
+        t-admin, puts the test group's authorizers and credentials in reach via
+        caller_group_tags. A non-super caller may only map groups they hold,
+        even one that holds admin:write."""
+        self._override_idp_admin()
+        for targets in (
+            ["t-admin", "g-admins-security", "g-admins-test"],
+            ["t-admin", "g-users-finance"],
+            ["T-Admin", "g-admins-security"],
+            ["t-admin", " g-admins-test"],
+            ["g-admins-super "],
+        ):
+            with self.subTest(targets=targets):
+                resp = self.client.post(
+                    "/api/settings/identity-providers",
+                    json=self._idp_payload(group_mappings={"attacker-ext-group": targets}),
+                )
+                self.assertEqual(resp.status_code, 403, resp.text)
+                self.assertIn("not a member of", resp.json()["detail"])
+        mock_store.assert_not_called()
+        self.assertEqual(self.client.get("/api/settings/identity-providers").json(), [])
 
 
 # ===================================================================

@@ -21,6 +21,7 @@ from app.models.session import InvocationSession
 from app.models.tag_policy import TagPolicy
 from app.models.tag_profile import TagProfile
 from app.routers.utils import (
+    caller_group_tags,
     check_resource_group_access,
     filter_visible_resources,
     require_group_tag,
@@ -437,6 +438,9 @@ def import_memory(
         if p.key not in aws_tags and p.required:
             aws_tags[p.key] = p.default_value if p.default_value else "missing"
 
+    # Same rule as agent registration: the AWS-side loom:group must be one the caller may assign.
+    if caller_group_tags(user) is not None:
+        require_group_tag(aws_tags, "memory", user=user)
     if aws_tags:
         memory.set_tags(aws_tags)
 

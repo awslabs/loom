@@ -45,9 +45,18 @@ def oauth2_client_secret_name(server_id: int) -> str:
     return f"loom/mcp/{server_id}/oauth2-client-secret"
 
 
-def legacy_admin_api_key_secret_name(name: str) -> str:
+def legacy_admin_api_key_secret_name(name: str) -> str | None:
     """The pre-migration, name-keyed location. Read-only, and only ever read
-    through `_resolve_legacy_admin_api_key`, which refuses an ambiguous name."""
+    through `_resolve_legacy_admin_api_key`, which refuses an ambiguous name.
+
+    None when the name cannot key a legacy path safely: empty, purely numeric,
+    or containing "/". The legacy and id-keyed paths share the
+    `loom/mcp/<segment>/admin-api-key` namespace, so a server named "7" would
+    otherwise read, migrate away or delete server 7's id-keyed key. Callers
+    must skip the legacy location entirely when this returns None.
+    """
+    if not name or name.isdigit() or "/" in name:
+        return None
     return f"loom/mcp/{name}/admin-api-key"
 
 
@@ -176,6 +185,10 @@ def _resolve_legacy_admin_api_key(server: Any, region: str, db: Any) -> str | No
     """
     from app.models.mcp import McpServer
 
+    # A name that could alias an id-keyed path is never treated as legacy.
+    legacy_name = legacy_admin_api_key_secret_name(server.name)
+    if legacy_name is None:
+        return None
     same_name = db.query(McpServer).filter(McpServer.name == server.name).count()
     if same_name > 1:
         logger.warning(
@@ -185,7 +198,7 @@ def _resolve_legacy_admin_api_key(server: Any, region: str, db: Any) -> str | No
         )
         return None
     try:
-        value = get_secret(legacy_admin_api_key_secret_name(server.name), region)
+        value = get_secret(legacy_name, region)
     except Exception:
         return None
     try:
@@ -193,7 +206,7 @@ def _resolve_legacy_admin_api_key(server: Any, region: str, db: Any) -> str | No
             admin_api_key_secret_name(server.id), value, region,
             description=f"Admin API key for MCP server {server.name}",
         )
-        delete_secret(legacy_admin_api_key_secret_name(server.name), region)
+        delete_secret(legacy_name, region)
         logger.info(
             "Migrated the admin API key for MCP server %s from its old "
             "name-keyed location to the id-keyed one", server.id,

@@ -1306,6 +1306,31 @@ class TestEvaluationTestCases(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(mock_invoke.call_args.kwargs["runtime_model_id"], "anthropic.claude-3-5-sonnet")
 
+    @patch("app.routers.evaluations.invoke_agent")
+    def test_model_override_outside_allowed_models_is_refused(self, mock_invoke):
+        # Same rule as /invoke: a model override must be in the agent's
+        # allowed_model_ids. Refused on save, and again at run time for a
+        # test case saved before the allowed list narrowed.
+        self.agent.set_allowed_model_ids(["anthropic.claude-3-5-sonnet"])
+        self.session.commit()
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases", json={
+            "name": "Greets politely", "prompt": "Say hello", "evaluator_ids": ["Builtin.Helpfulness"],
+            "evaluation_mode": "on_demand", "model_id": "anthropic.claude-opus-4",
+        })
+        self.assertEqual(resp.status_code, 400, resp.text)
+
+        tc = EvaluationTestCase(agent_id=self.agent.id, name="Saved earlier", prompt="Say hello",
+                                model_id="anthropic.claude-opus-4", evaluation_mode="on_demand")
+        tc.set_evaluator_ids(["Builtin.Helpfulness"])
+        self.session.add(tc)
+        self.session.commit()
+        resp = self.client.post(f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc.id}/run")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        last_run = self.client.get(f"/api/agents/{self.agent.id}/evaluations/test-cases/{tc.id}/last-run").json()
+        self.assertEqual(last_run["status"], "ERROR")
+        self.assertIn("not in this agent's allowed models", last_run["errors"][0])
+        mock_invoke.assert_not_called()
+
     def test_create_with_custom_pass_threshold(self):
         created = self._create_test_case(pass_threshold=0.9)
         self.assertEqual(created["pass_threshold"], 0.9)

@@ -14,6 +14,7 @@ from app.models.credential_provider import CredentialProvider
 from app.routers.utils import get_agent_or_404
 from app.services.credential import (
     CredentialProviderNameInUse,
+    UntrustedOAuthDiscovery,
     create_oauth2_credential_provider,
     credential_provider_name,
     delete_credential_provider,
@@ -80,6 +81,8 @@ def create_credential_provider(
         callback_url = response.get("callbackUrl")
     except CredentialProviderNameInUse as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except UntrustedOAuthDiscovery as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         # The boto3 kwargs for this call carry the client secret, and AWS
         # validation errors sometimes echo the offending value back. Whether

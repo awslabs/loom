@@ -318,5 +318,24 @@ class TestConnectorPlanting(_ApiCase):
         self.assertEqual(resp.status_code, 403, resp.text)
 
 
+class TestRegisterAdoptsAwsGroup(_ApiCase):
+
+    @patch("boto3.client")
+    @patch("app.routers.agents.list_runtime_endpoints", return_value=["DEFAULT"])
+    @patch("app.routers.agents.describe_runtime", return_value={"agentRuntimeName": "planted", "status": "READY"})
+    def test_register_cannot_adopt_another_groups_runtime(
+        self, _describe: MagicMock, _endpoints: MagicMock, mock_boto: MagicMock,
+    ) -> None:
+        # request.tags says demo (passes the demo-admin pre-check); the runtime itself is tagged test.
+        mock_boto.return_value.list_tags_for_resource.return_value = {"tags": {"loom:group": "test"}}
+        self._as(DEMO_ADMIN)
+        resp = self.client.post("/api/agents", json={
+            "source": "register", "tags": {"loom:group": "demo"},
+            "arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/planted-x",
+        })
+        self.assertEqual(resp.status_code, 403, resp.text)
+        self.assertEqual(self.db.query(Agent).count(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

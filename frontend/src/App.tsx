@@ -69,6 +69,9 @@ import { recordPageView, sendBeaconPageView, trackAction } from "./api/audit";
 //     registry:write (unchanged from the standalone Registry page's gate)
 //   - Settings > Models > Guardrails card: visible to anyone on Settings;
 //     editable iff admin:write (PUT /api/settings/guardrail-default's scope)
+//   - Security > Identity providers tab: visible to anyone on Security;
+//     editable iff admin:write (the IdP write routes' scope: the active IdP
+//     is every user's login provider, so security:write alone isn't enough)
 type Persona = "catalog" | "security" | "builder" | "memory" | "integrations" | "skills" | "settings" | "admin";
 
 const USER_GROUPS: Record<string, string[]> = {
@@ -811,7 +814,7 @@ function AppContent() {
             </>
           )}
 
-          {activePersona === "security" && <SecurityAdminPage readOnly={!effectiveHasScope("security:write")} agents={agents} />}
+          {activePersona === "security" && <SecurityAdminPage readOnly={!effectiveHasScope("security:write")} canEditIdentityProviders={effectiveHasScope("admin:write")} agents={agents} />}
           {activePersona === "memory" && <MemoryManagementPage viewMode={memoryViewMode} onViewModeChange={setMemoryViewMode} readOnly={!effectiveHasScope("memory:write")} groupRestriction={groupRestriction} ownerRestriction={ownerRestriction} userGroups={viewAsUser ? (USER_GROUPS[viewAsUser] ?? []) : (user?.groups ?? [])} />}
           {activePersona === "integrations" && (
             <IntegrationsPage

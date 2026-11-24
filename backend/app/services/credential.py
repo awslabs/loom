@@ -8,8 +8,10 @@ through the AgentCore control plane for agent integrations.
 import logging
 import re
 import time
+import urllib.parse
 
 from app.services.redaction import redacted_error
+from app.services.net_guard import SSRFBlockedError, get_trusted_oauth_hosts, is_trusted_oauth_host, safe_get
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,62 @@ class CredentialProviderNameInUse(Exception):
     triggered by a name collision would write the caller's client secret over
     whatever provider already held that name.
     """
+
+
+class UntrustedOAuthDiscovery(ValueError):
+    """An OAuth2 discovery URL, or the token endpoint it names, is not trusted.
+
+    AgentCore fetches the discovery document itself and sends the provider's
+    client secret (M2M) or the invoking user's own access token (OBO) to
+    whatever token_endpoint it names, so a provider is never created unless
+    both resolve to a host this deployment already trusts as an identity
+    provider. See net_guard.get_trusted_oauth_hosts.
+    """
+
+
+def verify_trusted_oauth_discovery(discovery_url: str) -> None:
+    """Refuse a discovery URL whose host or token_endpoint is not trusted.
+
+    This is the check services/mcp.py and services/a2a.py apply before their
+    own token exchanges, applied here once so every path that hands a
+    discovery URL to AgentCore (deploy, update, harness, the credentials
+    router) goes through it. The discovery host is checked as well as the
+    token endpoint because AgentCore re-fetches the document independently:
+    a document served from an untrusted host could name a trusted endpoint
+    to this check and a different one to AgentCore.
+
+    Raises:
+        UntrustedOAuthDiscovery: If either host is untrusted, or the document
+            cannot be fetched and checked (fails closed).
+    """
+    trusted_hosts = get_trusted_oauth_hosts()
+    if not is_trusted_oauth_host(discovery_url or "", trusted_hosts):
+        raise UntrustedOAuthDiscovery(
+            f"OAuth2 discovery URL {discovery_url!r} is not on a configured "
+            "identity provider or authorizer host"
+        )
+    try:
+        resp = safe_get(discovery_url, timeout=10)
+        resp.raise_for_status()
+        token_url = resp.json().get("token_endpoint")
+    except SSRFBlockedError as e:
+        raise UntrustedOAuthDiscovery(
+            f"OAuth2 discovery URL {discovery_url!r} was blocked: {e}"
+        ) from None
+    except Exception as e:
+        raise UntrustedOAuthDiscovery(
+            f"Could not read the token endpoint from OAuth2 discovery URL "
+            f"{discovery_url!r}: {e}"
+        ) from None
+    if (
+        not isinstance(token_url, str)
+        or urllib.parse.urlparse(token_url).scheme != "https"
+        or not is_trusted_oauth_host(token_url, trusted_hosts)
+    ):
+        raise UntrustedOAuthDiscovery(
+            f"Token endpoint {token_url!r} named by {discovery_url!r} is not on a "
+            "configured identity provider or authorizer host"
+        )
 
 
 def credential_provider_name(
@@ -105,8 +163,12 @@ def create_oauth2_credential_provider(
     Raises:
         CredentialProviderNameInUse: If the name is taken and allow_update is
             False.
+        UntrustedOAuthDiscovery: If auth_server_url, or the token endpoint
+            its discovery document names, is not a trusted IdP host.
         Exception: If creation fails after all retries.
     """
+    verify_trusted_oauth_discovery(auth_server_url)
+
     import boto3
 
     client = boto3.client('bedrock-agentcore-control', region_name=region)

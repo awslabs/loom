@@ -38,7 +38,7 @@ from app.models.evaluation import (
 from app.models.invocation import Invocation
 from app.models.session import InvocationSession
 from app.routers.agents import derive_log_group
-from app.routers.utils import assert_trace_session_readable, get_agent_or_404
+from app.routers.utils import assert_trace_session_readable, get_agent_or_404, readable_session_ids
 from app.services import evaluations as evals
 from app.services.agentcore import invoke_agent
 from app.services.cognito import get_cognito_token
@@ -318,8 +318,15 @@ def get_evaluation_results(
     except BotoCoreError as exc:
         raise _aws_error(exc) from exc
 
+    traces = evals.group_by_trace(records)
+    # Every trace carries its session.id, and online configs score live
+    # sessions: a judge's explanation describes that user's conversation, so
+    # a non-admin sees only the traces of sessions they may read.
+    readable = readable_session_ids(agent, db, user)
+    if readable is not None:
+        traces = [t for t in traces if t["session_id"] in readable]
     return EvaluationResultsResponse(
-        results=[EvaluatedTrace(**r) for r in evals.group_by_trace(records)],
+        results=[EvaluatedTrace(**r) for r in traces],
         truncated=truncated,
     )
 
@@ -375,6 +382,17 @@ def _get_test_case_or_404(agent_id: int, test_case_id: int, db: Session) -> Eval
     return tc
 
 
+def _model_not_allowed(model_id: str | None, allowed_model_ids: list[str]) -> str | None:
+    """Why ``model_id`` may not be used to invoke the agent, or None if it may.
+
+    Same rule as the main invoke endpoint (``routers/invocations.py``): a
+    runtime model override must be one of the agent's allowed_model_ids
+    whenever the agent has any."""
+    if model_id and allowed_model_ids and model_id not in allowed_model_ids:
+        return f"Model '{model_id}' is not in this agent's allowed models: {allowed_model_ids}"
+    return None
+
+
 @router.get("/{agent_id}/evaluations/evaluators", response_model=List[EvaluatorInfo])
 def list_evaluators(
     agent_id: int,
@@ -409,7 +427,9 @@ def create_test_case(
     db: Session = Depends(get_db),
 ) -> TestCaseResponse:
     """Save a new test case for this agent."""
-    get_agent_or_404(agent_id, db, user)
+    agent = get_agent_or_404(agent_id, db, user)
+    if (refused := _model_not_allowed(request.model_id, agent.get_allowed_model_ids())):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=refused)
     tc = EvaluationTestCase(
         agent_id=agent_id,
         name=request.name.strip(),
@@ -435,7 +455,9 @@ def update_test_case(
     db: Session = Depends(get_db),
 ) -> TestCaseResponse:
     """Update a saved test case's prompt, expected response, or evaluators."""
-    get_agent_or_404(agent_id, db, user)
+    agent = get_agent_or_404(agent_id, db, user)
+    if (refused := _model_not_allowed(request.model_id, agent.get_allowed_model_ids())):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=refused)
     tc = _get_test_case_or_404(agent_id, test_case_id, db)
     tc.name = request.name.strip()
     tc.prompt = request.prompt
@@ -562,8 +584,14 @@ def _evaluator_set(tc: EvaluationTestCase) -> tuple[str, ...]:
 
 
 def _invoke_text(arn: str, region: str, session_id: str, prompt: str, model_id: str | None,
-                 access_token: str | None) -> tuple[str | None, str | None]:
-    """Invoke the agent. Returns (response text, error)."""
+                 access_token: str | None, allowed_model_ids: list[str]) -> tuple[str | None, str | None]:
+    """Invoke the agent. Returns (response text, error).
+
+    Every test-case run invokes the agent through here, so the model override
+    a test case was saved with is checked against the agent's allowed models
+    at run time too: the allowed list may have narrowed since it was saved."""
+    if (refused := _model_not_allowed(model_id, allowed_model_ids)):
+        return None, refused
     try:
         chunks = list(invoke_agent(
             arn=arn, qualifier="DEFAULT", session_id=session_id, prompt=prompt, region=region,
@@ -735,7 +763,7 @@ def _execute_batch_runs(items: list[tuple[int, str | None]], agent_id: int,
                        tcs[runs[run_id].test_case_id].model_id, prompt)
             for run_id, prompt in items if run_id in runs and runs[run_id].test_case_id in tcs
         ]
-        arn, region, agent_name = agent.arn, agent.region, agent.name
+        arn, region, agent_name, allowed_models = agent.arn, agent.region, agent.name, agent.get_allowed_model_ids()
         log_group = derive_log_group(agent.runtime_id, "DEFAULT")
         _warm_boto3_clients(region)
 
@@ -747,7 +775,7 @@ def _execute_batch_runs(items: list[tuple[int, str | None]], agent_id: int,
                     rows[item.run_id].status = "INVOKING"
             db.commit()
             invoked = {i.run_id: pool.submit(_invoke_text, arn, region, i.session_id, i.prompt, i.model_id,
-                                             access_token)
+                                             access_token, allowed_models)
                        for i in work if i.prompt is not None}
             rows = _existing_runs(db, work)
             live = []
@@ -887,7 +915,8 @@ def _execute_run(run_id: int, test_case_id: int, agent_id: int, session_id: str,
                 return
             run.status = "INVOKING"
             db.commit()
-            response, error = _invoke_text(agent.arn, agent.region, session_id, prompt, model_id, access_token)
+            response, error = _invoke_text(agent.arn, agent.region, session_id, prompt, model_id, access_token,
+                                           agent.get_allowed_model_ids())
             if stopped():
                 return
             db.refresh(run)

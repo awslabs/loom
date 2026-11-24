@@ -2,6 +2,19 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CollapsibleJsonBlock } from "@/components/CollapsibleJsonBlock";
 
+/**
+ * Inert stand-in for markdown images. Model/agent output is untrusted, and an
+ * auto-loading <img> lets injected output exfiltrate data through the image URL
+ * with zero clicks, so images are never fetched; only the alt text is shown.
+ */
+export function MarkdownImage({ alt }: { alt?: string }) {
+  return (
+    <span className="rounded bg-black/10 dark:bg-white/10 px-1 py-0.5 text-xs text-muted-foreground">
+      [image{alt ? `: ${alt}` : ""}]
+    </span>
+  );
+}
+
 export const markdownComponents = {
   p: ({ children }: { children?: React.ReactNode }) => <p className="mb-2 last:mb-0">{children}</p>,
   h1: ({ children }: { children?: React.ReactNode }) => <h1 className="text-base font-bold mb-2 mt-3 first:mt-0">{children}</h1>,
@@ -42,6 +55,7 @@ export const markdownComponents = {
   a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
     <a href={href} className="underline underline-offset-2 hover:opacity-80" target="_blank" rel="noopener noreferrer">{children}</a>
   ),
+  img: MarkdownImage,
 };
 
 export function MarkdownBlock({ text, className }: { text: string; className?: string }) {

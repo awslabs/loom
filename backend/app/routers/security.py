@@ -25,7 +25,7 @@ from app.models.managed_role import ManagedRole
 from app.models.authorizer_config import AuthorizerConfig
 from app.models.authorizer_credential import AuthorizerCredential
 from app.models.agent import Agent
-from app.routers.utils import check_resource_group_access, require_group_tag
+from app.routers.utils import check_resource_group_access, filter_visible_resources, require_group_tag
 from app.services.security import get_role_policy_details
 from app.services.secrets import store_secret, get_secret, delete_secret, put_secret_value
 
@@ -168,9 +168,11 @@ def create_role(request: CreateRoleRequest, user: UserInfo = Depends(require_sco
 
 @router.get("/roles")
 def list_roles(user: UserInfo = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
-    """List managed roles. security:read returns all; agent:write returns group-filtered roles."""
+    """List managed roles. security:read is filtered to the caller's loom:group (super-admins see all); agent:write returns group-filtered roles."""
     if "security:read" in user.scopes:
-        roles = db.query(ManagedRole).order_by(ManagedRole.id).all()
+        from app.routers.utils import filter_visible_resources
+        all_roles = db.query(ManagedRole).order_by(ManagedRole.id).all()
+        roles = filter_visible_resources(all_roles, user, resource_label="role")
     elif "agent:write" in user.scopes:
         user_group = _get_user_group(user)
         all_roles = db.query(ManagedRole).order_by(ManagedRole.id).all()
@@ -356,10 +358,11 @@ def create_authorizer(request: CreateAuthorizerRequest, user: UserInfo = Depends
 
 @router.get("/authorizers")
 def list_authorizers(user: UserInfo = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
-    """List all authorizer configurations. Requires security:read, agent:write, or agent:read."""
+    """List the authorizer configurations in the caller's groups. Requires security:read, agent:write, or agent:read."""
     if "security:read" not in user.scopes and "agent:write" not in user.scopes and "agent:read" not in user.scopes:
         raise HTTPException(status_code=403, detail="Missing required scope: security:read, agent:write, or agent:read")
     auths = db.query(AuthorizerConfig).order_by(AuthorizerConfig.id).all()
+    auths = filter_visible_resources(auths, user, resource_label="authorizer")
     return [a.to_dict() for a in auths]
 
 

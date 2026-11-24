@@ -313,7 +313,7 @@ def list_connectors(
         has_key = False
         if server.auth_type == "api_key":
             try:
-                get_secret(user_api_key_secret_name(server.name, user.sub), region)
+                get_secret(user_api_key_secret_name(server, user.sub), region)
                 has_key = True
             except Exception:
                 pass
@@ -404,6 +404,20 @@ def update_mcp_server(
 
     moved_endpoint = server.endpoint_url != previous_endpoint
 
+    if moved_endpoint or server.name != previous_name:
+        # Per-user API keys were entered for the previous host. Advancing the
+        # epoch moves every reader (invoke, tool routes and the path embedded at
+        # the next deploy) to an empty namespace, so none of them follows the
+        # move — see services.mcp.user_api_key_secret_name. A rename also
+        # advances it: a legacy row's name-keyed namespace changes with the
+        # name anyway, and switching it to the id-keyed path stops a rename from
+        # landing on keys left behind under that name by another server.
+        server.user_key_epoch = (server.user_key_epoch or 0) + 1
+        logger.warning(
+            "Per-user API keys for MCP server %s now need re-entry: %s changed.",
+            server.id, "endpoint_url" if moved_endpoint else "name",
+        )
+
     if new_api_key:
         region = os.getenv("AWS_REGION", "us-east-1")
         store_secret(
@@ -419,9 +433,13 @@ def update_mcp_server(
         )
         server.has_oauth2_secret = "true"
         server.oauth2_client_secret = None
-    elif moved_endpoint and server.has_oauth2_secret == "true":
+    elif moved_endpoint and (server.has_oauth2_secret == "true" or server.oauth2_client_secret):
         # Same rule for the M2M client secret: it is exchanged for a token
         # that is then sent to endpoint_url, so it must not follow the move.
+        # Rows from before the Secrets Manager migration hold the secret in
+        # the plaintext column with has_oauth2_secret NULL, and the clear used
+        # to key on the flag alone, so their secret followed the move. Either
+        # marker now means there is a secret to clear.
         try:
             delete_secret(oauth2_client_secret_name(server.id), region)
         except Exception as e:
@@ -664,7 +682,7 @@ def set_user_api_key(
     server = _get_server_or_404(server_id, db, user)
     region = os.getenv("AWS_REGION", "us-east-1")
     store_secret(
-        user_api_key_secret_name(server.name, user.sub),
+        user_api_key_secret_name(server, user.sub),
         request.api_key,
         region,
         description=f"User API key for MCP server {server.name}",
@@ -682,7 +700,7 @@ def get_user_api_key_status(
     region = os.getenv("AWS_REGION", "us-east-1")
     try:
         from app.services.secrets import get_secret
-        get_secret(user_api_key_secret_name(server.name, user.sub), region)
+        get_secret(user_api_key_secret_name(server, user.sub), region)
         return UserApiKeyStatusResponse(has_user_api_key=True)
     except Exception:
         return UserApiKeyStatusResponse(has_user_api_key=False)
@@ -696,7 +714,7 @@ def delete_user_api_key(
 ) -> UserApiKeyStatusResponse:
     server = _get_server_or_404(server_id, db, user)
     region = os.getenv("AWS_REGION", "us-east-1")
-    delete_secret(user_api_key_secret_name(server.name, user.sub), region)
+    delete_secret(user_api_key_secret_name(server, user.sub), region)
     return UserApiKeyStatusResponse(has_user_api_key=False)
 
 

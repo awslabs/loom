@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies.auth import UserInfo, require_scopes
-from app.routers.utils import get_agent_or_404
+from app.routers.utils import assert_trace_session_readable, get_agent_or_404, get_session_or_404
 from app.models.agent import Agent
 from app.routers.agents import derive_log_group
 from app.services.otel import (
@@ -98,6 +98,9 @@ def get_session_traces(
     # bodies carry the model's input/output, so these routes return the same
     # conversation content as the session readers and were a way around both.
     agent = get_agent_or_404(agent_id, db, user)
+    # And the session-owner rule, as GET /sessions/{sid} applies it: the group
+    # check alone let a t-user list another user's traces in the same group.
+    get_session_or_404(agent_id, session_id, db, user)
 
     if not agent.runtime_id:
         return TraceListResponse(traces=[])
@@ -153,5 +156,8 @@ def get_trace_detail(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Trace not found"
         )
+    # Addressed by trace id, so the owner check has to come from the trace's
+    # own session.id rather than the URL.
+    assert_trace_session_readable(agent, detail.get("session_id"), db, user)
 
     return TraceDetailResponse(**detail)

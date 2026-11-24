@@ -313,7 +313,11 @@ def update_a2a_agent(
         )
         agent.has_oauth2_secret = "true"
         agent.oauth2_client_secret = None
-    elif agent.base_url != previous_base_url and agent.has_oauth2_secret == "true":
+    elif agent.base_url != previous_base_url and (
+        agent.has_oauth2_secret == "true" or agent.oauth2_client_secret
+    ):
+        # Either marker: pre-migration rows keep the secret in the plaintext
+        # column with has_oauth2_secret NULL (see the MCP update route).
         try:
             delete_secret(a2a_secret_name(agent), region)
         except Exception as e:

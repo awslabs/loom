@@ -11,6 +11,7 @@ from src.config import (
     MemoryConfig,
 )
 from src.agent import build_agent, build_model
+from src.integrations.approval import ApprovalPlugin
 from src.telemetry import TelemetryPlugin
 from src.integrations.memory import MemoryPlugin
 
@@ -44,9 +45,10 @@ class TestBuildAgent(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.instruction, "Test prompt")
         self.assertEqual(agent.tools, [])
         self.assertIsNone(ci)
-        # TelemetryPlugin is always added
-        self.assertEqual(len(plugins), 1)
-        self.assertIsInstance(plugins[0], TelemetryPlugin)
+        # ApprovalPlugin (first) and TelemetryPlugin are always added
+        self.assertEqual(len(plugins), 2)
+        self.assertIsInstance(plugins[0], ApprovalPlugin)
+        self.assertIsInstance(plugins[1], TelemetryPlugin)
 
     @patch("src.agent.build_toolsets")
     async def test_agent_with_mcp_tools(self, mock_build_toolsets: MagicMock) -> None:
@@ -89,9 +91,10 @@ class TestBuildAgent(unittest.IsolatedAsyncioTestCase):
         config = _make_config(memory_enabled=False)
         agent, plugins, ci, _matcher = await build_agent(config)
 
-        # Only TelemetryPlugin, no MemoryPlugin
-        self.assertEqual(len(plugins), 1)
-        self.assertIsInstance(plugins[0], TelemetryPlugin)
+        # Only the always-on plugins, no MemoryPlugin
+        self.assertEqual(len(plugins), 2)
+        self.assertIsInstance(plugins[0], ApprovalPlugin)
+        self.assertIsInstance(plugins[1], TelemetryPlugin)
 
     async def test_telemetry_plugin_added(self) -> None:
         config = _make_config()

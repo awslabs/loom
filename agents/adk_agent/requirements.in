@@ -1,4 +1,4 @@
-google-adk[a2a,extensions,mcp]>=1.0.0
+google-adk[a2a,extensions,mcp]>=2.13.0
 bedrock-agentcore>=0.1.0
 boto3>=1.43.2
 mcp>=1.0.0,<2.0.0

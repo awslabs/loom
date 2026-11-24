@@ -108,10 +108,12 @@ ADK's HITL primitive (`ToolContext.request_confirmation()` + a `require_confirma
 
 - For tools built by this package, a per-tool-name predicate closure is attached via `FunctionTool(func, require_confirmation=predicate)`.
 - For framework-generated tools (MCP), `apply_confirmation_to_tools()` monkey-patches `check_require_confirmation` directly onto each resolved tool instance, since MCP tool names aren't known until the remote server is queried.
+- `ApprovalPlugin` (registered first in the plugin list) enforces the same policies in `before_tool_callback` for **every** tool call, whatever the tool's class. This is the actual enforcement point: `AgentTool` (how A2A agents are attached) never consulted `check_require_confirmation` itself, so the guarantee can't depend on which ADK version an artifact resolves.
+- Policy rules match each `code_interpreter_*` tool under its own name and under `code_interpreter`, the name Strands uses for its single code interpreter tool, so one rule gates both frameworks.
 
 Approval decisions resume via a synthetic `adk_request_confirmation` FunctionCall in session history, translated in `handler.py` to/from Loom's existing `interruptResponse` wire contract — callers see no difference from `strands_agent`.
 
-**Known parity gap:** MCP elicitation (Strands' `ctx.elicit()` / `{"elicitation": ...}` event) and the `{"token_info": ...}` OBO-token-metadata event are not wired for the WebSocket (`ws_invoke`) path — a tool requiring approval over WebSocket surfaces an error directing the client to fall back to the HTTP `interruptResponse` flow.
+**Known parity gap:** MCP elicitation (Strands' `ctx.elicit()` / `{"elicitation": ...}` event) and the `{"token_info": ...}` OBO-token-metadata event are not wired for the WebSocket (`ws_invoke`) path — approval policies are applied on that path too (the backend sends them with every prompt), and a tool requiring approval over WebSocket surfaces an error directing the client to fall back to the HTTP `interruptResponse` flow.
 
 ### Bedrock Guardrails
 

@@ -114,6 +114,50 @@ def assert_session_readable(session, user: UserInfo, agent) -> None:
         )
 
 
+def assert_can_read_all_sessions(user: UserInfo) -> None:
+    """For views that mix every user's conversations on an agent.
+
+    Agent-wide runtime logs and vended logs interleave every session's prompts
+    and answers, so they can't be filtered to one owner. Only the callers who
+    may read other people's sessions anyway (admins for the agent's group, per
+    assert_session_readable) may see them. get_agent_or_404 must already have
+    run, so the group check is done.
+    """
+    if "t-admin" not in user.groups:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Agent-wide logs include other users' conversations; open a session's logs instead",
+        )
+
+
+def assert_trace_session_readable(agent, session_id: str | None, db: Session, user: UserInfo) -> None:
+    """Apply the session-owner rule to content addressed by trace id.
+
+    A trace id isn't a session id, so routes that take one skipped the owner
+    check that get_session_or_404 applies, and returned another user's prompt
+    and answer from the same group. The trace's own session.id attribute ties
+    it back to a session row, which is then checked like any session read. A
+    trace that can't be tied to a session this caller may read is refused
+    rather than served, except to admins, who may read any session.
+    """
+    from app.models.session import InvocationSession
+
+    if "t-admin" in user.groups:
+        return
+    session = None
+    if session_id:
+        session = db.query(InvocationSession).filter(
+            InvocationSession.agent_id == agent.id,
+            InvocationSession.session_id == session_id,
+        ).first()
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this trace",
+        )
+    assert_session_readable(session, user, agent)
+
+
 def visible_agent_ids(db: Session, user: UserInfo) -> list[int] | None:
     """Agent IDs the caller may see, or None when unrestricted (super-admin).
 

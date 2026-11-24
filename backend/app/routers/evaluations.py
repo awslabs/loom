@@ -38,11 +38,11 @@ from app.models.evaluation import (
 from app.models.invocation import Invocation
 from app.models.session import InvocationSession
 from app.routers.agents import derive_log_group
-from app.routers.utils import get_agent_or_404
+from app.routers.utils import assert_trace_session_readable, get_agent_or_404
 from app.services import evaluations as evals
 from app.services.agentcore import invoke_agent
 from app.services.cognito import get_cognito_token
-from app.services.otel import fetch_otel_events
+from app.services.otel import fetch_otel_events, parse_otel_trace_detail
 from app.services.secrets import get_secret
 
 logger = logging.getLogger(__name__)
@@ -328,7 +328,9 @@ def get_evaluation_results(
 def get_evaluated_exchange(
     agent_id: int,
     trace_id: str,
-    user: UserInfo = Depends(require_scopes("agent:read")),
+    # session:read, not agent:read: this returns a conversation's prompt and
+    # answer, the same content the session readers return.
+    user: UserInfo = Depends(require_scopes("session:read")),
     db: Session = Depends(get_db),
 ) -> EvaluatedExchangeResponse:
     """The prompt and answer of an evaluated trace, from the runtime's OTEL logs."""
@@ -338,6 +340,10 @@ def get_evaluated_exchange(
     for log_group in sorted(_agent_target(agent).log_groups):
         events = fetch_otel_events(log_group=log_group, region=agent.region, filter_pattern=f'"{trace_id}"')
         if events:
+            # The session-owner rule, from the trace's own session.id: the
+            # group check alone returned another user's prompt and answer.
+            detail = parse_otel_trace_detail(events, trace_id) or {}
+            assert_trace_session_readable(agent, detail.get("session_id"), db, user)
             return EvaluatedExchangeResponse(**evals.extract_exchange(events))
     return EvaluatedExchangeResponse(prompt=None, answer=None)
 

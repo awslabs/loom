@@ -1705,7 +1705,7 @@ async def invoke_agent_endpoint(
                 # Per-user keys are stored by the immutable IdP subject.  The
                 # actor_id is a separately formatted value used by AgentCore
                 # sessions and does not identify the Secrets Manager entry.
-                secret_name = user_api_key_secret_name(server.name, user.sub)
+                secret_name = user_api_key_secret_name(server, user.sub)
                 entry["auth"] = {
                     "type": "api_key",
                     "credentials_secret_arn": secret_name,
@@ -1776,10 +1776,7 @@ async def invoke_agent_endpoint(
     logger.info("Elicitation support resolved: has_elicitation_connector=%s", has_elicitation_connector)
 
     # Resolve active approval policies for the agent
-    approval_policies_payload: list[dict[str, Any]] | None = None
-    active_policies = db.query(ApprovalPolicy).filter(ApprovalPolicy.enabled == True).all()  # noqa: E712
-    if active_policies:
-        approval_policies_payload = [p.to_dict() for p in active_policies]
+    approval_policies_payload = _active_approval_policies(db) or None
 
     # Dispatch to harness or standard invoke path
     if agent.source == "harness" and agent.harness_id:
@@ -1847,6 +1844,15 @@ async def invoke_agent_endpoint(
             "X-Accel-Buffering": "no",
         }
     )
+
+
+def _active_approval_policies(db: Session) -> list[dict[str, Any]]:
+    """Every enabled approval policy, in the shape the agents expect.
+
+    One loader for both invoke paths: the WebSocket route used to skip it, so
+    human-in-the-loop policies applied to HTTP invoke and not to the socket.
+    """
+    return [p.to_dict() for p in db.query(ApprovalPolicy).filter(ApprovalPolicy.enabled == True).all()]  # noqa: E712
 
 
 @router.websocket("/{agent_id}/ws")
@@ -1979,6 +1985,7 @@ async def invoke_agent_websocket(
                 dynamic_mcp_servers=dynamic_mcp_servers,
                 runtime_model_id=data.get("model_id"),
                 guardrail=ws_guardrail,
+                approval_policies=_active_approval_policies(db),
             )
 
             try:

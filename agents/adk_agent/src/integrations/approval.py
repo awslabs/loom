@@ -38,6 +38,7 @@ import os
 import types
 from typing import Any, Callable
 
+from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
@@ -53,10 +54,33 @@ def _load_policies() -> list[dict[str, Any]]:
         return []
 
 
+_CODE_INTERPRETER = "code_interpreter"
+
+
+def _match_names(tool_name: str) -> list[str]:
+    """Every name a tool call answers to for policy matching.
+
+    This agent exposes one code interpreter tool per operation
+    (``code_interpreter_execute_code``, ``code_interpreter_execute_command``,
+    ...), while Strands exposes a single ``code_interpreter`` tool. A rule
+    named ``code_interpreter`` paused Strands and missed every ADK operation.
+    Each ``code_interpreter_*`` call now also answers to ``code_interpreter``,
+    the same pairing the Strands agent applies in the other direction. This
+    only ever adds names, so it can only make a rule match more calls.
+    """
+    if tool_name.startswith(f"{_CODE_INTERPRETER}_"):
+        return [tool_name, _CODE_INTERPRETER]
+    return [tool_name]
+
+
 def _matches_tool(tool_name: str, rules: list[str]) -> bool:
     if not rules:
         return True
-    return any(fnmatch.fnmatch(tool_name, pattern) for pattern in rules)
+    return any(
+        fnmatch.fnmatch(name, pattern)
+        for name in _match_names(tool_name)
+        for pattern in rules
+    )
 
 
 def _matches_agent(policy: dict[str, Any], agent_tags: dict[str, str] | None = None) -> bool:
@@ -192,6 +216,63 @@ def apply_confirmation_to_tools(tools: list[BaseTool], matcher: ApprovalPolicyMa
             return True
 
         tool.check_require_confirmation = types.MethodType(_check_require_confirmation, tool)
+
+
+class ApprovalPlugin(BasePlugin):
+    """Enforces approval policies for every tool call, whatever the tool's class.
+
+    ``apply_confirmation_to_tools`` patches ``check_require_confirmation`` onto
+    each tool, but whether that method is ever consulted is up to ADK: each
+    tool class used to check it in its own ``run_async``, and ``AgentTool``
+    (how A2A agents are attached) never did, so an A2A call ran with no
+    approval under the same rule that paused every other tool. ADK versions
+    since have added a generic gate, but the guarantee shouldn't rest on which
+    ADK version an artifact happens to resolve.
+
+    A plugin's ``before_tool_callback`` runs ahead of every tool call, for every
+    tool, so this is where the policy is enforced. The patched predicate stays
+    in place and agrees with this callback, so on a resumed call both pass.
+    """
+
+    def __init__(self, matcher: ApprovalPolicyMatcher) -> None:
+        super().__init__(name="loom_approval")
+        self.matcher = matcher
+
+    async def before_tool_callback(
+        self,
+        *,
+        tool: BaseTool,
+        tool_args: dict[str, Any],
+        tool_context: ToolContext,
+    ) -> dict[str, Any] | None:
+        approval_key = f"{tool.name}-approval"
+        if tool_context.state.get(approval_key) == "t":
+            return None
+        policy = self.matcher.find_matching_policy(tool.name)
+        if policy is None:
+            return None
+        if policy.get("approval_mode", "require_approval") == "notify_only":
+            return None
+
+        confirmation = tool_context.tool_confirmation
+        if confirmation is None:
+            tool_context.request_confirmation(
+                hint=(
+                    f"Please approve or reject the tool call {tool.name}() by"
+                    " responding with a FunctionResponse with an expected"
+                    " ToolConfirmation payload."
+                ),
+            )
+            # The pause isn't a result for the model to summarize; without
+            # this the flow re-invokes the model, which calls the tool again.
+            tool_context.actions.skip_summarization = True
+            return {"error": "This tool call requires confirmation, please approve or reject."}
+        if not confirmation.confirmed:
+            return {"error": "This tool call is rejected."}
+        payload = confirmation.payload or {}
+        if isinstance(payload, dict) and payload.get("trust"):
+            tool_context.state[approval_key] = "t"
+        return None
 
 
 def check_access(

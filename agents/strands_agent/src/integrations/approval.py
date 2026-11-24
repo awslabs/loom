@@ -41,10 +41,55 @@ def _load_policies() -> list[dict[str, Any]]:
         return []
 
 
-def _matches_tool(tool_name: str, rules: list[str]) -> bool:
+# Agent-state key the WebSocket handler sets for the duration of a run. That
+# channel has no way to relay an approval request and resume, so a gated tool
+# is refused outright instead of interrupting (see ApprovalHook._check_approval).
+NON_INTERACTIVE_STATE_KEY = "loom_approvals_non_interactive"
+
+_CODE_INTERPRETER = "code_interpreter"
+
+
+def _snake(name: str) -> str:
+    out = []
+    for ch in name:
+        if ch.isupper() and out:
+            out.append("_")
+        out.append(ch.lower())
+    return "".join(out)
+
+
+def _match_names(tool_name: str, tool_input: Any = None) -> list[str]:
+    """Every name a tool call answers to for policy matching.
+
+    Strands exposes the code interpreter as one tool, ``code_interpreter``,
+    with the operation in its input (``action.type``, e.g. ``executeCode``);
+    the ADK agent exposes one tool per operation
+    (``code_interpreter_execute_code``). A rule written against either naming
+    used to miss the other framework's calls. Both agents now match a call
+    against both spellings, so ``code_interpreter`` gates every operation and
+    ``code_interpreter_execute_code`` gates that operation, in either framework.
+    This only ever adds names, so it can only make a rule match more calls.
+    """
+    names = [tool_name]
+    if tool_name == _CODE_INTERPRETER and isinstance(tool_input, dict):
+        payload = tool_input.get("code_interpreter_input", tool_input)
+        action = payload.get("action") if isinstance(payload, dict) else None
+        action_type = action.get("type") if isinstance(action, dict) else None
+        if isinstance(action_type, str) and action_type:
+            names.append(f"{_CODE_INTERPRETER}_{_snake(action_type)}")
+    elif tool_name.startswith(f"{_CODE_INTERPRETER}_"):
+        names.append(_CODE_INTERPRETER)
+    return names
+
+
+def _matches_tool(tool_name: str, rules: list[str], tool_input: Any = None) -> bool:
     if not rules:
         return True
-    return any(fnmatch.fnmatch(tool_name, pattern) for pattern in rules)
+    return any(
+        fnmatch.fnmatch(name, pattern)
+        for name in _match_names(tool_name, tool_input)
+        for pattern in rules
+    )
 
 
 def _matches_agent(policy: dict[str, Any], agent_tags: dict[str, str] | None = None) -> bool:
@@ -96,7 +141,7 @@ class ApprovalHook(HookProvider):
 
     def _check_approval(self, event: BeforeToolCallEvent) -> None:
         tool_name = event.tool_use["name"]
-        policy = self._find_matching_policy(tool_name)
+        policy = self._find_matching_policy(tool_name, event.tool_use.get("input"))
         if policy is None:
             return
 
@@ -106,6 +151,16 @@ class ApprovalHook(HookProvider):
 
         approval_key = f"{tool_name}-approval"
         if event.agent.state.get(approval_key) == "t":
+            return
+
+        if event.agent.state.get(NON_INTERACTIVE_STATE_KEY):
+            # No way to ask on this channel, so refuse rather than run the tool
+            # unapproved or leave a pending interrupt nobody can answer.
+            event.cancel_tool = (
+                f"{tool_name} requires approval, which can't be requested on this "
+                "connection. Run this request again from a channel that supports approvals."
+            )
+            logger.info("Refused gated tool %s on a non-interactive channel", tool_name)
             return
 
         tool_input = event.tool_use.get("input", {})
@@ -131,7 +186,7 @@ class ApprovalHook(HookProvider):
         if approval.lower() == "t":
             event.agent.state.set(approval_key, "t")
 
-    def _find_matching_policy(self, tool_name: str) -> dict[str, Any] | None:
+    def _find_matching_policy(self, tool_name: str, tool_input: Any = None) -> dict[str, Any] | None:
         for policy in self.policies:
             if not policy.get("enabled", True):
                 continue
@@ -139,7 +194,7 @@ class ApprovalHook(HookProvider):
                 continue
             if not _matches_agent(policy, self.agent_tags):
                 continue
-            if _matches_tool(tool_name, policy.get("tool_match_rules", [])):
+            if _matches_tool(tool_name, policy.get("tool_match_rules", []), tool_input):
                 return policy
         return None
 
